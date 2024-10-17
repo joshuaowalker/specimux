@@ -10,9 +10,7 @@ community.  Whereas minibar.py includes several processing methods supporting a 
 designs and matching regimes, specimux focuses specifically on high precision for demultiplexing
 dual-indexed sequences.  
 
-Developed as a volunteer contribution in response to the growing needs of initiatives such as the
-Continental MycoBlitz Programs, Fungal Diversity Survey (FunDiS), and the Ohio Mushroom DNA Lab
-(OMDL), Specimux attempts to fill a small niche in processing large-scale, community-driven
+Developed as a volunteer contribution, Specimux attempts to fill a small niche in processing large-scale, community-driven
 fungal DNA barcoding projects. 
 
 The tool was developed and tested using the Mycomap ONT037 dataset, which comprises 768 specimens
@@ -49,26 +47,33 @@ python specimux.py -h
 Here are the main options available:
 
 ```
-usage: specimux.py [-h] [--min-length MIN_LENGTH] [--max-length MAX_LENGTH] [-n NUM_SEQS] [-p PERCENT_MATCH]
-                   [-e INDEX_EDIT_DISTANCE] [-E PRIMER_EDIT_DISTANCE] [-l SEARCH_LEN] [-A AMBIGUITY_THRESHOLD] [-NQ] [-F]
-                   [-P OUTPUT_FILE_PREFIX] [-D OUTPUT_DIR] [--color] [--no-trim] [--diagnostics] [--debug] [-t THREADS]
-                   [-v]
+usage: specimux.py [-h] [--min-length MIN_LENGTH] [--max-length MAX_LENGTH]
+                   [-n NUM_SEQS] [-p PERCENT_MATCH] [-e INDEX_EDIT_DISTANCE]
+                   [-E PRIMER_EDIT_DISTANCE] [-l SEARCH_LEN]
+                   [-A AMBIGUITY_THRESHOLD] [--cluster-sequences] [-F]
+                   [-P OUTPUT_FILE_PREFIX] [-D OUTPUT_DIR] [--color]
+                   [--trim {none,tails,primers}] [--diagnostics] [--debug]
+                   [-t THREADS] [-v]
                    barcode_file sequence_file
 
 Specimux: Demultiplex MinION sequence by dual barcode indexes and primers.
 
 positional arguments:
   barcode_file          File containing barcode information
-  sequence_file         Sequence file in Fasta or Fastq format, gzipped or plain text
+  sequence_file         Sequence file in Fasta or Fastq format, gzipped or
+                        plain text
 
 options:
   -h, --help            show this help message and exit
   --min-length MIN_LENGTH
-                        Minimum sequence length. Shorter sequences will be skipped (default: 400)
+                        Minimum sequence length. Shorter sequences will be
+                        skipped (default: 400)
   --max-length MAX_LENGTH
-                        Maximum sequence length. Longer sequences will be skipped (default: 1400)
+                        Maximum sequence length. Longer sequences will be
+                        skipped (default: 1400)
   -n NUM_SEQS, --num-seqs NUM_SEQS
-                        Number of sequences to read from file (e.g., -n 100 or -n 102,3)
+                        Number of sequences to read from file (e.g., -n 100 or
+                        -n 102,3)
   -p PERCENT_MATCH, --percent-match PERCENT_MATCH
                         Percentage match (default: 0.75)
   -e INDEX_EDIT_DISTANCE, --index-edit-distance INDEX_EDIT_DISTANCE
@@ -76,18 +81,25 @@ options:
   -E PRIMER_EDIT_DISTANCE, --primer-edit-distance PRIMER_EDIT_DISTANCE
                         Primer edit distance value, overrides -p
   -l SEARCH_LEN, --search-len SEARCH_LEN
-                        Length to search for index and primer at start and end of sequence (default: 80)
+                        Length to search for index and primer at start and end
+                        of sequence (default: 80)
   -A AMBIGUITY_THRESHOLD, --ambiguity-threshold AMBIGUITY_THRESHOLD
-                        Threshold for considering the edit distance between two barcodes to be different
-  --quality-weighting   Enable quality weighting for barcode matches (experimental)
+                        Threshold for considering the edit distance between
+                        two barcodes to be different
+  --cluster-sequences   Cluster sequences based on alignment and resolve
+                        ambiguities based on cluster identity
   -F, --output-to-files
                         Create individual sample files for sequences
   -P OUTPUT_FILE_PREFIX, --output-file-prefix OUTPUT_FILE_PREFIX
-                        Prefix for individual files when using -F (default: sample_)
+                        Prefix for individual files when using -F (default:
+                        sample_)
   -D OUTPUT_DIR, --output-dir OUTPUT_DIR
-                        Directory for individual files when using -F (default: .)
-  --color               Highlight barcode matches in blue, primer matches in green
-  --no-trim             Don't trim before the forward barcode or after the reverse barcode
+                        Directory for individual files when using -F (default:
+                        .)
+  --color               Highlight barcode matches in blue, primer matches in
+                        green
+  --trim {none,tails,primers}
+                        trimming to apply
   --diagnostics         Output extra diagnostics
   --debug               Enable debug logging
   -t THREADS, --threads THREADS
@@ -131,6 +143,12 @@ Specimux provides options to filter sequences based on length:
 - `--max-length` parameter sets the maximum acceptable sequence length
 - Helps exclude potentially problematic sequences (e.g., truncated reads, artifacts, chimeras)
 
+### 6. Clustering (experimental)
+
+Specimux provides a clustering mode which implements a greedy clustering algorithm based on 
+sequence alignment identity.  Reads which match only a single barcode can be assigned to a
+specimen based on cluster matching.  Note that this feature is still under active development
+and testing and may eventually be removed.
 
 ## Multiprocessing
 
@@ -188,16 +206,27 @@ We recommend users experiment with different parameter settings on a subset of t
 
 ## Sequence Output Options
 
-By default, Specimux trims sequences to the start of the forward barcode and the end of the reverse barcode if both are found. If either barcode is not found, the sequence is not trimmed. This behavior can be modified using the following options:
+By default, Specimux trims sequences to remove the forward and reverse primers, barcodes, and any other information between the 
+primer and the respective end of the sequence.  If primers are not found, the sequence is not trimmed.  This behavior can be 
+modified using the following options:
 
 ### No Trimming
 
-You can disable all trimming with the `--no-trim` option:
+You can disable all trimming with the `--trim none` option:
 ```
-python specimux.py --no-trim barcode_file sequence_file
+python specimux.py --trim none barcode_file sequence_file
 ```
 
 This will output the full, unmodified sequences regardless of barcode and primer matches.
+
+### Trimming tails only
+
+You can leave the barcodes and primers intact, removing all other tails, with the `--trim tails` option:
+```
+python specimux.py --trim tails barcode_file sequence_file
+```
+Note that typically many sequences do not match one or more barcodes.  In this case, the sequence is
+trimmed based on the expected primer and barcode lengths.
 
 ### Color Output
 
@@ -259,3 +288,5 @@ The header line is auto-detected by default.
 ## References
 
 [1]: Buschmann T, Bystrykh LV. Levenshtein error-correcting barcodes for multiplexed DNA sequencing. BMC Bioinformatics. 2013 Sep 11;14:272. doi: 10.1186/1471-2105-14-272. PMID: 24021088; PMCID: PMC3853030.
+
+[2]: Henrik Krehenwinkel, Aaron Pomerantz, James B. Henderson, Susan R. Kennedy, Jun Ying Lim, Varun Swamy, Juan Diego Shoobridge, Nipam H. Patel, Rosemary G. Gillespie, Stefan Prost.  Nanopore sequencing of long ribosomal DNA amplicons enables portable and simple biodiversity assessments with high phylogenetic resolution across broad taxonomic scale. 
