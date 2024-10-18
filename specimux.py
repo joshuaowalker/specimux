@@ -94,7 +94,7 @@ class Primer(Enum):
 
 class SequenceMatch:
 
-    def __init__(self, sequence_length, ambiguity_threshold):
+    def __init__(self, sequence_length, ambiguity_threshold, barcode_length):
         self.sequence_length = sequence_length
         self.p1_match: MatchResult = None
         self._b1_matches: List[Tuple[str, MatchResult, float]] = []
@@ -103,7 +103,7 @@ class SequenceMatch:
         self._p1: str = None
         self._p2: str = None
         self.ambiguity_threshold = ambiguity_threshold
-        self._trim_locations = None
+        self._barcode_length = barcode_length
 
     def add_barcode_match(self, match: MatchResult, barcode: str, reverse: bool, which: Barcode):
         if reverse:
@@ -202,32 +202,46 @@ class SequenceMatch:
 
         return (s, e)
 
-    def trim_locations(self):
-        if self._trim_locations is None:
-            s = -1
-            e = -1
-            for b in self._b1_matches:
-                for l in b[1].locations():
-                    if s == -1: s = l[0]
-                    else: s = min(s, l[0])
-            for b in self._b2_matches:
-                for l in b[1].locations():
-                    if e == -1: e = l[1] + 1
-                    else: e = max(e, l[1] + 1)
+    def interbarcode_extent(self):
+        s = 0
+        e = self.sequence_length
+        if self.p1_match:
+            s = self.p1_match.location()[0]
+        if self.p2_match:
+            e = self.p2_match.location()[1] + 1
 
-            if s == -1: s = 0
-            if e == -1: e = self.sequence_length
+        return (s, e)
 
-            for b in self._b1_matches: b[1].adjust_start(-1 * s)
-            for b in self._b2_matches: b[1].adjust_start(-1 * s)
-            if self.p1_match:
-                self.p1_match.adjust_start(-1 * s)
-            if self.p2_match:
-                self.p2_match.adjust_start(-1 * s)
+    def intertail_extent(self):
+        ps, pe = self.interprimer_extent()
 
-            self._trim_locations = (s, e)
+        s = -1
+        e = -1
+        for b in self._b1_matches:
+            for l in b[1].locations():
+                if s == -1:
+                    s = l[0]
+                else:
+                    s = min(s, l[0])
+        for b in self._b2_matches:
+            for l in b[1].locations():
+                if e == -1:
+                    e = l[1] + 1
+                else:
+                    e = max(e, l[1] + 1)
 
-        return self._trim_locations
+        if s == -1: s = max(0, ps - self._barcode_length)
+        if e == -1: e = min(self.sequence_length, pe + self._barcode_length)
+
+        return (s, e)
+
+    def trim_locations(self, start):
+        for b in self._b1_matches: b[1].adjust_start(-1 * start)
+        for b in self._b2_matches: b[1].adjust_start(-1 * start)
+        if self.p1_match:
+            self.p1_match.adjust_start(-1 * start)
+        if self.p2_match:
+            self.p2_match.adjust_start(-1 * start)
 
     def distance_code(self):
         p1d = self.p1_match.distance() if self.p1_match else -1
@@ -552,6 +566,11 @@ def get_quality_seq(seq):
     else:
         return [40]*len(seq)
 
+ARG_TRIM_PRIMERS = "primers"
+ARG_TRIM_BARCODES = "barcodes"
+ARG_TRIM_TAILS = "tails"
+ARG_TRIM_NONE = "none"
+
 def create_write_operation(sample_id, args, seq, match, specimens):
     formatted_seq = seq.seq
     quality_scores = get_quality_seq(seq)
@@ -559,19 +578,17 @@ def create_write_operation(sample_id, args, seq, match, specimens):
     s = 0
     e = len(formatted_seq)
 
-    if args.trim == "primers":
+    if args.trim == ARG_TRIM_PRIMERS:
         (s, e) = match.interprimer_extent()
-    elif args.trim == "tails":
-        if match.has_b1_match() and match.has_b2_match():
-            (s, e) = match.trim_locations()
-        else: #best effort guess at barcode extent
-            (s, e) = match.interprimer_extent()
-            s = max(0, s - specimens.primer_length(Primer.P1) - specimens.b_length())
-            e = min(len(formatted_seq), e + specimens.primer_length(Primer.P2) + specimens.b_length())
+    elif args.trim == ARG_TRIM_BARCODES:
+        (s, e) = match.interbarcode_extent()
+    elif args.trim == ARG_TRIM_TAILS:
+        (s, e) = match.intertail_extent()
 
-    if args.trim != "none":
+    if args.trim != ARG_TRIM_NONE:
         formatted_seq = seq.seq[s:e]
         quality_scores = quality_scores[s:e]
+        match.trim_locations(s)
 
     return WriteOperation(
         sample_id=sample_id,
@@ -609,7 +626,7 @@ def process_sequences(seq_records, parameters, specimens, clusters, args):
         sample_id = SAMPLE_ID_UNKNOWN
 
         classification = None
-        match = SequenceMatch(len(seq), parameters.ambiguity_threshold)
+        match = SequenceMatch(len(seq), parameters.ambiguity_threshold, specimens.b_length())
 
         if args.min_length != -1 and len(seq) < args.min_length:
             classification = CLASS_SHORT_SEQ
@@ -715,7 +732,7 @@ def match_sample(match, sample_id, specimens):
 
 
 def match_sequence(args, parameters, seq, rseq, specimens):
-    match = SequenceMatch(len(seq), parameters.ambiguity_threshold)
+    match = SequenceMatch(len(seq), parameters.ambiguity_threshold, specimens.b_length())
 
     match_one_end(match, parameters, specimens, rseq, True, Primer.P1, Barcode.B1)
 
@@ -812,6 +829,9 @@ def color_sequence(seq, match, quality_scores):
     def color_region(location, color):
         if location is not None:
             start, end = location
+            if start < 0 or end < 0:
+                return
+
             for i in range(start, end + 1):  # Include the end position
                 if i < seq_len:
                     if quality_scores[i] < 10:
@@ -892,7 +912,7 @@ def parse_args(argv):
     parser.add_argument("-P", "--output-file-prefix", default="sample_", help="Prefix for individual files when using -F (default: sample_)")
     parser.add_argument("-D", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
     parser.add_argument("--color", action="store_true", help="Highlight barcode matches in blue, primer matches in green")
-    parser.add_argument("--trim", choices=["none", "tails", "primers"], default="primers", help="trimming to apply")
+    parser.add_argument("--trim", choices=[ARG_TRIM_NONE, ARG_TRIM_TAILS, ARG_TRIM_BARCODES, ARG_TRIM_PRIMERS], default=ARG_TRIM_BARCODES, help="trimming to apply")
     parser.add_argument("--diagnostics", action="store_true", help="Output extra diagnostics")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
