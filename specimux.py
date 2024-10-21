@@ -45,6 +45,8 @@ MODE_PREFIX = 'SHW'
 
 SAMPLE_ID_AMBIGUOUS = "ambiguous"
 SAMPLE_ID_UNKNOWN = "unknown"
+SAMPLE_ID_PREFIX_FWD_MATCH = "barcode_fwd_"
+SAMPLE_ID_PREFIX_REV_MATCH = "barcode_rev_"
 
 try:
     import edlib
@@ -347,114 +349,6 @@ class MatchParameters:
         self.search_len = search_len
         self.ambiguity_threshold = ambiguity_threshold
 
-def homopolymer_compress(sequence):
-    return ''.join(ch for ch, _ in itertools.groupby(sequence))
-
-class ClusterDatabase:
-    def __init__(self):
-        self._next_cluster_id = 0
-        self._clusters_for_group = {}
-        self._cluster_representatives = {}
-        self._cluster_representatives_rc = {}
-        self._cluster_abundance = {}
-        self._group_abundance = {}
-        self._multimatch = 0
-        self.match_untrimmed_start = 0
-        self.match_untrimmed_end = 0
-        self.singletons = 0
-        self._group_assigned = 0
-
-    def assign_best_cluster(self, group, sequence):
-        self._group_abundance[group] = self._group_abundance.get(group, 0) + 1
-        if group not in self._clusters_for_group:
-            cluster_id = self._next_cluster_id
-            self._next_cluster_id += 1
-            self._clusters_for_group[group] = [cluster_id]
-            self._cluster_representatives[cluster_id] = sequence
-            self._cluster_abundance[cluster_id] = 1
-            self.singletons += 1
-            return cluster_id
-        else:
-            best_ed = -1
-            best_c = -1
-            for c in self._clusters_for_group[group]:
-                rep = self._cluster_representatives[c]
-                ed = len(rep)*0.05 #TODO 95% similarity
-                m = align_seq(sequence, rep, ed, 0, len(sequence), mode=MODE_GLOBAL)
-                if m.matched() and (best_ed == -1 or m.distance() < best_ed):
-                    best_ed = m.distance()
-                    best_c = c
-            if best_c != -1:
-                if self._cluster_abundance[best_c] == 1: self.singletons -= 1
-
-                self._cluster_abundance[best_c] = self._cluster_abundance.get(best_c, 0) + 1
-                return best_c
-            else:
-                cluster_id = self._next_cluster_id
-                self._next_cluster_id += 1
-                self._clusters_for_group[group].append(cluster_id)
-                self._cluster_representatives[cluster_id] = sequence
-                self._cluster_abundance[cluster_id] = 1
-                self.singletons += 1
-                return cluster_id
-
-    def assign_best_group_and_cluster(self, groups, sequence, trimmed_start, trimmed_end):
-        best_ed = -1
-        best_c = -1
-        best_g = -1
-        best_l = (-1, -1)
-        for g in groups:
-            for c in self._clusters_for_group.get(g, []):
-                pct_abd = self._cluster_abundance[c] / float(self._group_abundance[g])
-                # if pct_abd < 0.1:  # TODO
-                # if self._cluster_abundance[c] < 5 or pct_abd < 0.1:  # TODO
-                if self._cluster_abundance[c] < 2: # TODO
-                    continue
-
-                rep = self._cluster_representatives[c]
-                ed = len(rep) * 0.05 #TODO 95% similarity
-                if trimmed_start and trimmed_end:
-                    m = align_seq(sequence, rep, ed, 0, len(sequence), mode=MODE_GLOBAL)
-                elif trimmed_start:
-                    m = align_seq(rep, sequence, ed, 0, len(rep), mode=MODE_PREFIX)
-                    if m.matched(): self.match_untrimmed_end += 1
-                elif trimmed_end:
-                    if c not in self._cluster_representatives_rc:
-                        self._cluster_representatives_rc[c] = reverse_complement(rep)
-                    rep = self._cluster_representatives_rc[c]
-                    m = align_seq(rep, reverse_complement(sequence), ed, 0, len(rep), mode=MODE_PREFIX)
-                    if m.matched(): self.match_untrimmed_start += 1
-                else:
-                    assert False
-                if m.matched():
-                    if best_ed == -1 or g == best_g:
-                        best_ed = m.distance()
-                        best_c = c
-                        best_g = g
-                        best_l = m.location()
-                    else: #ambiguous
-                        best_ed = -1
-                        best_c = -1
-                        best_g = -1
-                        best_l = (-1, -1)
-                        self._multimatch += 1
-                        return best_g, best_c, best_l
-
-        if best_c != -1:
-            # Don't count non-barcode matches towards cluster abundance, to avoid reinforcing cycles
-            # self._cluster_abundance[best_c] = self._cluster_abundance.get(best_c, 0) + 1
-            self._group_assigned += 1
-        return best_g, best_c, best_l
-
-    def get_cluster_count(self):
-        return self._next_cluster_id
-
-    def multimatch(self):
-        return self._multimatch
-
-    def group_assigned(self):
-        return self._group_assigned
-
 def read_barcode_file(filename: str) -> Specimens:
     """
     Read a tab-separated barcode file and return a Specimens object.
@@ -616,10 +510,10 @@ CLASS_AMBIGUOUS_BARCODES = "Multiple Matches for Both Barcodes"
 CLASS_AMBIGUOUS_FWD_BARCODE = "Multiple Matches for Forward Barcode"
 CLASS_AMBIGUOUS_REV_BARCODE = "Multiple Matches for Reverse Barcode"
 CLASS_MATCHED = "Matched"
-CLASS_CLUSTER_MATCH = "Matched Cluster"
 
-def process_sequences(seq_records, parameters, specimens, clusters, args):
+def process_sequences(seq_records, parameters, specimens, args):
     classifications = Counter()
+    unmatched_barcodes = Counter()
     write_ops = []
 
     for seq in seq_records:
@@ -641,7 +535,12 @@ def process_sequences(seq_records, parameters, specimens, clusters, args):
                 sample_id = match_sample(match, sample_id, specimens)
                 classification = classify_match(match, sample_id, specimens)
 
-                classification, sample_id, seq = cluster_sequence(args, classification, clusters, match, sample_id, seq, specimens)
+                if args.group_unknowns:
+                    sample_id = group_sample(match, sample_id, specimens)
+
+                unmatched_barcode = analyze_barcode_region(seq.seq, match, specimens.b_length())
+                if unmatched_barcode:
+                    unmatched_barcodes[unmatched_barcode] += 1
 
         classifications[classification] += 1
         if args.debug:
@@ -649,63 +548,55 @@ def process_sequences(seq_records, parameters, specimens, clusters, args):
         write_op = create_write_operation(sample_id, args, seq, match, specimens)
         write_ops.append(write_op)
 
-    return write_ops, classifications
+    return write_ops, classifications, unmatched_barcodes
 
-
-def cluster_sequence(args, classification, clusters, match, sample_id, seq, specimens):
-    if args.cluster_sequences:
-        assert clusters is not None
-
-        (s, e) = match.interprimer_extent()
-        ts = match.p1_match is not None
-        te = match.p2_match is not None
-        g = -1
-        c = -1
-        l = (-1, -1)
-        if sample_id not in [SAMPLE_ID_UNKNOWN, SAMPLE_ID_AMBIGUOUS]:
-            c = clusters.assign_best_cluster(sample_id, seq[s:e])
-        elif sample_id == SAMPLE_ID_AMBIGUOUS:
-            sp = specimens.specimens_for_barcodes(match.best_b1(), match.best_b2())
-            g, c, l = clusters.assign_best_group_and_cluster(sp, seq[s:e], ts, te)
-        elif match.p1_match and match.has_b1_match() and len(match.best_b1_match()) == 1:
-            sp = specimens.specimens_for_barcodes(match.best_b1(), specimens.barcodes(Barcode.B2))
-            g, c, l = clusters.assign_best_group_and_cluster(sp, seq[s:e], ts, te)
-        elif match.p2_match and match.has_b2_match() and len(match.best_b2_match()) == 1:
-            sp = specimens.specimens_for_barcodes(specimens.barcodes(Barcode.B1), match.best_b2())
-            g, c, l = clusters.assign_best_group_and_cluster(sp, seq[s:e], ts, te)
-
-        if sample_id in [SAMPLE_ID_UNKNOWN, SAMPLE_ID_AMBIGUOUS] and g != -1:
-            sample_id = g
-            classification = CLASS_CLUSTER_MATCH
-            seq = seq[l[0]:l[1] + 1]  # TODO - cleaner option
-    return classification, sample_id, seq
-
+def analyze_barcode_region(seq, match, bc_len):
+    if match.has_b1_match() and match.p2_match and not match.has_b2_match():
+        start = match.p2_match.location()[1]
+        end = min(len(seq), start+bc_len)
+        bc_region = seq[start:end]
+        if len(bc_region) < bc_len:
+            bc_region += '-'*(bc_len-len(bc_region))
+        return bc_region + "<"
+    elif match.has_b2_match() and match.p1_match and not match.has_b1_match():
+        end = match.p1_match.location()[0]
+        start = max(0, end - bc_len)
+        bc_region = seq[start:end]
+        if len(bc_region) < bc_len:
+            bc_region = '-'*(bc_len-len(bc_region)) + bc_region
+        return ">"+bc_region
+    else:
+        return None
 
 def classify_match(match, sample_id, specimens):
     classification = None
     if sample_id == SAMPLE_ID_UNKNOWN:
-        if match.p1_match and match.p2_match:
-            if not match.has_b1_match() and not match.has_b2_match():
-                classification = CLASS_NO_BARCODES
-            elif not match.has_b2_match():
+        if not match.p1_match and not match.p2_match:
+            classification = CLASS_NO_PRIMERS
+        elif not match.has_b2_match() and match.has_b1_match():
+            if match.p2_match:
                 if (match.sequence_length - match.p2_match.location()[1]) < (specimens.b_length()):
                     classification = CLASS_REV_BARCODE_TRUNCATED
                 else:
                     classification = CLASS_NO_REV_BARCODE
-            elif not match.has_b1_match():
+            else:
+                classification = CLASS_NO_REV_PRIMER
+        elif not match.has_b1_match() and match.has_b2_match():
+            if match.p1_match:
                 if (match.p1_match.location()[0] - 1) < (specimens.b_length()):
                     classification = CLASS_FWD_BARCODE_TRUNCATED
                 else:
                     classification = CLASS_NO_FWD_BARCODE
-        else:
-            if not match.p1_match and not match.p2_match:
-                classification = CLASS_NO_PRIMERS
-            elif not match.p2_match:
-                classification = CLASS_NO_REV_PRIMER
-            elif not match.p1_match:
-                classification = CLASS_NO_FWD_PRIMER
             else:
-                assert(False)
+                classification = CLASS_NO_FWD_PRIMER
+        elif not match.p2_match:
+            classification = CLASS_NO_REV_PRIMER
+        elif not match.p1_match:
+            classification = CLASS_NO_FWD_PRIMER
+        elif not match.has_b1_match() and not match.has_b2_match():
+            classification = CLASS_NO_BARCODES
+        else:
+            assert(False)
     elif sample_id == SAMPLE_ID_AMBIGUOUS:
         if len(match.best_b1()) > 1 and len(match.best_b2()) > 1:
             classification = CLASS_AMBIGUOUS_BARCODES
@@ -730,6 +621,15 @@ def match_sample(match, sample_id, specimens):
             logging.warning(f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()})")
     return sample_id
 
+def group_sample(match, sample_id, specimens):
+    if sample_id in [SAMPLE_ID_UNKNOWN, SAMPLE_ID_AMBIGUOUS]:
+        b1s = match.best_b1()
+        b2s = match.best_b2()
+        if len(b2s) == 1:
+            sample_id = SAMPLE_ID_PREFIX_REV_MATCH + b2s[0]
+        elif len(b1s) == 1:
+            sample_id = SAMPLE_ID_PREFIX_FWD_MATCH + b1s[0]
+    return sample_id
 
 def match_sequence(args, parameters, seq, rseq, specimens):
     match = SequenceMatch(len(seq), parameters.ambiguity_threshold, specimens.b_length())
@@ -907,7 +807,7 @@ def parse_args(argv):
     parser.add_argument("-E", "--primer-edit-distance", type=int, default=-1, help="Primer edit distance value, overrides -p")
     parser.add_argument("-l", "--search-len", type=int, default=80, help="Length to search for index and primer at start and end of sequence (default: 80)")
     parser.add_argument("-A", "--ambiguity-threshold",type=float, default=1.0, help="Threshold for considering the edit distance between two barcodes to be different")
-    parser.add_argument("--cluster-sequences", action="store_true", help="Cluster sequences based on alignment and resolve ambiguities based on cluster identity")
+    parser.add_argument("--group-unknowns", action="store_true", help="Group unknown sequences based on partial matches and classifications")
     parser.add_argument("-F", "--output-to-files", action="store_true", help="Create individual sample files for sequences")
     parser.add_argument("-P", "--output-file-prefix", default="sample_", help="Prefix for individual files when using -F (default: sample_)")
     parser.add_argument("-D", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
@@ -915,6 +815,7 @@ def parse_args(argv):
     parser.add_argument("--trim", choices=[ARG_TRIM_NONE, ARG_TRIM_TAILS, ARG_TRIM_BARCODES, ARG_TRIM_PRIMERS], default=ARG_TRIM_BARCODES, help="trimming to apply")
     parser.add_argument("--diagnostics", action="store_true", help="Output extra diagnostics")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--top-unmatched-barcodes", type=int, default=0, help="Display the top N unmatched barcode strings")
 
     parser.add_argument("-t", "--threads", type=int, default=-1, help="Number of worker threads to use")
     parser.add_argument("-v", "--version", action="version", version=version())
@@ -958,9 +859,8 @@ class WorkItem(NamedTuple):
     args: argparse.Namespace
 
 def worker(work_item, specimens, args):
-    write_ops, classifications = process_sequences(work_item.seq_records, work_item.parameters,
-                                                   specimens, None, args)
-    return write_ops, classifications
+    write_ops, classifications, unmatched_barcodes = process_sequences(work_item.seq_records, work_item.parameters, specimens, args)
+    return write_ops, classifications, unmatched_barcodes
 
 
 def specimux_mp(args):
@@ -982,9 +882,7 @@ def specimux_mp(args):
             pass
 
     classifications = Counter()
-
-    if args.cluster_sequences:
-        logging.error(f"--cluster-sequences must be used in single-threaded mode (-t 1)")
+    unmatched_barcodes = Counter()
 
     with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq) as output_manager:
         if args.threads == -1:
@@ -1009,8 +907,9 @@ def specimux_mp(args):
                     yield work_item
                     num_seqs += len(seq_batch)
 
-            for write_ops, batch_classifications in pool.imap_unordered(worker_func, producer()):
+            for write_ops, batch_classifications, batch_unmatched in pool.imap_unordered(worker_func, producer()):
                 classifications += batch_classifications
+                unmatched_barcodes += batch_unmatched
                 for write_op in write_ops:
                     output_write_operation(write_op, output_manager, args)
 
@@ -1025,7 +924,7 @@ def specimux_mp(args):
     print()
     logging.info(f"Elapsed time: : {elapsed:.2f} seconds")
 
-    output_diagnostics(args, classifications)
+    output_diagnostics(args, classifications, unmatched_barcodes)
 
 def specimux(args):
     specimens = read_barcode_file(args.barcode_file)
@@ -1046,7 +945,7 @@ def specimux(args):
             pass
 
     classifications = Counter()
-    clusters = ClusterDatabase()
+    unmatched_barcodes = Counter()
 
     with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq) as output_manager:
         num_seqs = 0
@@ -1055,16 +954,16 @@ def specimux(args):
             seq_batch = list(itertools.islice(seq_records, to_read))
             if not seq_batch:
                 break
-            write_ops, batch_classifications = process_sequences(seq_batch, parameters, specimens, clusters, args)
+            write_ops, batch_classifications, batch_unmatched = process_sequences(seq_batch, parameters, specimens, args)
             classifications += batch_classifications
+            unmatched_barcodes += batch_unmatched
             for write_op in write_ops:
                 output_write_operation(write_op, output_manager, args)
 
-            num_seqs += len(seq_batch)
+            total_processed = sum(classifications.values())
             matched = classifications[CLASS_MATCHED]
-            cmatched = classifications[CLASS_CLUSTER_MATCH]
-            pct = (matched+cmatched)/num_seqs if num_seqs > 0 else 0
-            print(f"read: {num_seqs:>7}\t\tmatched: {matched:>7}/{cmatched:>7}\t\t{pct:.2%}\t-{clusters.multimatch()}\tclusters: {clusters.get_cluster_count()} singletons: {clusters.singletons}", end='\r', file=sys.stderr)
+            pct = matched / total_processed if total_processed > 0 else 0
+            print(f"read: {total_processed}\t\tmatched: {matched}\t\t{pct:.2%}", end='\r', file=sys.stderr)
             sys.stderr.flush()
 
     elapsed = timeit.default_timer() - start_time
@@ -1072,9 +971,9 @@ def specimux(args):
     print()
     logging.info(f"Elapsed time: : {elapsed:.2f} seconds")
 
-    output_diagnostics(args, classifications)
+    output_diagnostics(args, classifications, unmatched_barcodes)
 
-def output_diagnostics(args, classifications):
+def output_diagnostics(args, classifications, unmatched_barcodes):
     if args.diagnostics:
         # Sort the classifications by their counts in descending order
         sorted_classifications = sorted(
@@ -1093,6 +992,9 @@ def output_diagnostics(args, classifications):
         logging.info("Classification Statistics:")
         for classification, count in sorted_classifications:
             logging.info(f"{classification:<{max_name_length}} : {count:>{max_count_length}} ({count / total:2.2%})")
+        logging.info(f"{len(unmatched_barcodes)} distinct barcode strings were unmatched")
+        for barcode, count in unmatched_barcodes.most_common(args.top_unmatched_barcodes):
+            logging.info(f"Barcode: {barcode}\t\t{count:>{max_count_length}}")
 
 
 def setup_match_parameters(args, specimens):

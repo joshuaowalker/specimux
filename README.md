@@ -50,7 +50,7 @@ Here are the main options available:
 usage: specimux.py [-h] [--min-length MIN_LENGTH] [--max-length MAX_LENGTH]
                    [-n NUM_SEQS] [-p PERCENT_MATCH] [-e INDEX_EDIT_DISTANCE]
                    [-E PRIMER_EDIT_DISTANCE] [-l SEARCH_LEN]
-                   [-A AMBIGUITY_THRESHOLD] [--cluster-sequences] [-F]
+                   [-A AMBIGUITY_THRESHOLD] [-F]
                    [-P OUTPUT_FILE_PREFIX] [-D OUTPUT_DIR] [--color]
                    [--trim {none,tails,primers}] [--diagnostics] [--debug]
                    [-t THREADS] [-v]
@@ -86,8 +86,6 @@ options:
   -A AMBIGUITY_THRESHOLD, --ambiguity-threshold AMBIGUITY_THRESHOLD
                         Threshold for considering the edit distance between
                         two barcodes to be different
-  --cluster-sequences   Cluster sequences based on alignment and resolve
-                        ambiguities based on cluster identity
   -F, --output-to-files
                         Create individual sample files for sequences
   -P OUTPUT_FILE_PREFIX, --output-file-prefix OUTPUT_FILE_PREFIX
@@ -142,13 +140,6 @@ Specimux provides options to filter sequences based on length:
 - `--min-length` parameter sets the minimum acceptable sequence length
 - `--max-length` parameter sets the maximum acceptable sequence length
 - Helps exclude potentially problematic sequences (e.g., truncated reads, artifacts, chimeras)
-
-### 6. Clustering (experimental)
-
-Specimux provides a clustering mode which implements a greedy clustering algorithm based on 
-sequence alignment identity.  Reads which match only a single barcode can be assigned to a
-specimen based on cluster matching.  Note that this feature is still under active development
-and testing and may eventually be removed.
 
 ## Multiprocessing
 
