@@ -54,7 +54,7 @@ Here are the main options available:
 
 ```
 usage: specimux.py [-h] [--min-length MIN_LENGTH] [--max-length MAX_LENGTH]
-                   [-n NUM_SEQS] [-p PERCENT_MATCH] [-e INDEX_EDIT_DISTANCE]
+                   [-n NUM_SEQS] [-e INDEX_EDIT_DISTANCE]
                    [-E PRIMER_EDIT_DISTANCE] [-l SEARCH_LEN]
                    [--group-unknowns] [-F] [-P OUTPUT_FILE_PREFIX]
                    [-O OUTPUT_DIR] [--color]
@@ -74,19 +74,19 @@ options:
   -h, --help            show this help message and exit
   --min-length MIN_LENGTH
                         Minimum sequence length. Shorter sequences will be
-                        skipped (default: 400)
+                        skipped (default: no filtering)
   --max-length MAX_LENGTH
                         Maximum sequence length. Longer sequences will be
-                        skipped (default: 1400)
+                        skipped (default: no filtering)
   -n NUM_SEQS, --num-seqs NUM_SEQS
                         Number of sequences to read from file (e.g., -n 100 or
                         -n 102,3)
-  -p PERCENT_MATCH, --percent-match PERCENT_MATCH
-                        Percentage match (default: 0.75)
   -e INDEX_EDIT_DISTANCE, --index-edit-distance INDEX_EDIT_DISTANCE
-                        Barcode edit distance value, overrides -p
+                        Barcode edit distance value, default is half of min
+                        distance between barcodes
   -E PRIMER_EDIT_DISTANCE, --primer-edit-distance PRIMER_EDIT_DISTANCE
-                        Primer edit distance value, overrides -p
+                        Primer edit distance value, default is min distance
+                        between primers
   -l SEARCH_LEN, --search-len SEARCH_LEN
                         Length to search for index and primer at start and end
                         of sequence (default: 80)

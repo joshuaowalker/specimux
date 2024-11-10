@@ -27,6 +27,7 @@ import multiprocessing
 import os
 import sys
 import timeit
+import math
 from collections import Counter
 from contextlib import ExitStack
 from functools import partial
@@ -907,12 +908,11 @@ def parse_args(argv):
     parser.add_argument("barcode_file", help="File containing barcode information")
     parser.add_argument("sequence_file", help="Sequence file in Fasta or Fastq format, gzipped or plain text")
 
-    parser.add_argument("--min-length", type=int, default=-1, help="Minimum sequence length.  Shorter sequences will be skipped (default: 400)")
-    parser.add_argument("--max-length", type=int, default=-1, help="Maximum sequence length.  Longer sequences will be skipped (default: 1400)")
+    parser.add_argument("--min-length", type=int, default=-1, help="Minimum sequence length.  Shorter sequences will be skipped (default: no filtering)")
+    parser.add_argument("--max-length", type=int, default=-1, help="Maximum sequence length.  Longer sequences will be skipped (default: no filtering)")
     parser.add_argument("-n", "--num-seqs", type=str, default="-1", help="Number of sequences to read from file (e.g., -n 100 or -n 102,3)")
-    parser.add_argument("-p", "--percent-match", type=float, default=0.75, help="Percentage match (default: 0.75)")
-    parser.add_argument("-e", "--index-edit-distance", type=int, default=-1, help="Barcode edit distance value, overrides -p")
-    parser.add_argument("-E", "--primer-edit-distance", type=int, default=-1, help="Primer edit distance value, overrides -p")
+    parser.add_argument("-e", "--index-edit-distance", type=int, default=-1, help="Barcode edit distance value, default is half of min distance between barcodes")
+    parser.add_argument("-E", "--primer-edit-distance", type=int, default=-1, help="Primer edit distance value, default is min distance between primers")
     parser.add_argument("-l", "--search-len", type=int, default=80, help="Length to search for index and primer at start and end of sequence (default: 80)")
     parser.add_argument("--group-unknowns", action="store_true", help="Group unknown sequences based on partial matches and classifications")
     parser.add_argument("-F", "--output-to-files", action="store_true", help="Create individual sample files for sequences")
@@ -1112,36 +1112,41 @@ def setup_match_parameters(args, specimens):
             distances.append(dist)
         return min(distances), Counter(distances)
 
-    def _sanity_check_distance(sequences, max_distance, desc):
+    def _sanity_check_distance(sequences, desc, args):
         if len(sequences) <= 1:
             return
         m, c = _calculate_distances(sequences)
-        logging.info(f"Minimum edit distance is {m} for {desc}")
+        if args.diagnostics:
+            logging.info(f"Minimum edit distance is {m} for {desc}")
+        return m
+
+    _sanity_check_distance(specimens.barcodes(Barcode.B1), "Forward Barcodes", args)
+    _sanity_check_distance(specimens.barcodes(Barcode.B2), "Reverse Barcodes", args)
+
+    combined_barcodes = list(specimens.barcodes(Barcode.B1)) + [reverse_complement(b) for b in specimens.barcodes(Barcode.B2)]
+    min_bc_dist = _sanity_check_distance(combined_barcodes, "Forward Barcodes + Reverse Complement of Reverse Barcodes", args)
+
+    primers = []
+    for ppi in specimens.get_primer_pairs():
+        primers.append(ppi.p1)
+        primers.append(ppi.p2)
+        primers.append(ppi.p1_rc)
+        primers.append(ppi.p2_rc)
+    primers = list(set(primers))
+    min_primer_dist = _sanity_check_distance(primers, "All Primers and Reverse Complements", args)
+
+    combined_barcodes_and_primers = combined_barcodes + primers
+    _sanity_check_distance(combined_barcodes_and_primers,
+                           "Forward Barcodes + Reverse Complement of Reverse Barcodes + All Primers", args)
 
     max_search_area = args.search_len
-    max_dist_index = specimens.b_length() - int(specimens.b_length() * args.percent_match)
-    primer_length = min(specimens.primer_length(Primer.P1), specimens.primer_length(Primer.P2))
-    max_dist_primer = primer_length - int(primer_length * args.percent_match)
+
+    max_dist_index = math.ceil(min_bc_dist / 2.0)
+    max_dist_primer = min_primer_dist
     if args.index_edit_distance != -1: max_dist_index = args.index_edit_distance
     if args.primer_edit_distance != -1: max_dist_primer = args.primer_edit_distance
 
-    if args.diagnostics:
-        logging.info(f"Maximum edit distances set to {max_dist_index} (barcode) and {max_dist_primer} (primer)")
-        _sanity_check_distance(specimens.barcodes(Barcode.B1), max_dist_index, "Forward Barcodes")
-        _sanity_check_distance(specimens.barcodes(Barcode.B2), max_dist_index, "Reverse Barcodes")
-
-        combined_barcodes = list(specimens.barcodes(Barcode.B1)) + [reverse_complement(b) for b in specimens.barcodes(Barcode.B2)]
-        _sanity_check_distance(combined_barcodes, max_dist_index, "Forward Barcodes + Reverse Complement of Reverse Barcodes")
-
-        primers = []
-        for ppi in specimens.get_primer_pairs():
-            primers.append(ppi.p1)
-            primers.append(ppi.p2)
-            primers.append(ppi.p1_rc)
-            primers.append(ppi.p2_rc)
-        combined_barcodes_and_primers = combined_barcodes + primers
-        _sanity_check_distance(combined_barcodes_and_primers, min(max_dist_index, max_dist_primer),
-                               "Forward Barcodes + Reverse Complement of Reverse Barcodes + Both Primers")
+    logging.info(f"Using Edit Distance Thresholds {max_dist_index} (barcode) and {max_dist_primer} (primer)")
 
     parameters = MatchParameters(max_dist_primer, max_dist_index, max_search_area)
     return parameters
