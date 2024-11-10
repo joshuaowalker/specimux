@@ -101,7 +101,7 @@ class Primer(Enum):
 
 class SequenceMatch:
 
-    def __init__(self, sequence_length, ambiguity_threshold, barcode_length):
+    def __init__(self, sequence_length, barcode_length):
         self.sequence_length = sequence_length
         self.p1_match: MatchResult = None
         self._b1_matches: List[Tuple[str, MatchResult, float]] = []
@@ -109,7 +109,7 @@ class SequenceMatch:
         self._b2_matches: List[Tuple[str, MatchResult, float]] = []
         self._p1: str = None
         self._p2: str = None
-        self.ambiguity_threshold = ambiguity_threshold
+        self.ambiguity_threshold = 1.0
         self._barcode_length = barcode_length
 
     def add_barcode_match(self, match: MatchResult, barcode: str, reverse: bool, which: Barcode):
@@ -389,11 +389,10 @@ class Specimens:
                 return self._b2s_rc
 
 class MatchParameters:
-    def __init__(self, max_dist_primer, max_dist_index, search_len, ambiguity_threshold):
+    def __init__(self, max_dist_primer, max_dist_index, search_len):
         self.max_dist_primer = max_dist_primer
         self.max_dist_index = max_dist_index
         self.search_len = search_len
-        self.ambiguity_threshold = ambiguity_threshold
 
 def read_barcode_file(filename: str) -> Specimens:
     """
@@ -558,7 +557,7 @@ def process_sequences(seq_records, parameters, specimens, args):
         sample_id = SAMPLE_ID_UNKNOWN
 
         classification = None
-        match = SequenceMatch(len(seq), parameters.ambiguity_threshold, specimens.b_length())
+        match = SequenceMatch(len(seq), specimens.b_length())
 
         if args.min_length != -1 and len(seq) < args.min_length:
             classification = CLASS_SHORT_SEQ
@@ -712,7 +711,7 @@ def match_sequence(args, parameters, seq, rseq, specimens):
     matches = []
 
     for primer_pair in specimens.get_primer_pairs():
-        match = SequenceMatch(len(seq), parameters.ambiguity_threshold, specimens.b_length())
+        match = SequenceMatch(len(seq), specimens.b_length())
         match_one_end(match, parameters, specimens, rseq, True, primer_pair, Primer.P1, Barcode.B1)
         match_one_end(match, parameters, specimens, seq, False, primer_pair, Primer.P2, Barcode.B2)
 
@@ -899,7 +898,8 @@ class OutputManager:
 
 def version():
     # 0.1 September 14, 2024 - rewritten from minibar.py
-    return "specimux.py version 0.1"
+    # 0.2 November 10, 2024 - support for multiple primer pairs
+    return "specimux.py version 0.2"
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Specimux: Demultiplex MinION sequence by dual barcode indexes and primers.")
@@ -914,15 +914,14 @@ def parse_args(argv):
     parser.add_argument("-e", "--index-edit-distance", type=int, default=-1, help="Barcode edit distance value, overrides -p")
     parser.add_argument("-E", "--primer-edit-distance", type=int, default=-1, help="Primer edit distance value, overrides -p")
     parser.add_argument("-l", "--search-len", type=int, default=80, help="Length to search for index and primer at start and end of sequence (default: 80)")
-    parser.add_argument("-A", "--ambiguity-threshold",type=float, default=1.0, help="Threshold for considering the edit distance between two barcodes to be different")
     parser.add_argument("--group-unknowns", action="store_true", help="Group unknown sequences based on partial matches and classifications")
     parser.add_argument("-F", "--output-to-files", action="store_true", help="Create individual sample files for sequences")
     parser.add_argument("-P", "--output-file-prefix", default="sample_", help="Prefix for individual files when using -F (default: sample_)")
-    parser.add_argument("-D", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
+    parser.add_argument("-O", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
     parser.add_argument("--color", action="store_true", help="Highlight barcode matches in blue, primer matches in green")
     parser.add_argument("--trim", choices=[ARG_TRIM_NONE, ARG_TRIM_TAILS, ARG_TRIM_BARCODES, ARG_TRIM_PRIMERS], default=ARG_TRIM_BARCODES, help="trimming to apply")
-    parser.add_argument("--diagnostics", action="store_true", help="Output extra diagnostics")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("-d", "--diagnostics", action="store_true", help="Output extra diagnostics")
+    parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--top-unmatched-barcodes", type=int, default=0, help="Display the top N unmatched barcode strings")
 
     parser.add_argument("-t", "--threads", type=int, default=-1, help="Number of worker threads to use")
@@ -1144,7 +1143,7 @@ def setup_match_parameters(args, specimens):
         _sanity_check_distance(combined_barcodes_and_primers, min(max_dist_index, max_dist_primer),
                                "Forward Barcodes + Reverse Complement of Reverse Barcodes + Both Primers")
 
-    parameters = MatchParameters(max_dist_primer, max_dist_index, max_search_area, args.ambiguity_threshold)
+    parameters = MatchParameters(max_dist_primer, max_dist_index, max_search_area)
     return parameters
 
 def main(argv):
