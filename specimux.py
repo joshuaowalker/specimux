@@ -72,7 +72,12 @@ class MatchResult:
     def locations(self):
         return self._edlib_match['locations']
 
-    def reverse(self, seq_length):
+    def reversed(self, seq_length):
+        m = MatchResult(self._edlib_match.copy())
+        m._reverse(seq_length)
+        return m
+
+    def _reverse(self, seq_length):
         if self.distance() == -1: return
 
         r = self._edlib_match
@@ -108,13 +113,14 @@ class SequenceMatch:
         self._barcode_length = barcode_length
 
     def add_barcode_match(self, match: MatchResult, barcode: str, reverse: bool, which: Barcode):
+        m = match
         if reverse:
-            match.reverse(self.sequence_length)
+            m = m.reversed(self.sequence_length)
 
         if which is Barcode.B1:
-            self.add_b1_match(match, barcode)
+            self.add_b1_match(m, barcode)
         else:
-            self.add_b2_match(match, barcode)
+            self.add_b2_match(m, barcode)
 
     def add_b1_match(self, match: MatchResult, barcode: str):
         self._b1_matches.append((barcode, match, match.distance()))
@@ -161,12 +167,13 @@ class SequenceMatch:
         return [m for b, m, d in self._b2_matches if abs(d - best_distance) < self.ambiguity_threshold]
 
     def set_primer_match(self, match: MatchResult, primer: str, reverse: bool, which: Primer):
+        m = match
         if reverse:
-            match.reverse(self.sequence_length)
+            m = m.reversed(self.sequence_length)
         if which is Primer.P1:
-            self.set_p1_match(match, primer)
+            self.set_p1_match(m, primer)
         else:
-            self.set_p2_match(match, primer)
+            self.set_p2_match(m, primer)
 
     def set_p1_match(self, match, primer):
         self.p1_match = match
@@ -252,24 +259,45 @@ class SequenceMatch:
         b2d = self.b2_distance()
         return format(f"({p1d},{b1d},{p2d},{b2d})")
 
+
+class PrimerPairInfo:
+    """Helper class to store information about a primer pair and associated specimens"""
+
+    def __init__(self, p1: str, p2: str):
+        self.p1 = p1.upper()
+        self.p2 = p2.upper()
+        self.p1_rc = reverse_complement(p1.upper())
+        self.p2_rc = reverse_complement(p2.upper())
+        self.specimens = set()  # Set of specimen IDs using this primer pair
+
+    def __eq__(self, other):
+        if not isinstance(other, PrimerPairInfo):
+            return NotImplemented
+        return self.p1 == other.p1 and self.p2 == other.p2
+
+    def __hash__(self):
+        return hash((self.p1, self.p2))
+
+
 class Specimens:
-    def __init__(self, p1, p2):
-        self._specimens = []
-        self._b1_specimens_index = {}
-        self._b2_specimens_index = {}
-        self._p1 = p1
-        self._p1_rc = reverse_complement(p1)
-        self._p2 = p2
-        self._p2_rc = reverse_complement(p2)
+    def __init__(self):
+        self._specimens = []  # List of (id, b1, p1, b2, p2) tuples for reference
+        self._b1_specimens_index = {}  # Maps barcode1 to set of specimen IDs
+        self._b2_specimens_index = {}  # Maps barcode2 to set of specimen IDs
         self._barcode_length = 0
+        self._primer_pairs = {}  # Maps (p1, p2) tuple to PrimerPairInfo
+        self._specimen_to_primer_pair = {}  # Maps specimen ID to PrimerPairInfo
+        # Cache for barcodes
         self._b1s = []
         self._b2s = []
         self._b1s_rc = []
         self._b2s_rc = []
 
-    def add_specimen(self, id, b1, b2):
-        self._specimens.append((id, b1, b2))
+    def add_specimen(self, id, b1, p1, b2, p2):
+        """Add a specimen with its barcodes and primers"""
+        self._specimens.append((id, b1, p1, b2, p2))
 
+        # Handle barcodes
         if b1 not in self._b1_specimens_index:
             self._b1_specimens_index[b1] = set()
         if b2 not in self._b2_specimens_index:
@@ -279,11 +307,40 @@ class Specimens:
 
         self._barcode_length = max(self._barcode_length, len(b1), len(b2))
 
+        # Handle primer pairs
+        primer_key = (p1.upper(), p2.upper())
+        if primer_key not in self._primer_pairs:
+            self._primer_pairs[primer_key] = PrimerPairInfo(p1, p2)
+
+        primer_pair_info = self._primer_pairs[primer_key]
+        primer_pair_info.specimens.add(id)
+        self._specimen_to_primer_pair[id] = primer_pair_info
+
+    def get_primer_pairs(self):
+        """Get list of all unique PrimerPairInfo objects"""
+        return list(self._primer_pairs.values())
+
+    def get_primers_for_specimen(self, specimen_id):
+        """Get the primers for a specific specimen"""
+        if specimen_id in self._specimen_to_primer_pair:
+            pair = self._specimen_to_primer_pair[specimen_id]
+            return (pair.p1, pair.p2)
+        return None
+
+    def specimens_for_primer_pair(self, p1, p2):
+        """Get set of specimens using a specific primer pair"""
+        key = (p1.upper(), p2.upper())
+        return self._primer_pairs[key].specimens if key in self._primer_pairs else set()
+
     def validate(self):
         self._validate_barcodes_globally_unique()
         self._validate_barcode_lengths()
         self._cache_barcodes()
+        logging.info(f"Number of unique primer pairs: {len(self._primer_pairs)}")
+        for pair in self._primer_pairs.values():
+            logging.info(f"Primer pair {pair.p1}/{pair.p2}: {len(pair.specimens)} specimens")
 
+    # Rest of the previous methods remain the same
     def _validate_barcodes_globally_unique(self):
         dups = set(self.barcodes(Barcode.B1)).intersection(set(self.barcodes(Barcode.B2)))
         if len(dups) > 0:
@@ -296,29 +353,30 @@ class Specimens:
             logging.warning("Reverse barcodes have inconsistent lengths")
 
     def _cache_barcodes(self):
-        for b in self._b1_specimens_index.keys():
-            self._b1s.append(b)
-            self._b1s_rc.append(reverse_complement(b))
-        for b in self._b2_specimens_index.keys():
-            self._b2s.append(b)
-            self._b2s_rc.append(reverse_complement(b))
+        self._b1s = list(self._b1_specimens_index.keys())
+        self._b2s = list(self._b2_specimens_index.keys())
+        self._b1s_rc = [reverse_complement(b) for b in self._b1s]
+        self._b2s_rc = [reverse_complement(b) for b in self._b2s]
 
     def specimens_for_barcodes(self, b1_list, b2_list):
-        all = set()
-
+        all_matches = set()
         b1s = set()
-        for b1 in b1_list: b1s.update(self._b1_specimens_index[b1])
-        for b2 in b2_list: all.update(b1s.intersection(self._b2_specimens_index[b2]))
-
-        return list(all)
+        for b1 in b1_list:
+            b1s.update(self._b1_specimens_index[b1])
+        for b2 in b2_list:
+            all_matches.update(b1s.intersection(self._b2_specimens_index[b2]))
+        return list(all_matches)
 
     def b_length(self):
         return self._barcode_length
 
     def primer_length(self, which):
-        return len(self.primer(which))
+        if which == Primer.P1:
+            return min(len(pair.p1) for pair in self._primer_pairs.values())
+        else:
+            return min(len(pair.p2) for pair in self._primer_pairs.values())
 
-    def barcodes(self, which: Barcode, rc = False):
+    def barcodes(self, which: Barcode, rc=False):
         if not rc:
             if which is Barcode.B1:
                 return self._b1s
@@ -330,18 +388,6 @@ class Specimens:
             elif which is Barcode.B2:
                 return self._b2s_rc
 
-    def primer(self, which: Primer, rc = False):
-        if not rc:
-            if which == Primer.P1:
-                return self._p1
-            elif which == Primer.P2:
-                return self._p2
-        else:
-            if which == Primer.P1:
-                return self._p1_rc
-            elif which == Primer.P2:
-                return self._p2_rc
-
 class MatchParameters:
     def __init__(self, max_dist_primer, max_dist_index, search_len, ambiguity_threshold):
         self.max_dist_primer = max_dist_primer
@@ -352,18 +398,9 @@ class MatchParameters:
 def read_barcode_file(filename: str) -> Specimens:
     """
     Read a tab-separated barcode file and return a Specimens object.
-
-    The file should have the following columns in order:
-    sample_id, forward_barcode, forward_primer, reverse_barcode, reverse_primer
-    A header line is optional and will be detected and skipped if present.
-
-    Args:
-    filename (str): Path to the barcode file
-
-    Returns:
-    Specimens: An object containing the parsed barcode information
+    Each line contains: sample_id, forward_barcode, forward_primer, reverse_barcode, reverse_primer
     """
-    specimens = None
+    specimens = Specimens()
 
     with open(filename, 'r', newline='') as f:
         reader = csv.reader(f, delimiter='\t')
@@ -388,8 +425,8 @@ def read_barcode_file(filename: str) -> Specimens:
             raise ValueError(f"Invalid data in first line: {first_line}")
 
         sample_id, forward_barcode, forward_primer, reverse_barcode, reverse_primer = first_line
-        specimens = Specimens(forward_primer.upper(), reverse_primer.upper())
-        specimens.add_specimen(sample_id, forward_barcode.upper(), reverse_barcode.upper())
+        specimens.add_specimen(sample_id, forward_barcode.upper(), forward_primer.upper(),
+                               reverse_barcode.upper(), reverse_primer.upper())
 
         # Process the rest of the lines
         for row_num, row in enumerate(reader, start=2):
@@ -400,13 +437,13 @@ def read_barcode_file(filename: str) -> Specimens:
                 raise ValueError(f"Invalid data in line {row_num}: {row}")
 
             sample_id, forward_barcode, forward_primer, reverse_barcode, reverse_primer = row
-            specimens.add_specimen(sample_id, forward_barcode.upper(), reverse_barcode.upper())
+            specimens.add_specimen(sample_id, forward_barcode.upper(), forward_primer.upper(),
+                                   reverse_barcode.upper(), reverse_primer.upper())
 
-    if not specimens:
+    if len(specimens._specimens) == 0:
         raise ValueError("No valid data found in the barcode file")
 
     return specimens
-
 
 def _is_valid_data_line(line: List[str]) -> bool:
     """
@@ -509,6 +546,7 @@ CLASS_NO_REV_PRIMER = "No Reverse Primer Matches"
 CLASS_AMBIGUOUS_BARCODES = "Multiple Matches for Both Barcodes"
 CLASS_AMBIGUOUS_FWD_BARCODE = "Multiple Matches for Forward Barcode"
 CLASS_AMBIGUOUS_REV_BARCODE = "Multiple Matches for Reverse Barcode"
+CLASS_MULTIPLE_PRIMER_PAIRS_MATCHED = "Multiple Primer Pair Matches"
 CLASS_MATCHED = "Matched"
 
 def process_sequences(seq_records, parameters, specimens, args):
@@ -531,9 +569,14 @@ def process_sequences(seq_records, parameters, specimens, args):
             if not oriented:
                 classification = CLASS_ORIENTATION_FAILED
             else:
-                match, seq = match_sequence(args, parameters, seq, rseq, specimens)
-                sample_id = match_sample(match, sample_id, specimens)
-                classification = classify_match(match, sample_id, specimens)
+                matches = match_sequence(args, parameters, seq, rseq, specimens)
+                match, multimatch, multimatch_class = choose_best_match(args, matches)
+                if multimatch:
+                    classification = format(f"{CLASS_MULTIPLE_PRIMER_PAIRS_MATCHED} {multimatch_class}")
+                    sample_id = SAMPLE_ID_AMBIGUOUS
+                else:
+                    sample_id = match_sample(match, sample_id, specimens)
+                    classification = classify_match(match, sample_id, specimens)
 
                 if args.group_unknowns:
                     sample_id = group_sample(match, sample_id, specimens)
@@ -610,6 +653,38 @@ def classify_match(match, sample_id, specimens):
         classification = CLASS_MATCHED
     return classification
 
+def choose_best_match(args, matches):
+    best_score = -1
+    best_match = None
+    multimatch = False
+    multimatch_class = None
+    for m in matches:
+        score = 0
+        if m.p1_match and m.p2_match and m.has_b1_match() and m.has_b2_match():
+            score = 4
+        elif m.p1_match and m.p2_match and (m.has_b1_match() or m.has_b2_match()):
+            score = 3
+        elif m.p1_match and m.p2_match:
+            score = 2
+        elif m.p1_match or m.p2_match:
+            score = 1
+        if score > best_score:
+            best_score = score
+            best_match = m
+            multimatch = False
+        elif score == best_score:
+            multimatch = True
+
+    if multimatch:
+        match best_score:
+            case 0: multimatch_class = "(Neither Primer)"
+            case 1: multimatch_class = "(One Primer)"
+            case 2: multimatch_class = "(Both Primers)"
+            case 3: multimatch_class = "(One Barcode)"
+            case 4: multimatch_class = "(Both Barcodes)"
+
+    return best_match, multimatch, multimatch_class
+
 def match_sample(match, sample_id, specimens):
     if match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match():
         ids = specimens.specimens_for_barcodes(match.best_b1(), match.best_b2())
@@ -632,27 +707,40 @@ def group_sample(match, sample_id, specimens):
     return sample_id
 
 def match_sequence(args, parameters, seq, rseq, specimens):
-    match = SequenceMatch(len(seq), parameters.ambiguity_threshold, specimens.b_length())
+    """Match sequence against primers and barcodes"""
 
-    match_one_end(match, parameters, specimens, rseq, True, Primer.P1, Barcode.B1)
+    matches = []
 
-    match_one_end(match, parameters, specimens, seq, False, Primer.P2, Barcode.B2)
+    for primer_pair in specimens.get_primer_pairs():
+        match = SequenceMatch(len(seq), parameters.ambiguity_threshold, specimens.b_length())
+        match_one_end(match, parameters, specimens, rseq, True, primer_pair, Primer.P1, Barcode.B1)
+        match_one_end(match, parameters, specimens, seq, False, primer_pair, Primer.P2, Barcode.B2)
 
-    return match, seq
+        matches.append(match)
+
+    return matches
 
 
-def match_one_end(match, parameters, specimens, sequence, reversed_sequence, which_primer, which_barcode):
+def match_one_end(match, parameters, specimens, sequence, reversed_sequence, primer_pair, which_primer, which_barcode):
+    """Match primers and barcodes at one end of the sequence."""
 
-    primer_match = align_seq(specimens.primer(which_primer, True), sequence, parameters.max_dist_primer,
+    primer = primer_pair.p1 if which_primer == Primer.P1 else primer_pair.p2
+    primer_rc = primer_pair.p1_rc if which_primer == Primer.P1 else primer_pair.p2_rc
+
+    primer_match = align_seq(primer_rc, sequence, parameters.max_dist_primer,
                              len(sequence) - parameters.search_len, len(sequence))
+
+    # If we found matching primers, look for corresponding barcodes
     if primer_match.matched():
+        match.set_primer_match(primer_match, primer, reversed_sequence, which_primer)
+
         for b, b_rc in zip(specimens.barcodes(which_barcode, False), specimens.barcodes(which_barcode, True)):
             bd = None
             bm = None
             bc = None
             for l in primer_match.locations():
-                barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index, l[1] + 1,
-                               len(sequence), MODE_PREFIX)
+                barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
+                                          l[1] + 1, len(sequence), MODE_PREFIX)
                 if barcode_match.matched():
                     if bd is None or barcode_match.distance() < bd:
                         bm = barcode_match
@@ -660,42 +748,62 @@ def match_one_end(match, parameters, specimens, sequence, reversed_sequence, whi
                         bc = b
             if bm:
                 match.add_barcode_match(bm, bc, reversed_sequence, which_barcode)
-        match.set_primer_match(primer_match, specimens.primer(which_primer, False), reversed_sequence, which_primer)
-
 
 def determine_orientation(parameters, seq, specimens):
+    """Determine sequence orientation by checking primer pairs"""
     rseq = seq.reverse_complement()
     rseq.id = seq.id
     rseq.description = seq.description
 
-    p1 = align_seq(specimens.primer(Primer.P1), seq, specimens.primer_length(Primer.P1) * 0.5, 0, parameters.search_len)
-    p1r = align_seq(specimens.primer(Primer.P1), rseq, specimens.primer_length(Primer.P1) * 0.5, 0, parameters.search_len)
+    best_match = None
+    best_distance = float('inf')
+    reverse_sequence = None
 
-    p2 = align_seq(specimens.primer(Primer.P2), seq, specimens.primer_length(Primer.P2) * 0.5, 0, parameters.search_len)
-    p2r = align_seq(specimens.primer(Primer.P2), rseq, specimens.primer_length(Primer.P2) * 0.5, 0, parameters.search_len)
+    # Try each unique primer pair
+    for primer_pair in specimens.get_primer_pairs():
+        p1 = primer_pair.p1
+        p2 = primer_pair.p2
 
-    vals = []
-    if p1.matched(): vals.append(p1.distance())
-    if p2.matched(): vals.append(p2.distance())
-    if p1r.matched(): vals.append(p1r.distance())
-    if p2r.matched(): vals.append(p2r.distance())
+        # Check sequence in both orientations
+        p1_match = align_seq(p1, seq, len(p1) * 0.5, 0, parameters.search_len)
+        p1r_match = align_seq(p1, rseq, len(p1) * 0.5, 0, parameters.search_len)
+        p2_match = align_seq(p2, seq, len(p2) * 0.5, 0, parameters.search_len)
+        p2r_match = align_seq(p2, rseq, len(p2) * 0.5, 0, parameters.search_len)
 
-    if len(vals) == 0:
-        logging.debug(f"Could not orient sequence - no primer matches")
+        vals = []
+        if p1_match.matched(): vals.append(p1_match.distance())
+        if p2_match.matched(): vals.append(p2_match.distance())
+        if p1r_match.matched(): vals.append(p1r_match.distance())
+        if p2r_match.matched(): vals.append(p2r_match.distance())
+
+        if len(vals) == 0:
+            continue  # Try next primer pair
+
+        current_best = min(vals)
+        if current_best < best_distance:
+            best_distance = current_best
+
+            if (p1_match.distance() == current_best or p2r_match.distance() == current_best) and \
+                    (not p2_match.matched() or p2_match.distance() > current_best) and \
+                    (not p1r_match.matched() or p1r_match.distance() > current_best):
+                reverse_sequence = False
+            elif (p1r_match.distance() == current_best or p2_match.distance() == current_best) and \
+                    (not p2r_match.matched() or p2r_match.distance() > current_best) and \
+                    (not p1_match.matched() or p1_match.distance() > current_best):
+                reverse_sequence = True
+            else:
+                logging.debug(
+                    f"Could not determine orientation for primer pair: {p1_match.distance()} {p2_match.distance()} {p1r_match.distance()} {p2r_match.distance()} {len(seq)}")
+                continue  # Try next primer pair
+
+    if reverse_sequence is None:
+        logging.debug(f"Could not orient sequence - no unambiguous primer matches")
         return False, seq, rseq
-    else:
-        best = min(vals)
-        if (p1.distance() == best or p2r.distance() == best) and (not p2.matched() or p2.distance() > best) and (not p1r.matched() or p1r.distance() > best):
-            reverse = False
-        elif (p1r.distance() == best or p2.distance() == best) and (not p2r.matched() or p2r.distance() > best) and (not p1.matched() or p1.distance() > best):
-            reverse = True
-        else:
-            logging.debug(f"Could not orient sequence: {p1.distance()} {p2.distance()} {p1r.distance()} {p2r.distance()} {len(seq)}")
-            return False, seq, rseq
 
-    if reverse:
+    if reverse_sequence:
         return True, rseq, seq
     return True, seq, rseq
+
 
 def output_write_operation(write_op, output_manager, args):
     if args.output_to_files:
@@ -1026,8 +1134,12 @@ def setup_match_parameters(args, specimens):
         combined_barcodes = list(specimens.barcodes(Barcode.B1)) + [reverse_complement(b) for b in specimens.barcodes(Barcode.B2)]
         _sanity_check_distance(combined_barcodes, max_dist_index, "Forward Barcodes + Reverse Complement of Reverse Barcodes")
 
-        primers = [specimens.primer(Primer.P1, False), specimens.primer(Primer.P1, True),
-                   specimens.primer(Primer.P2, False), specimens.primer(Primer.P2, True)]
+        primers = []
+        for ppi in specimens.get_primer_pairs():
+            primers.append(ppi.p1)
+            primers.append(ppi.p2)
+            primers.append(ppi.p1_rc)
+            primers.append(ppi.p2_rc)
         combined_barcodes_and_primers = combined_barcodes + primers
         _sanity_check_distance(combined_barcodes_and_primers, min(max_dist_index, max_dist_primer),
                                "Forward Barcodes + Reverse Complement of Reverse Barcodes + Both Primers")
@@ -1048,4 +1160,3 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv)
-
