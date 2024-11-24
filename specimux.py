@@ -463,7 +463,7 @@ def _is_valid_data_line(line: List[str]) -> bool:
     _, forward_barcode, forward_primer, reverse_barcode, reverse_primer = line
     dna_sequences = [forward_barcode, forward_primer, reverse_barcode, reverse_primer]
 
-    return all(set(seq.upper()).issubset({'A', 'T', 'G', 'C', 'Y', 'R', 'N', 'W', 'M', 'S', 'K'}) for seq in dna_sequences)
+    return all(set(seq.upper()).issubset({'A', 'T', 'G', 'C', 'Y', 'R', 'N', 'W', 'M', 'S', 'K', 'B', 'D', 'H'}) for seq in dna_sequences)
 
 def open_sequence_file(filename, args):
     file_format = "fastq" if filename.endswith((".fastq", ".fq")) else "fasta"
@@ -473,7 +473,10 @@ def open_sequence_file(filename, args):
 IUPAC_maps = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
               ("N", "A"), ("N", "C"), ("N", "G"), ("N", "T"),
               ("W", "A"), ("W", "T"), ("M", "A"), ("M", "C"),
-              ("S", "C"), ("S", "G"), ("K", "G"), ("K", "T")]
+              ("S", "C"), ("S", "G"), ("K", "G"), ("K", "T"),
+              ("B", "C"), ("B", "G"), ("B", "T"),
+              ("D", "A"), ("D", "G"), ("D", "T"),
+              ("H", "A"), ("H", "C"), ("H", "G"),]
 
 def align_seq(query, target, max_distance, start, end, mode=MODE_INFIX):
     s = 0 if start == -1 else start
