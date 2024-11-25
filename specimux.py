@@ -293,9 +293,14 @@ class Specimens:
         self._b2s = []
         self._b1s_rc = []
         self._b2s_rc = []
+        self._specimen_ids = set()
 
     def add_specimen(self, id, b1, p1, b2, p2):
         """Add a specimen with its barcodes and primers"""
+        if id in self._specimen_ids:
+            raise ValueError(format(f"Duplicate specimen id in index file: {id}"))
+        self._specimen_ids.add(id)
+        
         self._specimens.append((id, b1, p1, b2, p2))
 
         # Handle barcodes
