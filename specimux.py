@@ -184,6 +184,12 @@ class SequenceMatch:
         self.p2_match = match
         self._p2 = primer
 
+    def get_p1(self):
+        return self._p1
+
+    def get_p2(self):
+        return self._p2
+
     def get_p1_location(self):
         return self.p1_match.location() if self.p1_match else None
 
@@ -262,14 +268,14 @@ class SequenceMatch:
 
 
 class PrimerPairInfo:
-    """Helper class to store information about a primer pair and associated specimens"""
-
     def __init__(self, p1: str, p2: str):
         self.p1 = p1.upper()
         self.p2 = p2.upper()
         self.p1_rc = reverse_complement(p1.upper())
         self.p2_rc = reverse_complement(p2.upper())
         self.specimens = set()  # Set of specimen IDs using this primer pair
+        self.b1s = set()  # Set of forward barcodes used with this primer pair
+        self.b2s = set()  # Set of reverse barcodes used with this primer pair
 
     def __eq__(self, other):
         if not isinstance(other, PrimerPairInfo):
@@ -287,20 +293,20 @@ class Specimens:
         self._b2_specimens_index = {}  # Maps barcode2 to set of specimen IDs
         self._barcode_length = 0
         self._primer_pairs = {}  # Maps (p1, p2) tuple to PrimerPairInfo
-        self._specimen_to_primer_pair = {}  # Maps specimen ID to PrimerPairInfo
         # Cache for barcodes
         self._b1s = []
         self._b2s = []
         self._b1s_rc = []
         self._b2s_rc = []
         self._specimen_ids = set()
+        self._primer_specimen_index = {}  # Maps (p1,p2) to set of specimen IDs
 
     def add_specimen(self, id, b1, p1, b2, p2):
         """Add a specimen with its barcodes and primers"""
         if id in self._specimen_ids:
             raise ValueError(format(f"Duplicate specimen id in index file: {id}"))
         self._specimen_ids.add(id)
-        
+
         self._specimens.append((id, b1, p1, b2, p2))
 
         # Handle barcodes
@@ -313,30 +319,23 @@ class Specimens:
 
         self._barcode_length = max(self._barcode_length, len(b1), len(b2))
 
-        # Handle primer pairs
         primer_key = (p1.upper(), p2.upper())
         if primer_key not in self._primer_pairs:
             self._primer_pairs[primer_key] = PrimerPairInfo(p1, p2)
 
         primer_pair_info = self._primer_pairs[primer_key]
         primer_pair_info.specimens.add(id)
-        self._specimen_to_primer_pair[id] = primer_pair_info
+        primer_pair_info.b1s.add(b1.upper())  # Add forward barcode
+        primer_pair_info.b2s.add(b2.upper())  # Add reverse barcode
+
+        if primer_key not in self._primer_specimen_index:
+            self._primer_specimen_index[primer_key] = set()
+        self._primer_specimen_index[primer_key].add(id)
+
 
     def get_primer_pairs(self):
         """Get list of all unique PrimerPairInfo objects"""
         return list(self._primer_pairs.values())
-
-    def get_primers_for_specimen(self, specimen_id):
-        """Get the primers for a specific specimen"""
-        if specimen_id in self._specimen_to_primer_pair:
-            pair = self._specimen_to_primer_pair[specimen_id]
-            return (pair.p1, pair.p2)
-        return None
-
-    def specimens_for_primer_pair(self, p1, p2):
-        """Get set of specimens using a specific primer pair"""
-        key = (p1.upper(), p2.upper())
-        return self._primer_pairs[key].specimens if key in self._primer_pairs else set()
 
     def validate(self):
         self._validate_barcodes_globally_unique()
@@ -364,14 +363,18 @@ class Specimens:
         self._b1s_rc = [reverse_complement(b) for b in self._b1s]
         self._b2s_rc = [reverse_complement(b) for b in self._b2s]
 
-    def specimens_for_barcodes(self, b1_list, b2_list):
-        all_matches = set()
+    def specimens_for_barcodes_and_primers(self, b1_list, b2_list, p1, p2):
+        barcode_matches = set()
         b1s = set()
         for b1 in b1_list:
             b1s.update(self._b1_specimens_index[b1])
         for b2 in b2_list:
-            all_matches.update(b1s.intersection(self._b2_specimens_index[b2]))
-        return list(all_matches)
+            barcode_matches.update(b1s.intersection(self._b2_specimens_index[b2]))
+
+        primer_key = (p1.upper(), p2.upper())
+        primer_matches = self._primer_specimen_index.get(primer_key, set())
+
+        return list(barcode_matches.intersection(primer_matches))
 
     def b_length(self):
         return self._barcode_length
@@ -579,9 +582,9 @@ def process_sequences(seq_records, parameters, specimens, args):
                 classification = CLASS_ORIENTATION_FAILED
             else:
                 matches = match_sequence(args, parameters, seq, rseq, specimens)
-                match, multimatch, multimatch_class = choose_best_match(args, matches)
+                match, multimatch = choose_best_match(args, matches)
                 if multimatch:
-                    classification = format(f"{CLASS_MULTIPLE_PRIMER_PAIRS_MATCHED} {multimatch_class}")
+                    classification = CLASS_MULTIPLE_PRIMER_PAIRS_MATCHED
                     sample_id = SAMPLE_ID_AMBIGUOUS
                 else:
                     sample_id = match_sample(match, sample_id, specimens)
@@ -666,7 +669,6 @@ def choose_best_match(args, matches):
     best_score = -1
     best_match = None
     multimatch = False
-    multimatch_class = None
     for m in matches:
         score = 0
         if m.p1_match and m.p2_match and m.has_b1_match() and m.has_b2_match():
@@ -684,25 +686,22 @@ def choose_best_match(args, matches):
         elif score == best_score:
             multimatch = True
 
-    if multimatch:
-        match best_score:
-            case 0: multimatch_class = "(Neither Primer)"
-            case 1: multimatch_class = "(One Primer)"
-            case 2: multimatch_class = "(Both Primers)"
-            case 3: multimatch_class = "(One Barcode)"
-            case 4: multimatch_class = "(Both Barcodes)"
-
-    return best_match, multimatch, multimatch_class
+    # ambiguity between primer pairs only really matters when there was a full match
+    if best_score == 4 and multimatch:
+        return best_match, True
+    else:
+        return best_match, False
 
 def match_sample(match, sample_id, specimens):
     if match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match():
-        ids = specimens.specimens_for_barcodes(match.best_b1(), match.best_b2())
+        ids = specimens.specimens_for_barcodes_and_primers(
+            match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
         if len(ids) > 1:
             sample_id = SAMPLE_ID_AMBIGUOUS
         elif len(ids) == 1:
             sample_id = ids[0]
         else:
-            logging.warning(f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()})")
+            logging.warning(f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, {match.get_p1()}, {match.get_p2()})")
     return sample_id
 
 def group_sample(match, sample_id, specimens):
@@ -743,7 +742,11 @@ def match_one_end(match, parameters, specimens, sequence, reversed_sequence, pri
     if primer_match.matched():
         match.set_primer_match(primer_match, primer, reversed_sequence, which_primer)
 
-        for b, b_rc in zip(specimens.barcodes(which_barcode, False), specimens.barcodes(which_barcode, True)):
+        # Get relevant barcodes for this primer pair
+        barcodes = primer_pair.b1s if which_barcode == Barcode.B1 else primer_pair.b2s
+
+        for b in barcodes:
+            b_rc = reverse_complement(b)
             bd = None
             bm = None
             bc = None
@@ -764,11 +767,9 @@ def determine_orientation(parameters, seq, specimens):
     rseq.id = seq.id
     rseq.description = seq.description
 
-    best_match = None
     best_distance = float('inf')
     reverse_sequence = None
 
-    # Try each unique primer pair
     for primer_pair in specimens.get_primer_pairs():
         p1 = primer_pair.p1
         p2 = primer_pair.p2
