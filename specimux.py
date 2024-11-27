@@ -285,19 +285,11 @@ class PrimerPairInfo:
     def __hash__(self):
         return hash((self.p1, self.p2))
 
-
 class Specimens:
     def __init__(self):
         self._specimens = []  # List of (id, b1, p1, b2, p2) tuples for reference
-        self._b1_specimens_index = {}  # Maps barcode1 to set of specimen IDs
-        self._b2_specimens_index = {}  # Maps barcode2 to set of specimen IDs
         self._barcode_length = 0
         self._primer_pairs = {}  # Maps (p1, p2) tuple to PrimerPairInfo
-        # Cache for barcodes
-        self._b1s = []
-        self._b2s = []
-        self._b1s_rc = []
-        self._b2s_rc = []
         self._specimen_ids = set()
         self._primer_specimen_index = {}  # Maps (p1,p2) to set of specimen IDs
 
@@ -308,15 +300,6 @@ class Specimens:
         self._specimen_ids.add(id)
 
         self._specimens.append((id, b1, p1, b2, p2))
-
-        # Handle barcodes
-        if b1 not in self._b1_specimens_index:
-            self._b1_specimens_index[b1] = set()
-        if b2 not in self._b2_specimens_index:
-            self._b2_specimens_index[b2] = set()
-        self._b1_specimens_index[b1].add(id)
-        self._b2_specimens_index[b2].add(id)
-
         self._barcode_length = max(self._barcode_length, len(b1), len(b2))
 
         primer_key = (p1.upper(), p2.upper())
@@ -332,7 +315,6 @@ class Specimens:
             self._primer_specimen_index[primer_key] = set()
         self._primer_specimen_index[primer_key].add(id)
 
-
     def get_primer_pairs(self):
         """Get list of all unique PrimerPairInfo objects"""
         return list(self._primer_pairs.values())
@@ -340,41 +322,42 @@ class Specimens:
     def validate(self):
         self._validate_barcodes_globally_unique()
         self._validate_barcode_lengths()
-        self._cache_barcodes()
         logging.info(f"Number of unique primer pairs: {len(self._primer_pairs)}")
         for pair in self._primer_pairs.values():
             logging.info(f"Primer pair {pair.p1}/{pair.p2}: {len(pair.specimens)} specimens")
 
-    # Rest of the previous methods remain the same
     def _validate_barcodes_globally_unique(self):
-        dups = set(self.barcodes(Barcode.B1)).intersection(set(self.barcodes(Barcode.B2)))
+        # Collect all barcodes across primer pairs
+        all_b1s = set()
+        all_b2s = set()
+        for pair in self._primer_pairs.values():
+            all_b1s.update(pair.b1s)
+            all_b2s.update(pair.b2s)
+        dups = all_b1s.intersection(all_b2s)
         if len(dups) > 0:
             logging.warning(f"Duplicate Barcodes ({len(dups)}) in Fwd and Rev: {dups}")
 
     def _validate_barcode_lengths(self):
-        if len(set(len(b) for b in self.barcodes(Barcode.B1))) > 1:
+        all_b1s = set()
+        all_b2s = set()
+        for pair in self._primer_pairs.values():
+            all_b1s.update(pair.b1s)
+            all_b2s.update(pair.b2s)
+        if len(set(len(b) for b in all_b1s)) > 1:
             logging.warning("Forward barcodes have inconsistent lengths")
-        if len(set(len(b) for b in self.barcodes(Barcode.B2))) > 1:
+        if len(set(len(b) for b in all_b2s)) > 1:
             logging.warning("Reverse barcodes have inconsistent lengths")
 
-    def _cache_barcodes(self):
-        self._b1s = list(self._b1_specimens_index.keys())
-        self._b2s = list(self._b2_specimens_index.keys())
-        self._b1s_rc = [reverse_complement(b) for b in self._b1s]
-        self._b2s_rc = [reverse_complement(b) for b in self._b2s]
+    def specimens_for_barcodes_and_primers(self, b1_list, b2_list, p1_matched, p2_matched):
+        matching_specimens = []
+        for spec_id, b1, p1, b2, p2 in self._specimens:
+            if (p1_matched.upper() == p1 and
+                    p2_matched.upper() == p2 and
+                    b1.upper() in b1_list and
+                    b2.upper() in b2_list):
+                matching_specimens.append(spec_id)
 
-    def specimens_for_barcodes_and_primers(self, b1_list, b2_list, p1, p2):
-        barcode_matches = set()
-        b1s = set()
-        for b1 in b1_list:
-            b1s.update(self._b1_specimens_index[b1])
-        for b2 in b2_list:
-            barcode_matches.update(b1s.intersection(self._b2_specimens_index[b2]))
-
-        primer_key = (p1.upper(), p2.upper())
-        primer_matches = self._primer_specimen_index.get(primer_key, set())
-
-        return list(barcode_matches.intersection(primer_matches))
+        return matching_specimens
 
     def b_length(self):
         return self._barcode_length
@@ -385,17 +368,6 @@ class Specimens:
         else:
             return min(len(pair.p2) for pair in self._primer_pairs.values())
 
-    def barcodes(self, which: Barcode, rc=False):
-        if not rc:
-            if which is Barcode.B1:
-                return self._b1s
-            elif which is Barcode.B2:
-                return self._b2s
-        else:
-            if which is Barcode.B1:
-                return self._b1s_rc
-            elif which is Barcode.B2:
-                return self._b2s_rc
 
 class MatchParameters:
     def __init__(self, max_dist_primer, max_dist_index, search_len):
@@ -1113,7 +1085,6 @@ def output_diagnostics(args, classifications, unmatched_barcodes):
         for barcode, count in unmatched_barcodes.most_common(args.top_unmatched_barcodes):
             logging.info(f"Barcode: {barcode}\t\t{count:>{max_count_length}}")
 
-
 def setup_match_parameters(args, specimens):
     def _calculate_distances(sequences):
         distances = []
@@ -1130,11 +1101,19 @@ def setup_match_parameters(args, specimens):
             logging.info(f"Minimum edit distance is {m} for {desc}")
         return m
 
-    _sanity_check_distance(specimens.barcodes(Barcode.B1), "Forward Barcodes", args)
-    _sanity_check_distance(specimens.barcodes(Barcode.B2), "Reverse Barcodes", args)
+    # Collect all barcodes across primer pairs
+    all_b1s = set()
+    all_b2s = set()
+    for pair in specimens._primer_pairs.values():
+        all_b1s.update(pair.b1s)
+        all_b2s.update(pair.b2s)
 
-    combined_barcodes = list(specimens.barcodes(Barcode.B1)) + [reverse_complement(b) for b in specimens.barcodes(Barcode.B2)]
-    min_bc_dist = _sanity_check_distance(combined_barcodes, "Forward Barcodes + Reverse Complement of Reverse Barcodes", args)
+    _sanity_check_distance(list(all_b1s), "Forward Barcodes", args)
+    _sanity_check_distance(list(all_b2s), "Reverse Barcodes", args)
+
+    combined_barcodes = list(all_b1s) + [reverse_complement(b) for b in all_b2s]
+    min_bc_dist = _sanity_check_distance(combined_barcodes,
+        "Forward Barcodes + Reverse Complement of Reverse Barcodes", args)
 
     primers = []
     for ppi in specimens.get_primer_pairs():
