@@ -28,6 +28,7 @@ import os
 import sys
 import timeit
 import math
+import edlib
 from collections import Counter
 from contextlib import ExitStack
 from functools import partial
@@ -43,21 +44,48 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 
-MODE_GLOBAL = 'NW'
-MODE_INFIX = 'HW'
-MODE_PREFIX = 'SHW'
+class AlignMode:
+    GLOBAL = 'NW'
+    INFIX = 'HW'
+    PREFIX = 'SHW'
 
-SAMPLE_ID_AMBIGUOUS = "ambiguous"
-SAMPLE_ID_UNKNOWN = "unknown"
-SAMPLE_ID_PREFIX_FWD_MATCH = "barcode_fwd_"
-SAMPLE_ID_PREFIX_REV_MATCH = "barcode_rev_"
+class SampleId:
+    AMBIGUOUS = "ambiguous"
+    UNKNOWN = "unknown"
+    PREFIX_FWD_MATCH = "barcode_fwd_"
+    PREFIX_REV_MATCH = "barcode_rev_"
 
-try:
-    import edlib
-except:
-    logging.error("\n    edlib module not found, to install use:\n\n        pip install edlib\n")
-    exit(3)
+class TrimMode:
+    PRIMERS = "primers"
+    BARCODES = "barcodes"
+    TAILS = "tails"
+    NONE = "none"
 
+class MatchCode:
+    SHORT_SEQ = "Sequence Too Short"
+    LONG_SEQ = "Sequence Too Long"
+    ORIENTATION_FAILED = "Could Not Determine Orientation"
+    NO_BARCODES = "No Barcode Matches"
+    NO_FWD_BARCODE = "No Forward Barcode Matches"
+    FWD_BARCODE_TRUNCATED = "No Forward Barcode Matches (May be truncated)"
+    NO_REV_BARCODE = "No Reverse Barcode Matches"
+    REV_BARCODE_TRUNCATED = "No Reverse Barcode Matches (May be truncated)"
+    NO_PRIMERS = "No Primer Matches"
+    NO_FWD_PRIMER = "No Forward Primer Matches"
+    NO_REV_PRIMER = "No Reverse Primer Matches"
+    AMBIGUOUS_BARCODES = "Multiple Matches for Both Barcodes"
+    AMBIGUOUS_FWD_BARCODE = "Multiple Matches for Forward Barcode"
+    AMBIGUOUS_REV_BARCODE = "Multiple Matches for Reverse Barcode"
+    MULTIPLE_PRIMER_PAIRS_MATCHED = "Multiple Primer Pair Matches"
+    MATCHED = "Matched"
+
+class Barcode(Enum):
+    B1 = 1
+    B2 = 2
+
+class Primer(Enum):
+    P1 = 3
+    P2 = 4
 
 #wrapper around edlib match result
 class MatchResult:
@@ -94,14 +122,6 @@ class MatchResult:
 
     def adjust_distance(self, d):
         self._edlib_match['editDistance'] = d
-
-class Barcode(Enum):
-    B1 = 1
-    B2 = 2
-
-class Primer(Enum):
-    P1 = 3
-    P2 = 4
 
 class SequenceMatch:
 
@@ -463,7 +483,7 @@ IUPAC_maps = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
               ("V", "A"), ("V", "C"), ("V", "G"),]
 
 
-def align_seq(query, target, max_distance, start, end, mode=MODE_INFIX):
+def align_seq(query, target, max_distance, start, end, mode=AlignMode.INFIX):
     # Convert query to string if it's a Seq or SeqRecord
     if isinstance(query, (Seq, SeqRecord)):
         query = str(query.seq if isinstance(query, SeqRecord) else query)
@@ -495,11 +515,6 @@ def get_quality_seq(seq):
     else:
         return [40]*len(seq)
 
-ARG_TRIM_PRIMERS = "primers"
-ARG_TRIM_BARCODES = "barcodes"
-ARG_TRIM_TAILS = "tails"
-ARG_TRIM_NONE = "none"
-
 def create_write_operation(sample_id, args, seq, match, specimens):
     formatted_seq = seq.seq
     quality_scores = get_quality_seq(seq)
@@ -507,14 +522,14 @@ def create_write_operation(sample_id, args, seq, match, specimens):
     s = 0
     e = len(formatted_seq)
 
-    if args.trim == ARG_TRIM_PRIMERS:
+    if args.trim == TrimMode.PRIMERS:
         (s, e) = match.interprimer_extent()
-    elif args.trim == ARG_TRIM_BARCODES:
+    elif args.trim == TrimMode.BARCODES:
         (s, e) = match.interbarcode_extent()
-    elif args.trim == ARG_TRIM_TAILS:
+    elif args.trim == TrimMode.TAILS:
         (s, e) = match.intertail_extent()
 
-    if args.trim != ARG_TRIM_NONE:
+    if args.trim != TrimMode.NONE:
         formatted_seq = seq.seq[s:e]
         quality_scores = quality_scores[s:e]
         match.trim_locations(s)
@@ -530,42 +545,25 @@ def create_write_operation(sample_id, args, seq, match, specimens):
 
 
 
-CLASS_SHORT_SEQ = "Sequence Too Short"
-CLASS_LONG_SEQ = "Sequence Too Long"
-CLASS_ORIENTATION_FAILED = "Could Not Determine Orientation"
-CLASS_NO_BARCODES = "No Barcode Matches"
-CLASS_NO_FWD_BARCODE = "No Forward Barcode Matches"
-CLASS_FWD_BARCODE_TRUNCATED = "No Forward Barcode Matches (May be truncated)"
-CLASS_NO_REV_BARCODE = "No Reverse Barcode Matches"
-CLASS_REV_BARCODE_TRUNCATED = "No Reverse Barcode Matches (May be truncated)"
-CLASS_NO_PRIMERS = "No Primer Matches"
-CLASS_NO_FWD_PRIMER = "No Forward Primer Matches"
-CLASS_NO_REV_PRIMER = "No Reverse Primer Matches"
-CLASS_AMBIGUOUS_BARCODES = "Multiple Matches for Both Barcodes"
-CLASS_AMBIGUOUS_FWD_BARCODE = "Multiple Matches for Forward Barcode"
-CLASS_AMBIGUOUS_REV_BARCODE = "Multiple Matches for Reverse Barcode"
-CLASS_MULTIPLE_PRIMER_PAIRS_MATCHED = "Multiple Primer Pair Matches"
-CLASS_MATCHED = "Matched"
-
 def process_sequences(seq_records, parameters, specimens, args):
     classifications = Counter()
     unmatched_barcodes = Counter()
     write_ops = []
 
     for seq in seq_records:
-        sample_id = SAMPLE_ID_UNKNOWN
+        sample_id = SampleId.UNKNOWN
 
         classification = None
         match = SequenceMatch(len(seq), specimens.b_length())
 
         if args.min_length != -1 and len(seq) < args.min_length:
-            classification = CLASS_SHORT_SEQ
+            classification = MatchCode.SHORT_SEQ
         elif args.max_length != -1 and len(seq) > args.max_length:
-            classification = CLASS_LONG_SEQ
+            classification = MatchCode.LONG_SEQ
         else:
             (oriented, seq, rseq) = determine_orientation(parameters, seq, specimens)
             if not oriented:
-                classification = CLASS_ORIENTATION_FAILED
+                classification = MatchCode.ORIENTATION_FAILED
             else:
                 #extract string versions for performance - roughly 18% improvement
                 s = str(seq.seq)
@@ -574,8 +572,8 @@ def process_sequences(seq_records, parameters, specimens, args):
                 matches = match_sequence(args, parameters, s, rs, specimens)
                 match, multimatch = choose_best_match(args, matches)
                 if multimatch:
-                    classification = CLASS_MULTIPLE_PRIMER_PAIRS_MATCHED
-                    sample_id = SAMPLE_ID_AMBIGUOUS
+                    classification = MatchCode.MULTIPLE_PRIMER_PAIRS_MATCHED
+                    sample_id = SampleId.AMBIGUOUS
                 else:
                     sample_id = match_sample(match, sample_id, specimens)
                     classification = classify_match(match, sample_id, specimens)
@@ -615,44 +613,44 @@ def analyze_barcode_region(seq, match, bc_len):
 
 def classify_match(match, sample_id, specimens):
     classification = None
-    if sample_id == SAMPLE_ID_UNKNOWN:
+    if sample_id == SampleId.UNKNOWN:
         if not match.p1_match and not match.p2_match:
-            classification = CLASS_NO_PRIMERS
+            classification = MatchCode.NO_PRIMERS
         elif not match.has_b2_match() and match.has_b1_match():
             if match.p2_match:
                 if (match.sequence_length - match.p2_match.location()[1]) < (specimens.b_length()):
-                    classification = CLASS_REV_BARCODE_TRUNCATED
+                    classification = MatchCode.REV_BARCODE_TRUNCATED
                 else:
-                    classification = CLASS_NO_REV_BARCODE
+                    classification = MatchCode.NO_REV_BARCODE
             else:
-                classification = CLASS_NO_REV_PRIMER
+                classification = MatchCode.NO_REV_PRIMER
         elif not match.has_b1_match() and match.has_b2_match():
             if match.p1_match:
                 if (match.p1_match.location()[0] - 1) < (specimens.b_length()):
-                    classification = CLASS_FWD_BARCODE_TRUNCATED
+                    classification = MatchCode.FWD_BARCODE_TRUNCATED
                 else:
-                    classification = CLASS_NO_FWD_BARCODE
+                    classification = MatchCode.NO_FWD_BARCODE
             else:
-                classification = CLASS_NO_FWD_PRIMER
+                classification = MatchCode.NO_FWD_PRIMER
         elif not match.p2_match:
-            classification = CLASS_NO_REV_PRIMER
+            classification = MatchCode.NO_REV_PRIMER
         elif not match.p1_match:
-            classification = CLASS_NO_FWD_PRIMER
+            classification = MatchCode.NO_FWD_PRIMER
         elif not match.has_b1_match() and not match.has_b2_match():
-            classification = CLASS_NO_BARCODES
+            classification = MatchCode.NO_BARCODES
         else:
             assert(False)
-    elif sample_id == SAMPLE_ID_AMBIGUOUS:
+    elif sample_id == SampleId.AMBIGUOUS:
         if len(match.best_b1()) > 1 and len(match.best_b2()) > 1:
-            classification = CLASS_AMBIGUOUS_BARCODES
+            classification = MatchCode.AMBIGUOUS_BARCODES
         elif len(match.best_b1()) > 1:
-            classification = CLASS_AMBIGUOUS_FWD_BARCODE
+            classification = MatchCode.AMBIGUOUS_FWD_BARCODE
         elif len(match.best_b2()) > 1:
-            classification = CLASS_AMBIGUOUS_REV_BARCODE
+            classification = MatchCode.AMBIGUOUS_REV_BARCODE
         else:
             assert(False)
     else:
-        classification = CLASS_MATCHED
+        classification = MatchCode.MATCHED
     return classification
 
 def choose_best_match(args, matches):
@@ -687,7 +685,7 @@ def match_sample(match, sample_id, specimens):
         ids = specimens.specimens_for_barcodes_and_primers(
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
         if len(ids) > 1:
-            sample_id = SAMPLE_ID_AMBIGUOUS
+            sample_id = SampleId.AMBIGUOUS
         elif len(ids) == 1:
             sample_id = ids[0]
         else:
@@ -695,13 +693,13 @@ def match_sample(match, sample_id, specimens):
     return sample_id
 
 def group_sample(match, sample_id, specimens):
-    if sample_id in [SAMPLE_ID_UNKNOWN, SAMPLE_ID_AMBIGUOUS]:
+    if sample_id in [SampleId.UNKNOWN, SampleId.AMBIGUOUS]:
         b1s = match.best_b1()
         b2s = match.best_b2()
         if len(b2s) == 1:
-            sample_id = SAMPLE_ID_PREFIX_REV_MATCH + b2s[0]
+            sample_id = SampleId.PREFIX_REV_MATCH + b2s[0]
         elif len(b1s) == 1:
-            sample_id = SAMPLE_ID_PREFIX_FWD_MATCH + b1s[0]
+            sample_id = SampleId.PREFIX_FWD_MATCH + b1s[0]
     return sample_id
 
 def match_sequence(args, parameters, seq, rseq, specimens):
@@ -742,7 +740,7 @@ def match_one_end(match, parameters, specimens, sequence, reversed_sequence, pri
             bc = None
             for l in primer_match.locations():
                 barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
-                                          l[1] + 1, len(sequence), MODE_PREFIX)
+                                          l[1] + 1, len(sequence), AlignMode.PREFIX)
                 if barcode_match.matched():
                     if bd is None or barcode_match.distance() < bd:
                         bm = barcode_match
@@ -919,7 +917,7 @@ def parse_args(argv):
     parser.add_argument("-P", "--output-file-prefix", default="sample_", help="Prefix for individual files when using -F (default: sample_)")
     parser.add_argument("-O", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
     parser.add_argument("--color", action="store_true", help="Highlight barcode matches in blue, primer matches in green")
-    parser.add_argument("--trim", choices=[ARG_TRIM_NONE, ARG_TRIM_TAILS, ARG_TRIM_BARCODES, ARG_TRIM_PRIMERS], default=ARG_TRIM_BARCODES, help="trimming to apply")
+    parser.add_argument("--trim", choices=[TrimMode.NONE, TrimMode.TAILS, TrimMode.BARCODES, TrimMode.PRIMERS], default=TrimMode.BARCODES, help="trimming to apply")
     parser.add_argument("-d", "--diagnostics", action="store_true", help="Output extra diagnostics")
     parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--top-unmatched-barcodes", type=int, default=0, help="Display the top N unmatched barcode strings")
@@ -1021,7 +1019,7 @@ def specimux_mp(args):
                     output_write_operation(write_op, output_manager, args)
 
                 total_processed = sum(classifications.values())
-                matched = classifications[CLASS_MATCHED]
+                matched = classifications[MatchCode.MATCHED]
                 pct = matched/total_processed if total_processed > 0 else 0
                 print(f"read: {total_processed}\t\tmatched: {matched}\t\t{pct:.2%}", end='\r', file=sys.stderr)
                 sys.stderr.flush()
@@ -1070,7 +1068,7 @@ def specimux(args):
             num_seqs += len(seq_batch)
 
             total_processed = sum(classifications.values())
-            matched = classifications[CLASS_MATCHED]
+            matched = classifications[MatchCode.MATCHED]
             pct = matched / total_processed if total_processed > 0 else 0
             print(f"read: {total_processed}\t\tmatched: {matched}\t\t{pct:.2%}", end='\r', file=sys.stderr)
             sys.stderr.flush()
