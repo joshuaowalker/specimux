@@ -28,6 +28,8 @@ import os
 import sys
 import timeit
 import math
+from _operator import itemgetter
+
 import edlib
 from collections import Counter
 from contextlib import ExitStack
@@ -43,6 +45,18 @@ from multiprocessing import Pool
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
+
+IUPAC_EQUIV = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
+               ("N", "A"), ("N", "C"), ("N", "G"), ("N", "T"),
+               ("W", "A"), ("W", "T"), ("M", "A"), ("M", "C"),
+               ("S", "C"), ("S", "G"), ("K", "G"), ("K", "T"),
+               ("B", "C"), ("B", "G"), ("B", "T"),
+               ("D", "A"), ("D", "G"), ("D", "T"),
+               ("H", "A"), ("H", "C"), ("H", "T"),
+               ("V", "A"), ("V", "C"), ("V", "G"), ]
+
+IUPAC_CODES = set([t[0] for t in IUPAC_EQUIV])
+IUPAC_CODES.update(["A", "C", "G", "T"])
 
 class AlignMode:
     GLOBAL = 'NW'
@@ -87,8 +101,8 @@ class Primer(Enum):
     P1 = 3
     P2 = 4
 
-#wrapper around edlib match result
 class MatchResult:
+    """Wrapper around edlib match result"""
     def __init__(self, edlib_match):
         self._edlib_match = edlib_match
 
@@ -105,23 +119,23 @@ class MatchResult:
         return self._edlib_match['locations']
 
     def reversed(self, seq_length):
+        """Return a new MatchResult with locations relative to the reversed sequence"""
         m = MatchResult(self._edlib_match.copy())
         m._reverse(seq_length)
         return m
 
     def _reverse(self, seq_length):
+        """Update locations to be relative to the start of the reversed sequence"""
         if self.distance() == -1: return
 
         r = self._edlib_match
         r['locations'] = [(seq_length - loc[1] - 1, seq_length - loc[0] - 1) for loc in r['locations']]
 
     def adjust_start(self, s):
+        """Update start in locations by s"""
         if self.distance() == -1: return
 
         self._edlib_match['locations'] = [(loc[0] + s, loc[1] + s) for loc in self._edlib_match['locations']]  # adjust relative match to absolute
-
-    def adjust_distance(self, d):
-        self._edlib_match['editDistance'] = d
 
 class SequenceMatch:
 
@@ -142,23 +156,12 @@ class SequenceMatch:
             m = m.reversed(self.sequence_length)
 
         if which is Barcode.B1:
-            self.add_b1_match(m, barcode)
+            self._b1_matches.append((barcode, m, m.distance()))
+            self._b1_matches.sort(key=itemgetter(2))  # Sort by edit distance
+
         else:
-            self.add_b2_match(m, barcode)
-
-    def add_b1_match(self, match: MatchResult, barcode: str):
-        self._b1_matches.append((barcode, match, match.distance()))
-        self._b1_matches.sort(key=itemgetter(2))  # Sort by edit distance
-
-    def add_b2_match(self, match: MatchResult, barcode: str):
-        self._b2_matches.append((barcode, match, match.distance()))
-        self._b2_matches.sort(key=itemgetter(2))  # Sort by edit distance
-
-    def p1_distance(self):
-        return self.p1_match.distance() if self.p1_match else -1
-
-    def p2_distance(self):
-        return self.p2_match.distance() if self.p2_match else -1
+            self._b2_matches.append((barcode, m, m.distance()))
+            self._b2_matches.sort(key=itemgetter(2))  # Sort by edit distance
 
     def b1_distance(self):
         return self._b1_matches[0][2] if len(self._b1_matches) > 0 else -1
@@ -172,40 +175,22 @@ class SequenceMatch:
         best_distance = self.b1_distance()
         return [b for b, _, d in self._b1_matches if abs(d - best_distance) < self.ambiguity_threshold]
 
-    def best_b1_match(self) -> List[MatchResult]:
-        if not self._b1_matches:
-            return []
-        best_distance = self.b1_distance()
-        return [m for b, m, d in self._b1_matches if abs(d - best_distance) < self.ambiguity_threshold]
-
     def best_b2(self) -> List[str]:
         if not self._b2_matches:
             return []
         best_distance = self.b2_distance()
         return [b for b, _, d in self._b2_matches if abs(d - best_distance) < self.ambiguity_threshold]
 
-    def best_b2_match(self) -> List[MatchResult]:
-        if not self._b2_matches:
-            return []
-        best_distance = self.b2_distance()
-        return [m for b, m, d in self._b2_matches if abs(d - best_distance) < self.ambiguity_threshold]
-
     def set_primer_match(self, match: MatchResult, primer: str, reverse: bool, which: Primer):
         m = match
         if reverse:
             m = m.reversed(self.sequence_length)
         if which is Primer.P1:
-            self.set_p1_match(m, primer)
+            self.p1_match = m
+            self._p1 = primer
         else:
-            self.set_p2_match(m, primer)
-
-    def set_p1_match(self, match, primer):
-        self.p1_match = match
-        self._p1 = primer
-
-    def set_p2_match(self, match, primer):
-        self.p2_match = match
-        self._p2 = primer
+            self.p2_match = m
+            self._p2 = primer
 
     def get_p1(self):
         return self._p1
@@ -350,7 +335,6 @@ class Specimens:
             logging.info(f"Primer pair {pair.p1}/{pair.p2}: {len(pair.specimens)} specimens")
 
     def _validate_barcodes_globally_unique(self):
-        # Collect all barcodes across primer pairs
         all_b1s = set()
         all_b2s = set()
         for pair in self._primer_pairs.values():
@@ -385,13 +369,6 @@ class Specimens:
     def b_length(self):
         return self._barcode_length
 
-    def primer_length(self, which):
-        if which == Primer.P1:
-            return min(len(pair.p1) for pair in self._primer_pairs.values())
-        else:
-            return min(len(pair.p2) for pair in self._primer_pairs.values())
-
-
 class MatchParameters:
     def __init__(self, max_dist_primer, max_dist_index, search_len):
         self.max_dist_primer = max_dist_primer
@@ -408,7 +385,6 @@ def read_barcode_file(filename: str) -> Specimens:
     with open(filename, 'r', newline='') as f:
         reader = csv.reader(f, delimiter='\t')
 
-        # Read the first line
         first_line = next(reader, None)
         if not first_line:
             raise ValueError("The barcode file is empty")
@@ -466,25 +442,15 @@ def _is_valid_data_line(line: List[str]) -> bool:
     _, forward_barcode, forward_primer, reverse_barcode, reverse_primer = line
     dna_sequences = [forward_barcode, forward_primer, reverse_barcode, reverse_primer]
 
-    return all(set(seq.upper()).issubset({'A', 'T', 'G', 'C', 'Y', 'R', 'N', 'W', 'M', 'S', 'K', 'B', 'D', 'H', 'V'}) for seq in dna_sequences)
+    return all(set(seq.upper()).issubset(IUPAC_CODES) for seq in dna_sequences)
 
 def open_sequence_file(filename, args):
     file_format = "fastq" if filename.endswith((".fastq", ".fq")) else "fasta"
     args.isfastq = file_format == "fastq"
     return SeqIO.parse(filename, file_format)
 
-IUPAC_maps = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
-              ("N", "A"), ("N", "C"), ("N", "G"), ("N", "T"),
-              ("W", "A"), ("W", "T"), ("M", "A"), ("M", "C"),
-              ("S", "C"), ("S", "G"), ("K", "G"), ("K", "T"),
-              ("B", "C"), ("B", "G"), ("B", "T"),
-              ("D", "A"), ("D", "G"), ("D", "T"),
-              ("H", "A"), ("H", "C"), ("H", "T"),
-              ("V", "A"), ("V", "C"), ("V", "G"),]
-
-
 def align_seq(query, target, max_distance, start, end, mode=AlignMode.INFIX):
-    # Convert query to string if it's a Seq or SeqRecord
+    # Convert query to string if it's a Seq or SeqRecord - not functionally necessary, but improves performance
     if isinstance(query, (Seq, SeqRecord)):
         query = str(query.seq if isinstance(query, SeqRecord) else query)
 
@@ -499,7 +465,7 @@ def align_seq(query, target, max_distance, start, end, mode=AlignMode.INFIX):
 
     t = target_seq[s:e]
 
-    r = edlib.align(query, t, mode, 'locations', max_distance, additionalEqualities=IUPAC_maps)
+    r = edlib.align(query, t, mode, 'locations', max_distance, additionalEqualities=IUPAC_EQUIV)
 
     # Handle edlib sometimes returning non-match with high edit distance
     if r['editDistance'] != -1 and r['editDistance'] > max_distance:
@@ -569,8 +535,8 @@ def process_sequences(seq_records, parameters, specimens, args):
                 s = str(seq.seq)
                 rs = str(rseq.seq)
 
-                matches = match_sequence(args, parameters, s, rs, specimens)
-                match, multimatch = choose_best_match(args, matches)
+                matches = match_sequence(parameters, s, rs, specimens)
+                match, multimatch = choose_best_match(matches)
                 if multimatch:
                     classification = MatchCode.MULTIPLE_PRIMER_PAIRS_MATCHED
                     sample_id = SampleId.AMBIGUOUS
@@ -579,7 +545,7 @@ def process_sequences(seq_records, parameters, specimens, args):
                     classification = classify_match(match, sample_id, specimens)
 
                 if args.group_unknowns:
-                    sample_id = group_sample(match, sample_id, specimens)
+                    sample_id = group_sample(match, sample_id)
 
                 unmatched_barcode = analyze_barcode_region(seq.seq, match, specimens.b_length())
                 if unmatched_barcode:
@@ -612,7 +578,6 @@ def analyze_barcode_region(seq, match, bc_len):
         return None
 
 def classify_match(match, sample_id, specimens):
-    classification = None
     if sample_id == SampleId.UNKNOWN:
         if not match.p1_match and not match.p2_match:
             classification = MatchCode.NO_PRIMERS
@@ -653,7 +618,8 @@ def classify_match(match, sample_id, specimens):
         classification = MatchCode.MATCHED
     return classification
 
-def choose_best_match(args, matches):
+def choose_best_match(matches):
+    """In case there were matches under multiple primer pairs, choose the best"""
     best_score = -1
     best_match = None
     multimatch = False
@@ -692,7 +658,7 @@ def match_sample(match, sample_id, specimens):
             logging.warning(f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, {match.get_p1()}, {match.get_p2()})")
     return sample_id
 
-def group_sample(match, sample_id, specimens):
+def group_sample(match, sample_id):
     if sample_id in [SampleId.UNKNOWN, SampleId.AMBIGUOUS]:
         b1s = match.best_b1()
         b2s = match.best_b2()
@@ -702,22 +668,22 @@ def group_sample(match, sample_id, specimens):
             sample_id = SampleId.PREFIX_FWD_MATCH + b1s[0]
     return sample_id
 
-def match_sequence(args, parameters, seq, rseq, specimens):
+def match_sequence(parameters, seq, rseq, specimens):
     """Match sequence against primers and barcodes"""
 
     matches = []
 
     for primer_pair in specimens.get_primer_pairs():
         match = SequenceMatch(len(seq), specimens.b_length())
-        match_one_end(match, parameters, specimens, rseq, True, primer_pair, Primer.P1, Barcode.B1)
-        match_one_end(match, parameters, specimens, seq, False, primer_pair, Primer.P2, Barcode.B2)
+        match_one_end(match, parameters, rseq, True, primer_pair, Primer.P1, Barcode.B1)
+        match_one_end(match, parameters, seq, False, primer_pair, Primer.P2, Barcode.B2)
 
         matches.append(match)
 
     return matches
 
 
-def match_one_end(match, parameters, specimens, sequence, reversed_sequence, primer_pair, which_primer, which_barcode):
+def match_one_end(match, parameters, sequence, reversed_sequence, primer_pair, which_primer, which_barcode):
     """Match primers and barcodes at one end of the sequence."""
 
     primer = primer_pair.p1 if which_primer == Primer.P1 else primer_pair.p2
@@ -813,7 +779,6 @@ def output_write_operation(write_op, output_manager, args):
     if args.color:
         formatted_seq = color_sequence(formatted_seq, write_op.match, write_op.quality_scores)
 
-    # Use '@' for FASTQ and '>' for FASTA
     header_symbol = '@' if args.isfastq else '>'
     fh.write(f"{header_symbol}{write_op.seq_id} {write_op.distance_code} {write_op.sample_id}\n")
     fh.write(f"{formatted_seq}\n")
@@ -960,8 +925,6 @@ class WorkItem(NamedTuple):
     seq_number: int
     seq_records: List  # This now contains actual sequence records, not an iterator
     parameters: MatchParameters
-    specimens: Specimens
-    args: argparse.Namespace
 
 def worker(work_item, specimens, args):
     write_ops, classifications, unmatched_barcodes = process_sequences(work_item.seq_records, work_item.parameters, specimens, args)
@@ -1008,7 +971,7 @@ def specimux_mp(args):
                     seq_batch = list(itertools.islice(seq_records, to_read))
                     if not seq_batch:
                         break
-                    work_item = WorkItem(num_seqs, seq_batch, parameters, None, args)
+                    work_item = WorkItem(num_seqs, seq_batch, parameters)
                     yield work_item
                     num_seqs += len(seq_batch)
 
