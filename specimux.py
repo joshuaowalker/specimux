@@ -87,10 +87,10 @@ class MatchCode:
     FWD_BARCODE_TRUNCATED = "4B: No Forward Barcode Matches (May be truncated)"
     NO_REV_BARCODE = "4C: No Reverse Barcode Matches"
     REV_BARCODE_TRUNCATED = "4D: No Reverse Barcode Matches (May be truncated)"
+    MULTIPLE_PRIMER_PAIRS_MATCHED = "5: Multiple Primer Pair Full Matches"
     AMBIGUOUS_BARCODES = "6C: Multiple Matches for Both Barcodes"
     AMBIGUOUS_FWD_BARCODE = "6A: Multiple Matches for Forward Barcode"
     AMBIGUOUS_REV_BARCODE = "6B: Multiple Matches for Reverse Barcode"
-    MULTIPLE_PRIMER_PAIRS_MATCHED = "5: Multiple Primer Pair Equal Matches"
     MATCHED = " 7: Matched"
 
 class Barcode(Enum):

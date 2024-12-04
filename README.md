@@ -12,8 +12,8 @@ designs and matching regimes, specimux focuses specifically on high precision fo
 dual-indexed sequences.
 
 Developed as a volunteer contribution, Specimux attempts to fill a small niche in processing large-scale,
-community-driven
-fungal DNA barcoding projects.
+community-driven fungal DNA barcoding projects.  Specimux was designed to work well with the Primary Data Analysis protocol
+developed by Stephen Russell [1].
 
 The tool was developed and tested using the Mycomap ONT037 dataset, which comprises 768 specimens
 and approximately 765,000 nanopore reads in FastQ format. This real-world dataset provided a robust
@@ -113,22 +113,51 @@ options:
   -v, --version         show program's version number and exit
 ```
 
-## Major Enhancements in Specimux
+## Major Features in Specimux
 
 Specimux introduces several changes compared to the original minibar.py program, focused on
 maximizing the precision of specimen assignment, minimizing wrongly-assigned specimens.
 
-### 1. Middle-Out Barcode and Primer Matching
+## Middle-Out Primer and Barcode Matching
 
-Specimux first searches for the primer sequences, beginning at the specified search length away from each end
-of the sequence. Once a primer is found, specimux searches the immediately adjacent portion of the sequence
-for the appropriate barcodes. This effectively anchors one edge of the barcode against the primer. This approach:
+Specimux uses a "middle-out" strategy to identify barcodes and primers in sequencing reads. Here's how it works:
 
-- Provides a more reliable starting point for barcode identification
-- Reduces misidentification due to partial matches or errors at the barcode-primer junction
-- Increases the effective distance between valid codewords, improving error correction capabilities
+1. Primer Detection:
+   - The algorithm first searches for primer sequences within a specified search region at each end of the read
+   - Primers are matched using "infix" alignment, allowing the match to float within the search region
+   - The search region length can be adjusted using the --search-len parameter (default: 80bp)
 
-### 2. Sequence Orientation Detection and Normalization
+2. Barcode Detection:
+   - After finding a primer, Specimux looks for the corresponding barcode
+   - For the forward (5') end:
+     - Converts both the sequence and barcode to reverse complement
+     - Searches in the region between the primer match and the sequence start
+     - Must align immediately adjacent to the primer (prefix mode)
+   - For the reverse (3') end:
+     - Uses forward orientation
+     - Searches in the region between the primer match and the sequence end
+     - Must align immediately adjacent to the primer (prefix mode)
+   - Barcode search example:
+```
+5'                                                                                    3'
+[Forward Barcode][Forward Primer]---target sequence---[Reverse Primer][Reverse Barcode]
+                 ^                                                    ^
+      <-- Search |                                                    | Search -->
+```          
+
+3. Edit Distance Scoring:
+   - Any gaps between primer and barcode count against the allowed edit distance
+   - This anchoring effect helps prevent false matches from partial sequence similarities
+   - Barcode matches must stay within the specified edit distance threshold
+   - Default threshold is half the minimum edit distance between any barcode pair
+
+Benefits of this approach:
+- More reliable identification by using primers as anchor points
+- Reduced false positives from partial matches or chimeric sequences 
+- Better error correction by enforcing barcode-primer proximity
+- Handles both perfect and imperfect matches in a principled way
+
+## Sequence Orientation Detection and Normalization
 
 The program automatically detects and normalizes sequence orientation:
 
@@ -136,16 +165,13 @@ The program automatically detects and normalizes sequence orientation:
 - Standardizes all sequences to forward orientation before barcode matching
 - Ensures consistent processing regardless of original sequence orientation
 
-### 3. Sequence Length Filtering
+## Sequence Length Filtering
 
 Specimux provides options to filter sequences based on length:
 
 - `--min-length` parameter sets the minimum acceptable sequence length
 - `--max-length` parameter sets the maximum acceptable sequence length
 - Helps exclude potentially problematic sequences (e.g., truncated reads, artifacts, chimeras)
-
-### 4. Multiprocessing (described below)
-### 5. First-class support for multiple primer pairs (described below)
 
 ## Multiprocessing
 
@@ -155,15 +181,20 @@ systems effectively.
 
 ### How it works
 
-1. The input sequences are divided into batches.
+1. The input sequences are divided into batches by the parent process.
 2. Each batch is processed independently by a separate worker process.
-3. The results from all workers are combined to produce the final output.
+3. The results from all workers are combined in the parent process to produce the final output.
 
 ### Performance impact
 
 On a typical 8-core system, the multiprocessing implementation in Specimux allows it to maintain performance comparable
 to the original minibar.py, despite the additional alignment checks. The actual performance gain may vary depending on
 your specific hardware and the nature of your input data.
+
+#### Multiple Primer Pairs and Degenerate Primers
+Specimux supports multiple primer pairs and degenerate primers containing ambiguous IUPAC codes.  However, these do
+not come for free.  Each additional pair of primers will slow performance.  Degenerate primers may slow performance 
+significantly.
 
 ### Controlling multiprocessing
 
@@ -197,7 +228,13 @@ setup.
 - **Too high edit distance**: Can reduce precision, potentially causing incorrect assignment of sequences to specimens.
 
 Careful selection of a barcode set with high error-correcting power can simplify this optimization process. The paper by
-Buschmann and Bystrykh [1] provides valuable insights into the rationale and design of such barcode sets.
+Buschmann and Bystrykh [2] provides valuable insights into the rationale and design of such barcode sets.
+
+By default, specimux will assign the barcode edit distance threshold as half (round up) of the minimum edit distance between all
+barcodes specified in the metadata file.  This can be overridden with the `-e` parameter.
+
+By default, specimux will assign the primer edit distance threshold as the minimum edit distance between all primers specified
+in the metadata file.  This can be overridden with the `-E` parameter.
 
 ## Multiple Primer Support
 
@@ -247,13 +284,14 @@ The matching process follows this hierarchy:
     - "No Forward Barcode Matches (May be truncated)" - No forward barcode found but sequence is short at that end
     - "No Reverse Barcode Matches (May be truncated)" - No reverse barcode found but sequence is short at that end
 
-5. **Ambiguity Checks**
+5. **Multiple Primer Ambiguity**
+   - "Multiple Primer Pair Full Matches" - Multiple primer pairs matched with both barcodes also matching
+6. **Specimen Ambiguity Checks**
     - "Multiple Matches for Forward Barcode" - Multiple forward barcodes match within the ambiguity threshold
     - "Multiple Matches for Reverse Barcode" - Multiple reverse barcodes match within the ambiguity threshold
     - "Multiple Matches for Both Barcodes" - Both ends have multiple matching barcodes
     - "Multiple Primer Pair Matches" - Multiple primer pairs match equally well (only with mixed primer sets)
-
-6. **Success**
+7. **Success**
     - "Matched" - Successful unambiguous match of primers and barcodes
 
 Each classification represents a terminal state - once a sequence receives a classification, no further matching is
@@ -266,8 +304,8 @@ while many truncated matches might indicate sequencing quality issues or upstrea
 
 ### Diagnostic Information
 
-Specimux provides detailed information about edit distances when run in `--diagnostics` mode. This information can be
-crucial for understanding the error-correcting capabilities of your barcode set. For example:
+Specimux provides detailed information about edit distances when run in `-d` / `--diagnostics` mode. This information can be
+important for understanding the error-correcting capabilities of your barcode set. For example:
 
 ```
 2024-09-16 15:52:37,784 - INFO - Maximum edit distances set to 3 (barcode) and 6 (primer)
@@ -278,7 +316,7 @@ crucial for understanding the error-correcting capabilities of your barcode set.
 ```
 
 This output helps users understand the robustness of their barcode set against various types of errors. By analyzing
-this information, researchers can make informed decisions about whether their chosen parameters strike the right balance
+this information, users can make informed decisions about whether their chosen parameters strike the right balance
 between stringency and flexibility for their specific experimental needs.
 
 We recommend users experiment with different parameter settings on a subset of their data to determine the optimal
@@ -286,11 +324,41 @@ configuration for their particular sequencing setup and expected error rates.
 
 ## Sequence Output Options
 
-By default, Specimux trims sequences to remove the forward and reverse primers, barcodes, and any other information
-between the
-primer and the respective end of the sequence. If primers are not found, the sequence is not trimmed. This behavior can
-be
-modified using the following options:
+Each sequence can have several distinct regions, trimmed differently by each option:
+
+Raw sequence layout:
+```
+5'                                                                                                            3'
+<---tail--->[Forward Barcode][Forward Primer]---target sequence---[Reverse Primer][Reverse Barcode]<---tail--->
+```
+
+--trim none:
+```
+<---tail--->[Forward Barcode][Forward Primer]---target sequence---[Reverse Primer][Reverse Barcode]<---tail--->
+|<-----------------------------------------entire sequence unchanged----------------------------------------->|
+```
+--trim tails:
+```
+            [Forward Barcode][Forward Primer]---target sequence---[Reverse Primer][Reverse Barcode]
+            |<----------------------------------output sequence---------------------------------->|
+```
+--trim barcodes (default):
+```
+                           [Forward Primer]---target sequence---[Reverse Primer]
+                           |<-----------------output sequence----------------->|
+```
+--trim primers:
+```
+                                         ---target sequence---
+                                         |<-output sequence->|
+```
+
+Note: When barcodes cannot be located, their positions are estimated based on expected barcode length
+when using ```--trim tails```. Trimming of primers only occurs when primers are explicitly found.
+
+By default, Specimux trims sequences to remove the forward and reverse barcodes, and any other information
+between the primer and the respective end of the sequence. Primers are left intact.  If primers are not found, 
+the sequence is not trimmed. This behavior can be modified using the following options.
 
 ### No Trimming
 
@@ -300,7 +368,8 @@ You can disable all trimming with the `--trim none` option:
 python specimux.py --trim none barcode_file sequence_file
 ```
 
-This will output the full, unmodified sequences regardless of barcode and primer matches.
+This will output the full, unmodified sequences regardless of barcode and primer matches.  This trimming mode is especially
+useful for debugging, in combination with the `--color` output.
 
 ### Trimming tails only
 
@@ -312,6 +381,17 @@ python specimux.py --trim tails barcode_file sequence_file
 
 Note that typically many sequences do not match one or more barcodes. In this case, the sequence is
 trimmed based on the expected primer and barcode lengths.
+
+### Full Trimming, including primers
+
+You can remove everything except the target sequence with the `--trim primers` option:
+
+```
+python specimux.py --trim primers barcode_file sequence_file
+```
+
+Note, however, that downstream processing such as consensus generation may benefit from leaving the primers
+intact as anchor points for alignment.
 
 ### Color Output
 
@@ -329,6 +409,34 @@ When using this option:
 
 Note: The color output uses ANSI escape codes and is intended for terminal viewing. Do not use this format for
 downstream processing as it may interfere with other tools.
+
+## Output File Organization
+
+When using `-F` / `--output-to-files`:
+- Each specimen gets its own output file named {prefix}{specimen_id}.{extension}
+- Invalid characters in specimen IDs are replaced with underscores
+- Files are created in the specified output directory (default: current directory)
+- Unknown sequences go to {prefix}unknown.{extension}
+- Ambiguous matches go to {prefix}ambiguous.{extension}
+
+### Experimental Grouping of Unknown Sequences
+
+The `--group-unknowns` option provides an experimental feature for debugging matching problems by grouping sequences 
+that share partial matches. Instead of putting all unmatched sequences into a single "unknown" file, it creates separate 
+files based on partial match patterns:
+
+- {prefix}barcode_fwd_{barcode}.{extension} - Sequences where only the forward barcode matched
+- {prefix}barcode_rev_{barcode}.{extension} - Sequences where only the reverse barcode matched
+
+This grouping can help identify:
+- Truncated sequences where one end is missing
+- Barcode synthesis or primer binding issues
+- Potential contamination or cross-talk between specimens
+- Novel barcodes that might indicate sample tracking errors
+
+Note that this is a diagnostic tool and should not be used for production analysis. The groupings are based on partial 
+matches that did not meet the full matching criteria and may contain incorrectly assigned sequences.  This feature may
+be removed or enhanced in future versions.  Feedback is welcome.
 
 ## Diagnostic Output
 
@@ -369,7 +477,7 @@ algorithm.
 ## Barcode demultiplex file format
 
 The program needs 5 pieces of information for each sample type. These are Sample ID, Forward Barcode index, Forward
-Primer, Reverse Barcode index, Reverse Primer. Even though the Forward Primer and Reverse Primer are the same for each
+Primer, Reverse Barcode index, Reverse Primer. Even though the Forward Primer and Reverse Primer are often the same for each
 sample in a run, this format requires them on every line describing a sample's indexes.
 
 There can be a header line. However it and every sample line must have the same number of tab delimited fields.
@@ -383,13 +491,15 @@ ONT01.02-B01-CM23-10261-Run25-iNat179083872	AGCAATCGCGCAC	CTTGGTCATTTAGAGGAAGTAA
 ONT01.03-C01-CM23-10262-Run25-iNat179083983	AGCAATCGCGCAC	CTTGGTCATTTAGAGGAAGTAA	CCTGAATCATCTA	TCCTCCGCTTATTGATATGC
 ```
 
-The header line is auto-detected by default.
+The header line is auto-detected (and ignored) by default.
 
 ## References
+[1]: Stephen Douglas Russell 2023. Primary Data Analysis - Basecalling, Demultiplexing, and Consensus Building for ONT Fungal Barcodes. 
+protocols.io https://dx.doi.org/10.17504/protocols.io.dm6gpbm88lzp/v3
 
-[1]: Buschmann T, Bystrykh LV. Levenshtein error-correcting barcodes for multiplexed DNA sequencing. BMC Bioinformatics.
+[2]: Buschmann T, Bystrykh LV. Levenshtein error-correcting barcodes for multiplexed DNA sequencing. BMC Bioinformatics.
 2013 Sep 11;14:272. doi: 10.1186/1471-2105-14-272. PMID: 24021088; PMCID: PMC3853030.
 
-[2]: Henrik Krehenwinkel, Aaron Pomerantz, James B. Henderson, Susan R. Kennedy, Jun Ying Lim, Varun Swamy, Juan Diego
+[3]: Henrik Krehenwinkel, Aaron Pomerantz, James B. Henderson, Susan R. Kennedy, Jun Ying Lim, Varun Swamy, Juan Diego
 Shoobridge, Nipam H. Patel, Rosemary G. Gillespie, Stefan Prost. Nanopore sequencing of long ribosomal DNA amplicons
 enables portable and simple biodiversity assessments with high phylogenetic resolution across broad taxonomic scale. 
