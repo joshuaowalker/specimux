@@ -303,13 +303,13 @@ class Specimens:
         self._specimen_ids = set()
         self._primer_specimen_index = {}  # Maps (p1,p2) to set of specimen IDs
 
-    def add_specimen(self, id, b1, p1, b2, p2):
+    def add_specimen(self, specimen_id, b1, p1, b2, p2):
         """Add a specimen with its barcodes and primers"""
-        if id in self._specimen_ids:
-            raise ValueError(format(f"Duplicate specimen id in index file: {id}"))
-        self._specimen_ids.add(id)
+        if specimen_id in self._specimen_ids:
+            raise ValueError(format(f"Duplicate specimen id in index file: {specimen_id}"))
+        self._specimen_ids.add(specimen_id)
 
-        self._specimens.append((id, b1, p1, b2, p2))
+        self._specimens.append((specimen_id, b1, p1, b2, p2))
         self._barcode_length = max(self._barcode_length, len(b1), len(b2))
 
         primer_key = (p1.upper(), p2.upper())
@@ -317,13 +317,13 @@ class Specimens:
             self._primer_pairs[primer_key] = PrimerPairInfo(p1, p2)
 
         primer_pair_info = self._primer_pairs[primer_key]
-        primer_pair_info.specimens.add(id)
+        primer_pair_info.specimens.add(specimen_id)
         primer_pair_info.b1s.add(b1.upper())  # Add forward barcode
         primer_pair_info.b2s.add(b2.upper())  # Add reverse barcode
 
         if primer_key not in self._primer_specimen_index:
             self._primer_specimen_index[primer_key] = set()
-        self._primer_specimen_index[primer_key].add(id)
+        self._primer_specimen_index[primer_key].add(specimen_id)
 
     def get_primer_pairs(self):
         """Get list of all unique PrimerPairInfo objects"""
@@ -531,7 +531,7 @@ def get_quality_seq(seq):
     else:
         return [40]*len(seq)
 
-def create_write_operation(sample_id, args, seq, match, specimens):
+def create_write_operation(sample_id, args, seq, match):
     formatted_seq = seq.seq
     quality_scores = get_quality_seq(seq)
 
@@ -606,7 +606,7 @@ def process_sequences(seq_records: List[SeqRecord],
         classifications[classification] += 1
         if args.debug:
             logging.debug(f"{classification}")
-        write_op = create_write_operation(sample_id, args, seq, match, specimens)
+        write_op = create_write_operation(sample_id, args, seq, match)
         write_ops.append(write_op)
 
     return write_ops, classifications, unmatched_barcodes
@@ -862,7 +862,7 @@ def color_sequence(seq, match, quality_scores):
     blue = "\033[0;34m"
     green = "\033[0;32m"
     red = "\033[0;31m"
-    NC = "\033[0m"  # No Color (reset)
+    color_reset = "\033[0m"  # No Color (reset)
 
     seq_len = len(seq)
     colored_seq = [''] * seq_len  # Initialize a list to hold colored characters
@@ -878,9 +878,9 @@ def color_sequence(seq, match, quality_scores):
             for i in range(start, end + 1):  # Include the end position
                 if i < seq_len:
                     if quality_scores[i] < 10:
-                        colored_seq[i] = color + seq[i].lower() + NC
+                        colored_seq[i] = color + seq[i].lower() + color_reset
                     else:
-                        colored_seq[i] = color + seq[i] + NC
+                        colored_seq[i] = color + seq[i] + color_reset
 
     # Color barcode1 (blue)
     color_region(match.get_barcode1_location(), blue)
@@ -1127,7 +1127,7 @@ def setup_match_parameters(args, specimens):
     # Collect all barcodes across primer pairs
     all_b1s = set()
     all_b2s = set()
-    for pair in specimens._primer_pairs.values():
+    for pair in specimens.get_primer_pairs():
         all_b1s.update(pair.b1s)
         all_b2s.update(pair.b2s)
 
