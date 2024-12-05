@@ -390,32 +390,190 @@ class WorkItem(NamedTuple):
     seq_records: List  # This now contains actual sequence records, not an iterator
     parameters: MatchParameters
 
-class OutputManager:
-    def __init__(self, output_dir, prefix, is_fastq):
-        self.output_dir = output_dir
-        self.prefix = prefix
-        self.is_fastq = is_fastq
-        self.file_stack = ExitStack()
-        self.file_handles = {}
+
+import os
+from typing import Dict, List, Optional
+from cachetools import LRUCache
+from collections import defaultdict
+import logging
+from contextlib import contextmanager
+
+
+class FileHandleCache(LRUCache):
+    """Custom LRU cache that works with CachedFileManager to close file handles on eviction."""
+
+    def __init__(self, maxsize, file_manager):
+        super().__init__(maxsize)
+        self.file_manager = file_manager
+
+    def popitem(self):
+        """Override popitem to ensure file handle cleanup on eviction."""
+        key, file_handle = super().popitem()
+        # Ensure buffer is flushed before closing
+        self.file_manager.flush_buffer(key)
+        file_handle.close()
+        return key, file_handle
+
+class CachedFileManager:
+    """Manages a pool of file handles with LRU caching and write buffering."""
+
+    def __init__(self, max_open_files: int, buffer_size: int):
+        """
+        Initialize the file manager.
+
+        Args:
+            max_open_files: Maximum number of files to keep open at once
+            buffer_size: Number of sequences to buffer before writing to disk
+        """
+        self.max_open_files = max_open_files
+        self.buffer_size = buffer_size
+
+        self.file_cache = FileHandleCache(maxsize=max_open_files, file_manager=self)
+
+        self.write_buffers: Dict[str, List[str]] = defaultdict(list)
+
+        # Track if file has been opened before (for append vs truncate)
+        self.files_opened: Dict[str, bool] = {}
+
+        # Count of buffer flushes for debugging
+        self.flush_count = 0
 
     def __enter__(self):
-        os.makedirs(self.output_dir, exist_ok=True)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.file_stack.close()
+        """Ensure all buffers are flushed and files are closed on exit."""
+        try:
+            self.flush_all()
+        finally:
+            self.close_all()
 
-    def get_file(self, sample_id):
-        if sample_id not in self.file_handles:
-            filename = self._make_filename(sample_id)
-            file = self.file_stack.enter_context(open(filename, 'w'))
-            self.file_handles[sample_id] = file
-        return self.file_handles[sample_id]
+    @contextmanager
+    def get_file(self, filename: str) -> Optional[object]:
+        """
+        Get a file handle for writing, managing the cache as needed.
 
-    def _make_filename(self, sample_id):
+        Args:
+            filename: Path to the file to open
+
+        Returns:
+            A context-managed file handle
+        """
+        try:
+            f = self.file_cache[filename]
+        except KeyError:
+            # If file handle isn't cached, we need to open it.
+            # We open in write mode the first time, and then subsequently append
+            mode = 'a' if self.files_opened.get(filename, False) else 'w'
+            try:
+                f = open(filename, mode)
+                self.files_opened[filename] = True
+                # Add to cache, which may trigger eviction of least recently used file
+                self.file_cache[filename] = f
+            except OSError as e:
+                logging.error(f"Failed to open file {filename}: {e}")
+                raise
+
+        yield f
+
+    def write(self, filename: str, data: str):
+        """
+        Write data to a file through the buffer system.
+
+        Args:
+            filename: File to write to
+            data: String data to write
+        """
+        self.write_buffers[filename].append(data)
+
+        if len(self.write_buffers[filename]) >= self.buffer_size:
+            self.flush_buffer(filename)
+
+    def flush_buffer(self, filename: str):
+        """
+        Flush the buffer for a specific file to disk.
+
+        Args:
+            filename: File whose buffer to flush
+        """
+        if not self.write_buffers[filename]:
+            return
+
+        buffer_data = ''.join(self.write_buffers[filename])
+        with self.get_file(filename) as f:
+            f.write(buffer_data)
+            f.flush()  # Ensure data is written to OS
+
+        self.write_buffers[filename].clear()
+        self.flush_count += 1
+
+    def flush_all(self):
+        """Flush all buffers to disk."""
+        for filename in list(self.write_buffers.keys()):
+            self.flush_buffer(filename)
+
+    def close_all(self):
+        """Close all open files."""
+        for f in self.file_cache.values():
+            try:
+                f.close()
+            except Exception as e:
+                logging.warning(f"Error closing file: {e}")
+        self.file_cache.clear()
+
+    def close_file(self, filename: str):
+        """
+        Close a specific file if it's open.
+
+        Args:
+            filename: File to close
+        """
+        if filename in self.file_cache:
+            try:
+                self.file_cache[filename].close()
+                del self.file_cache[filename]
+            except Exception as e:
+                logging.warning(f"Error closing file {filename}: {e}")
+
+
+class OutputManager:
+    """Manages output files with caching and buffering."""
+
+    def __init__(self, output_dir: str, prefix: str, is_fastq: bool,
+                 max_open_files: int = 200, buffer_size: int = 500):
+        self.output_dir = output_dir
+        self.prefix = prefix
+        self.is_fastq = is_fastq
+        self.file_manager = CachedFileManager(max_open_files, buffer_size)
+
+    def __enter__(self):
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.file_manager.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self.file_manager.__exit__(exc_type, exc_val, exc_tb)
+
+    def _make_filename(self, sample_id: str) -> str:
+        """Create a filename for a sample ID, ensuring it's safe for the filesystem."""
         safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in sample_id)
         extension = '.fastq' if self.is_fastq else '.fasta'
         return os.path.join(self.output_dir, f"{self.prefix}{safe_id}{extension}")
+
+    def write_sequence(self, sample_id: str, header: str, sequence: str,
+                       quality_scores: Optional[List[int]] = None):
+        """Write a sequence to the appropriate output file."""
+        filename = self._make_filename(sample_id)
+
+        # Build the output string
+        output = []
+        output.append(f"{'@' if self.is_fastq else '>'}{header}\n")
+        output.append(f"{sequence}\n")
+        if self.is_fastq:
+            output.append("+\n")
+            output.append("".join(chr(q + 33) for q in quality_scores) + "\n")
+
+        self.file_manager.write(filename, ''.join(output))
 
 class WorkerException(Exception):
     pass
@@ -839,24 +997,28 @@ def determine_orientation(parameters: MatchParameters, seq: SeqRecord,
         return True, rseq, seq
     return True, seq, rseq
 
+
 def output_write_operation(write_op: WriteOperation,
-                         output_manager: OutputManager,
-                         args: argparse.Namespace) -> None:
-    if args.output_to_files:
-        fh = output_manager.get_file(write_op.sample_id)
-    else:
+                           output_manager: OutputManager,
+                           args: argparse.Namespace) -> None:
+    if not args.output_to_files:
         fh = sys.stdout
+        formatted_seq = write_op.sequence
+        if args.color:
+            formatted_seq = color_sequence(formatted_seq, write_op.match,
+                                           write_op.quality_scores)
 
-    formatted_seq = write_op.sequence
-    if args.color:
-        formatted_seq = color_sequence(formatted_seq, write_op.match, write_op.quality_scores)
-
-    header_symbol = '@' if args.isfastq else '>'
-    fh.write(f"{header_symbol}{write_op.seq_id} {write_op.distance_code} {write_op.sample_id}\n")
-    fh.write(f"{formatted_seq}\n")
-    if args.isfastq:
-        fh.write("+\n")
-        fh.write("".join(chr(q+33) for q in write_op.quality_scores) + "\n")
+        header_symbol = '@' if args.isfastq else '>'
+        fh.write(f"{header_symbol}{write_op.seq_id} {write_op.distance_code} {write_op.sample_id}\n")
+        fh.write(f"{formatted_seq}\n")
+        if args.isfastq:
+            fh.write("+\n")
+            fh.write("".join(chr(q + 33) for q in write_op.quality_scores) + "\n")
+    else:
+        # Use new buffered file manager
+        header = f"{write_op.seq_id} {write_op.distance_code} {write_op.sample_id}"
+        output_manager.write_sequence(write_op.sample_id, header,
+                                      write_op.sequence, write_op.quality_scores)
 
 def color_sequence(seq, match, quality_scores):
     blue = "\033[0;34m"
