@@ -1070,10 +1070,11 @@ def color_sequence(seq, match, quality_scores):
 def version():
     # 0.1 September 14, 2024 - rewritten from minibar.py
     # 0.2 November 10, 2024 - support for multiple primer pairs
-    return "specimux.py version 0.2"
+    # 0.3 December 4, 2024 - code & doc cleanup, write pooling
+    return "specimux.py version 0.3"
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(description="Specimux: Demultiplex MinION sequence by dual barcode indexes and primers.")
+    parser = argparse.ArgumentParser(description="Specimux: Demultiplex MinION sequences by dual barcode indexes and primers.")
     
     parser.add_argument("barcode_file", help="File containing barcode information")
     parser.add_argument("sequence_file", help="Sequence file in Fasta or Fastq format, gzipped or plain text")
