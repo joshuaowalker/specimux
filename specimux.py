@@ -28,6 +28,7 @@ import os
 import sys
 import timeit
 import math
+import traceback
 from _operator import itemgetter
 
 import edlib
@@ -37,6 +38,7 @@ from functools import partial
 from operator import itemgetter
 from typing import List, Tuple
 from typing import NamedTuple
+from typing import Optional, Union
 from enum import Enum
 
 from Bio import SeqIO
@@ -141,12 +143,12 @@ class SequenceMatch:
 
     def __init__(self, sequence_length, barcode_length):
         self.sequence_length = sequence_length
-        self.p1_match: MatchResult = None
+        self.p1_match: Optional[MatchResult] = None
         self._b1_matches: List[Tuple[str, MatchResult, float]] = []
-        self.p2_match: MatchResult = None
+        self.p2_match: Optional[MatchResult] = None
         self._b2_matches: List[Tuple[str, MatchResult, float]] = []
-        self._p1: str = None
-        self._p2: str = None
+        self._p1: Optional[str] = None
+        self._p2: Optional[str] = None
         self.ambiguity_threshold = 1.0
         self._barcode_length = barcode_length
 
@@ -375,6 +377,49 @@ class MatchParameters:
         self.max_dist_index = max_dist_index
         self.search_len = search_len
 
+class WriteOperation(NamedTuple):
+    sample_id: str
+    seq_id: str
+    distance_code: str
+    sequence: str
+    quality_scores: List[int]
+    match: SequenceMatch
+
+class WorkItem(NamedTuple):
+    seq_number: int
+    seq_records: List  # This now contains actual sequence records, not an iterator
+    parameters: MatchParameters
+
+class OutputManager:
+    def __init__(self, output_dir, prefix, is_fastq):
+        self.output_dir = output_dir
+        self.prefix = prefix
+        self.is_fastq = is_fastq
+        self.file_stack = ExitStack()
+        self.file_handles = {}
+
+    def __enter__(self):
+        os.makedirs(self.output_dir, exist_ok=True)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.file_stack.close()
+
+    def get_file(self, sample_id):
+        if sample_id not in self.file_handles:
+            filename = self._make_filename(sample_id)
+            file = self.file_stack.enter_context(open(filename, 'w'))
+            self.file_handles[sample_id] = file
+        return self.file_handles[sample_id]
+
+    def _make_filename(self, sample_id):
+        safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in sample_id)
+        extension = '.fastq' if self.is_fastq else '.fasta'
+        return os.path.join(self.output_dir, f"{self.prefix}{safe_id}{extension}")
+
+class WorkerException(Exception):
+    pass
+
 def read_barcode_file(filename: str) -> Specimens:
     """
     Read a tab-separated barcode file and return a Specimens object.
@@ -449,7 +494,12 @@ def open_sequence_file(filename, args):
     args.isfastq = file_format == "fastq"
     return SeqIO.parse(filename, file_format)
 
-def align_seq(query, target, max_distance, start, end, mode=AlignMode.INFIX):
+def align_seq(query: Union[str, Seq, SeqRecord],
+             target: Union[str, Seq, SeqRecord],
+             max_distance: int,
+             start: int,
+             end: int,
+             mode: str = AlignMode.INFIX) -> MatchResult:
     # Convert query to string if it's a Seq or SeqRecord - not functionally necessary, but improves performance
     if isinstance(query, (Seq, SeqRecord)):
         query = str(query.seq if isinstance(query, SeqRecord) else query)
@@ -511,7 +561,10 @@ def create_write_operation(sample_id, args, seq, match, specimens):
 
 
 
-def process_sequences(seq_records, parameters, specimens, args):
+def process_sequences(seq_records: List[SeqRecord],
+                     parameters: MatchParameters,
+                     specimens: Specimens,
+                     args: argparse.Namespace) -> Tuple[List[WriteOperation], Counter, Counter]:
     classifications = Counter()
     unmatched_barcodes = Counter()
     write_ops = []
@@ -519,7 +572,6 @@ def process_sequences(seq_records, parameters, specimens, args):
     for seq in seq_records:
         sample_id = SampleId.UNKNOWN
 
-        classification = None
         match = SequenceMatch(len(seq), specimens.b_length())
 
         if args.min_length != -1 and len(seq) < args.min_length:
@@ -559,7 +611,8 @@ def process_sequences(seq_records, parameters, specimens, args):
 
     return write_ops, classifications, unmatched_barcodes
 
-def analyze_barcode_region(seq, match, bc_len):
+
+def analyze_barcode_region(seq: str, match: SequenceMatch, bc_len: int) -> Optional[str]:
     if match.has_b1_match() and match.p2_match and not match.has_b2_match():
         start = match.p2_match.location()[1]
         end = min(len(seq), start+bc_len)
@@ -577,7 +630,8 @@ def analyze_barcode_region(seq, match, bc_len):
     else:
         return None
 
-def classify_match(match, sample_id, specimens):
+
+def classify_match(match: SequenceMatch, sample_id: str, specimens: Specimens) -> str:
     if sample_id == SampleId.UNKNOWN:
         if not match.p1_match and not match.p2_match:
             classification = MatchCode.NO_PRIMERS
@@ -604,7 +658,11 @@ def classify_match(match, sample_id, specimens):
         elif not match.has_b1_match() and not match.has_b2_match():
             classification = MatchCode.NO_BARCODES
         else:
-            assert(False)
+            raise RuntimeError(f"Unexpected unknown sample state: "
+                               f"p1_match={match.p1_match is not None}, "
+                               f"p2_match={match.p2_match is not None}, "
+                               f"b1_match={match.has_b1_match()}, "
+                               f"b2_match={match.has_b2_match()}")
     elif sample_id == SampleId.AMBIGUOUS:
         if len(match.best_b1()) > 1 and len(match.best_b2()) > 1:
             classification = MatchCode.AMBIGUOUS_BARCODES
@@ -613,16 +671,22 @@ def classify_match(match, sample_id, specimens):
         elif len(match.best_b2()) > 1:
             classification = MatchCode.AMBIGUOUS_REV_BARCODE
         else:
-            assert(False)
+            raise RuntimeError(f"Unexpected ambiguous sample state: "
+                               f"b1_matches={len(match.best_b1())}, "
+                               f"b2_matches={len(match.best_b2())}")
     else:
         classification = MatchCode.MATCHED
-    return classification
+    return str(classification)
 
-def choose_best_match(matches):
+def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool]:
     """In case there were matches under multiple primer pairs, choose the best"""
     best_score = -1
     best_match = None
     multimatch = False
+
+    if not matches:
+        raise ValueError("No matches provided to choose_best_match")
+
     for m in matches:
         score = 0
         if m.p1_match and m.p2_match and m.has_b1_match() and m.has_b2_match():
@@ -640,13 +704,16 @@ def choose_best_match(matches):
         elif score == best_score:
             multimatch = True
 
+    if best_match is None:
+        raise RuntimeError("Failed to select best match despite having matches")
+
     # ambiguity between primer pairs only really matters when there was a full match
     if best_score == 4 and multimatch:
         return best_match, True
     else:
         return best_match, False
 
-def match_sample(match, sample_id, specimens):
+def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> str:
     if match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match():
         ids = specimens.specimens_for_barcodes_and_primers(
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
@@ -668,7 +735,7 @@ def group_sample(match, sample_id):
             sample_id = SampleId.PREFIX_FWD_MATCH + b1s[0]
     return sample_id
 
-def match_sequence(parameters, seq, rseq, specimens):
+def match_sequence(parameters: MatchParameters, seq: str, rseq: str, specimens: Specimens) -> List[SequenceMatch]:
     """Match sequence against primers and barcodes"""
 
     matches = []
@@ -683,7 +750,9 @@ def match_sequence(parameters, seq, rseq, specimens):
     return matches
 
 
-def match_one_end(match, parameters, sequence, reversed_sequence, primer_pair, which_primer, which_barcode):
+def match_one_end(match: SequenceMatch, parameters: MatchParameters, sequence: str,
+                  reversed_sequence: bool, primer_pair: PrimerPairInfo,
+                  which_primer: Primer, which_barcode: Barcode) -> None:
     """Match primers and barcodes at one end of the sequence."""
 
     primer = primer_pair.p1 if which_primer == Primer.P1 else primer_pair.p2
@@ -715,7 +784,9 @@ def match_one_end(match, parameters, sequence, reversed_sequence, primer_pair, w
             if bm:
                 match.add_barcode_match(bm, bc, reversed_sequence, which_barcode)
 
-def determine_orientation(parameters, seq, specimens):
+
+def determine_orientation(parameters: MatchParameters, seq: SeqRecord,
+                        specimens: Specimens) -> Tuple[bool, SeqRecord, SeqRecord]:
     """Determine sequence orientation by checking primer pairs"""
     rseq = seq.reverse_complement()
     rseq.id = seq.id
@@ -729,10 +800,10 @@ def determine_orientation(parameters, seq, specimens):
         p2 = primer_pair.p2
 
         # Check sequence in both orientations
-        p1_match = align_seq(p1, seq, len(p1) * 0.5, 0, parameters.search_len)
-        p1r_match = align_seq(p1, rseq, len(p1) * 0.5, 0, parameters.search_len)
-        p2_match = align_seq(p2, seq, len(p2) * 0.5, 0, parameters.search_len)
-        p2r_match = align_seq(p2, rseq, len(p2) * 0.5, 0, parameters.search_len)
+        p1_match = align_seq(p1, seq, int(len(p1) * 0.5), 0, parameters.search_len)
+        p1r_match = align_seq(p1, rseq, int(len(p1) * 0.5), 0, parameters.search_len)
+        p2_match = align_seq(p2, seq, int(len(p2) * 0.5), 0, parameters.search_len)
+        p2r_match = align_seq(p2, rseq, int(len(p2) * 0.5), 0, parameters.search_len)
 
         vals = []
         if p1_match.matched(): vals.append(p1_match.distance())
@@ -768,8 +839,9 @@ def determine_orientation(parameters, seq, specimens):
         return True, rseq, seq
     return True, seq, rseq
 
-
-def output_write_operation(write_op, output_manager, args):
+def output_write_operation(write_op: WriteOperation,
+                         output_manager: OutputManager,
+                         args: argparse.Namespace) -> None:
     if args.output_to_files:
         fh = output_manager.get_file(write_op.sample_id)
     else:
@@ -833,33 +905,6 @@ def color_sequence(seq, match, quality_scores):
     return ''.join(colored_seq[start:end])
 
 
-class OutputManager:
-    def __init__(self, output_dir, prefix, is_fastq):
-        self.output_dir = output_dir
-        self.prefix = prefix
-        self.is_fastq = is_fastq
-        self.file_stack = ExitStack()
-        self.file_handles = {}
-
-    def __enter__(self):
-        os.makedirs(self.output_dir, exist_ok=True)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.file_stack.close()
-
-    def get_file(self, sample_id):
-        if sample_id not in self.file_handles:
-            filename = self._make_filename(sample_id)
-            file = self.file_stack.enter_context(open(filename, 'w'))
-            self.file_handles[sample_id] = file
-        return self.file_handles[sample_id]
-
-    def _make_filename(self, sample_id):
-        safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in sample_id)
-        extension = '.fastq' if self.is_fastq else '.fasta'
-        return os.path.join(self.output_dir, f"{self.prefix}{safe_id}{extension}")
-
 def version():
     # 0.1 September 14, 2024 - rewritten from minibar.py
     # 0.2 November 10, 2024 - support for multiple primer pairs
@@ -913,23 +958,16 @@ def process_num_seqs(args, parser):
             parser.error("Invalid format for -n option. Use an integer or 'start,num' with integers.")
 
 
-class WriteOperation(NamedTuple):
-    sample_id: str
-    seq_id: str
-    distance_code: str
-    sequence: str
-    quality_scores: List[int]
-    match: SequenceMatch
 
-class WorkItem(NamedTuple):
-    seq_number: int
-    seq_records: List  # This now contains actual sequence records, not an iterator
-    parameters: MatchParameters
+def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace) -> Tuple[List[WriteOperation], Counter, Counter]:
+    try:
+        l = logging.DEBUG if args.debug else logging.INFO
+        logging.basicConfig(level=l, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def worker(work_item, specimens, args):
-    write_ops, classifications, unmatched_barcodes = process_sequences(work_item.seq_records, work_item.parameters, specimens, args)
-    return write_ops, classifications, unmatched_barcodes
-
+        return process_sequences(work_item.seq_records, work_item.parameters, specimens, args)
+    except Exception as e:
+        logging.error(traceback.format_exc())
+        raise WorkerException(e)
 
 def specimux_mp(args):
     specimens = read_barcode_file(args.barcode_file)
@@ -975,17 +1013,21 @@ def specimux_mp(args):
                     yield work_item
                     num_seqs += len(seq_batch)
 
-            for write_ops, batch_classifications, batch_unmatched in pool.imap_unordered(worker_func, producer()):
-                classifications += batch_classifications
-                unmatched_barcodes += batch_unmatched
-                for write_op in write_ops:
-                    output_write_operation(write_op, output_manager, args)
+            try:
+                for write_ops, batch_classifications, batch_unmatched in pool.imap_unordered(worker_func, producer()):
+                    classifications += batch_classifications
+                    unmatched_barcodes += batch_unmatched
+                    for write_op in write_ops:
+                        output_write_operation(write_op, output_manager, args)
 
-                total_processed = sum(classifications.values())
-                matched = classifications[MatchCode.MATCHED]
-                pct = matched/total_processed if total_processed > 0 else 0
-                print(f"read: {total_processed}\t\tmatched: {matched}\t\t{pct:.2%}", end='\r', file=sys.stderr)
-                sys.stderr.flush()
+                    total_processed = sum(classifications.values())
+                    matched = classifications[MatchCode.MATCHED]
+                    pct = matched/total_processed if total_processed > 0 else 0
+                    print(f"read: {total_processed}\t\tmatched: {matched}\t\t{pct:.2%}", end='\r', file=sys.stderr)
+                    sys.stderr.flush()
+            except WorkerException as e:
+                logging.error(f"Unexpected error in worker (see details above): {e}")
+                sys.exit(1)
 
     elapsed = timeit.default_timer() - start_time
 
@@ -1134,4 +1176,3 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv)
-
