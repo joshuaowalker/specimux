@@ -48,6 +48,7 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 
+
 IUPAC_EQUIV = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
                ("N", "A"), ("N", "C"), ("N", "G"), ("N", "T"),
                ("W", "A"), ("W", "T"), ("M", "A"), ("M", "C"),
@@ -372,8 +373,8 @@ class Specimens:
         return self._barcode_length
 
 class MatchParameters:
-    def __init__(self, max_dist_primer, max_dist_index, search_len):
-        self.max_dist_primer = max_dist_primer
+    def __init__(self, max_dist_primers, max_dist_index, search_len):
+        self.max_dist_primers = max_dist_primers
         self.max_dist_index = max_dist_index
         self.search_len = search_len
 
@@ -916,7 +917,7 @@ def match_one_end(match: SequenceMatch, parameters: MatchParameters, sequence: s
     primer = primer_pair.p1 if which_primer == Primer.P1 else primer_pair.p2
     primer_rc = primer_pair.p1_rc if which_primer == Primer.P1 else primer_pair.p2_rc
 
-    primer_match = align_seq(primer_rc, sequence, parameters.max_dist_primer,
+    primer_match = align_seq(primer_rc, sequence, parameters.max_dist_primers[primer],
                              len(sequence) - parameters.search_len, len(sequence))
 
     # If we found matching primers, look for corresponding barcodes
@@ -1287,6 +1288,16 @@ def setup_match_parameters(args, specimens):
             logging.info(f"Minimum edit distance is {m} for {desc}")
         return m
 
+    def _bp_adjusted_length(primer):
+        """Calculate "adjusted length" for primers accounting for degeneracy"""
+        score = 0
+        for b in primer:
+            if b in ['A', 'C', 'G', 'T']: score += 3
+            elif b in ['K', 'M', 'R', 'S', 'W', 'Y']: score += 2
+            elif b in ['B', 'D', 'H', 'V']: score += 1
+
+        return score / 3.0
+
     # Collect all barcodes across primer pairs
     all_b1s = set()
     all_b2s = set()
@@ -1317,13 +1328,24 @@ def setup_match_parameters(args, specimens):
     max_search_area = args.search_len
 
     max_dist_index = math.ceil(min_bc_dist / 2.0)
-    max_dist_primer = min_primer_dist
+
     if args.index_edit_distance != -1: max_dist_index = args.index_edit_distance
-    if args.primer_edit_distance != -1: max_dist_primer = args.primer_edit_distance
 
-    logging.info(f"Using Edit Distance Thresholds {max_dist_index} (barcode) and {max_dist_primer} (primer)")
+    logging.info(f"Using Edit Distance Thresholds {max_dist_index} for barcode indexes")
 
-    parameters = MatchParameters(max_dist_primer, max_dist_index, max_search_area)
+    primer_thresholds = {}
+    for ppi in specimens.get_primer_pairs():
+        if args.primer_edit_distance != -1:
+            primer_thresholds[ppi.p1] = args.primer_edit_distance
+            primer_thresholds[ppi.p2] = args.primer_edit_distance
+        else:
+            primer_thresholds[ppi.p1] = int(_bp_adjusted_length(ppi.p1) / 3)
+            primer_thresholds[ppi.p2] = int(_bp_adjusted_length(ppi.p2) / 3)
+
+    for p, pt in primer_thresholds.items():
+        logging.info(f"Using Edit Distance Threshold {pt} for primer {p}")
+
+    parameters = MatchParameters(primer_thresholds, max_dist_index, max_search_area)
     return parameters
 
 def main(argv):
