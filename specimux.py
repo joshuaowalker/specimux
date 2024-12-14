@@ -46,6 +46,13 @@ from Bio.Seq import reverse_complement
 from multiprocessing import Pool
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
+import os
+from typing import Dict, List, Optional
+from cachetools import LRUCache
+from collections import defaultdict
+import logging
+from contextlib import contextmanager
+
 
 
 IUPAC_EQUIV = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
@@ -93,6 +100,7 @@ class MatchCode:
     AMBIGUOUS_BARCODES = "6C: Multiple Matches for Both Barcodes"
     AMBIGUOUS_FWD_BARCODE = "6A: Multiple Matches for Forward Barcode"
     AMBIGUOUS_REV_BARCODE = "6B: Multiple Matches for Reverse Barcode"
+    NO_SPECIMEN = "6D: No Specimen Matches Barcodes"
     MATCHED = " 7: Matched"
 
 class Barcode(Enum):
@@ -302,6 +310,7 @@ class Specimens:
         self._primer_pairs = {}  # Maps (p1, p2) tuple to PrimerPairInfo
         self._specimen_ids = set()
         self._primer_specimen_index = {}  # Maps (p1,p2) to set of specimen IDs
+        self._unmatched_combos = {}
 
     def add_specimen(self, specimen_id, b1, p1, b2, p2):
         """Add a specimen with its barcodes and primers"""
@@ -368,6 +377,14 @@ class Specimens:
 
         return matching_specimens
 
+    def record_unmatched_combo(self, p1, p2, b1s, b2s):
+        key = format(f"{p1} {p2} {b1s} {b2s}")
+        if key in self._unmatched_combos:
+            return False
+        else:
+            self._unmatched_combos[key] = True
+            return True
+
     def b_length(self):
         return self._barcode_length
 
@@ -390,13 +407,6 @@ class WorkItem(NamedTuple):
     seq_records: List  # This now contains actual sequence records, not an iterator
     parameters: MatchParameters
 
-
-import os
-from typing import Dict, List, Optional
-from cachetools import LRUCache
-from collections import defaultdict
-import logging
-from contextlib import contextmanager
 
 
 class FileHandleCache(LRUCache):
@@ -815,6 +825,9 @@ def classify_match(match: SequenceMatch, sample_id: str, specimens: Specimens) -
             classification = MatchCode.NO_FWD_PRIMER
         elif not match.has_b1_match() and not match.has_b2_match():
             classification = MatchCode.NO_BARCODES
+        elif match.has_b1_match() and match.has_b2_match() and \
+            len(specimens.specimens_for_barcodes_and_primers(match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())) == 0:
+            classification = MatchCode.NO_SPECIMEN
         else:
             raise RuntimeError(f"Unexpected unknown sample state: "
                                f"p1_match={match.p1_match is not None}, "
@@ -880,7 +893,9 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> 
         elif len(ids) == 1:
             sample_id = ids[0]
         else:
-            logging.warning(f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, {match.get_p1()}, {match.get_p2()})")
+            seen = specimens.record_unmatched_combo(match.get_p1(), match.get_p2(), match.best_b1(), match.best_b2())
+            if not seen:
+                logging.warning(f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, {match.get_p1()}, {match.get_p2()})")
     return sample_id
 
 def group_sample(match, sample_id):
@@ -1071,7 +1086,8 @@ def version():
     # 0.1 September 14, 2024 - rewritten from minibar.py
     # 0.2 November 10, 2024 - support for multiple primer pairs
     # 0.3 December 4, 2024 - code & doc cleanup, write pooling
-    return "specimux.py version 0.3"
+    # 0.3.1 December 14, 2024 - fix bug classifying unmatched barcode combinations
+    return "specimux.py version 0.3.1"
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Specimux: Demultiplex MinION sequences by dual barcode indexes and primers.")
