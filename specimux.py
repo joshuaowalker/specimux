@@ -90,6 +90,7 @@ class MatchCode:
     FWD_BARCODE_TRUNCATED = "4B: No Forward Barcode Matches (May be truncated)"
     NO_REV_BARCODE = "4C: No Reverse Barcode Matches"
     REV_BARCODE_TRUNCATED = "4D: No Reverse Barcode Matches (May be truncated)"
+    NO_VALID_BARCODE_COMBINATION = "4F: Found Both Barcodes But No Matching Specimen"
     MULTIPLE_PRIMER_PAIRS_MATCHED = "5: Multiple Primer Pair Full Matches"
     AMBIGUOUS_BARCODES = "6C: Multiple Matches for Both Barcodes"
     AMBIGUOUS_FWD_BARCODE = "6A: Multiple Matches for Forward Barcode"
@@ -303,6 +304,8 @@ class Specimens:
         self._primer_pairs = {}  # Maps (p1, p2) tuple to PrimerPairInfo
         self._specimen_ids = set()
         self._primer_specimen_index = {}  # Maps (p1,p2) to set of specimen IDs
+        self._b1_specimen_index = {}  # Maps forward barcode to set of specimen IDs
+        self._b2_specimen_index = {}  # Maps reverse barcode to set of specimen IDs
 
     def add_specimen(self, specimen_id, b1, p1, b2, p2):
         """Add a specimen with its barcodes and primers"""
@@ -326,26 +329,38 @@ class Specimens:
             self._primer_specimen_index[primer_key] = set()
         self._primer_specimen_index[primer_key].add(specimen_id)
 
+        # Add to barcode indices
+        b1_upper = b1.upper()
+        b2_upper = b2.upper()
+
+        if b1_upper not in self._b1_specimen_index:
+            self._b1_specimen_index[b1_upper] = set()
+        self._b1_specimen_index[b1_upper].add(specimen_id)
+
+        if b2_upper not in self._b2_specimen_index:
+            self._b2_specimen_index[b2_upper] = set()
+        self._b2_specimen_index[b2_upper].add(specimen_id)
+
     def get_primer_pairs(self):
         """Get list of all unique PrimerPairInfo objects"""
         return list(self._primer_pairs.values())
 
     def validate(self):
-        self._validate_barcodes_globally_unique()
         self._validate_barcode_lengths()
         logging.info(f"Number of unique primer pairs: {len(self._primer_pairs)}")
         for pair in self._primer_pairs.values():
             logging.info(f"Primer pair {pair.p1}/{pair.p2}: {len(pair.specimens)} specimens")
+        self._validate_barcode_uniqueness()
 
-    def _validate_barcodes_globally_unique(self):
-        all_b1s = set()
-        all_b2s = set()
-        for pair in self._primer_pairs.values():
-            all_b1s.update(pair.b1s)
-            all_b2s.update(pair.b2s)
-        dups = all_b1s.intersection(all_b2s)
-        if len(dups) > 0:
-            logging.warning(f"Duplicate Barcodes ({len(dups)}) in Fwd and Rev: {dups}")
+    def _validate_barcode_uniqueness(self):
+        """Check if any barcodes uniquely identify specimens"""
+        unique_b1s = {b: s for b, s in self._b1_specimen_index.items() if len(s) == 1}
+        unique_b2s = {b: s for b, s in self._b2_specimen_index.items() if len(s) == 1}
+
+        if unique_b1s:
+            logging.info(f"Found {len(unique_b1s)} globally unique forward barcodes")
+        if unique_b2s:
+            logging.info(f"Found {len(unique_b2s)} globally unique reverse barcodes")
 
     def _validate_barcode_lengths(self):
         all_b1s = set()
@@ -358,15 +373,43 @@ class Specimens:
         if len(set(len(b) for b in all_b2s)) > 1:
             logging.warning("Reverse barcodes have inconsistent lengths")
 
-    def specimens_for_barcodes_and_primers(self, b1_list, b2_list, p1_matched, p2_matched):
-        matching_specimens = []
-        for spec_id, b1, p1, b2, p2 in self._specimens:
-            if (p1_matched.upper() == p1 and
-                    p2_matched.upper() == p2 and
-                    b1.upper() in b1_list and
-                    b2.upper() in b2_list):
-                matching_specimens.append(spec_id)
 
+    def specimens_for_barcodes_and_primers(self, b1_list, b2_list, p1_matched, p2_matched):
+        # Get specimens matching forward and reverse separately
+        fwd_matches = self._specimens_for_forward_match(b1_list, p1_matched)
+        rev_matches = self._specimens_for_reverse_match(b2_list, p2_matched)
+
+        # If either end has a unique match, use that
+        if len(fwd_matches) == 1 and not rev_matches:
+            return list(fwd_matches)
+        if len(rev_matches) == 1 and not fwd_matches:
+            return list(rev_matches)
+
+        # Otherwise require both ends to match
+        return list(fwd_matches.intersection(rev_matches))
+
+    def _specimens_for_forward_match(self, b1_list, p1_matched):
+        """Get set of specimens matching forward barcode and primer"""
+        matching_specimens = set()
+        for b1 in b1_list:
+            if b1.upper() in self._b1_specimen_index:
+                for specimen_id in self._b1_specimen_index[b1.upper()]:
+                    # Verify primer matches for these specimens
+                    for spec_id, b1, p1, b2, p2 in self._specimens:
+                        if spec_id == specimen_id and p1_matched.upper() == p1:
+                            matching_specimens.add(spec_id)
+        return matching_specimens
+
+    def _specimens_for_reverse_match(self, b2_list, p2_matched):
+        """Get set of specimens matching reverse barcode and primer"""
+        matching_specimens = set()
+        for b2 in b2_list:
+            if b2.upper() in self._b2_specimen_index:
+                for specimen_id in self._b2_specimen_index[b2.upper()]:
+                    # Verify primer matches for these specimens
+                    for spec_id, b1, p1, b2, p2 in self._specimens:
+                        if spec_id == specimen_id and p2_matched.upper() == p2:
+                            matching_specimens.add(spec_id)
         return matching_specimens
 
     def b_length(self):
@@ -792,6 +835,9 @@ def analyze_barcode_region(seq: str, match: SequenceMatch, bc_len: int) -> Optio
 
 def classify_match(match: SequenceMatch, sample_id: str, specimens: Specimens) -> str:
     if sample_id == SampleId.UNKNOWN:
+        if match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match():
+            return MatchCode.NO_VALID_BARCODE_COMBINATION
+
         if not match.p1_match and not match.p2_match:
             classification = MatchCode.NO_PRIMERS
         elif not match.has_b2_match() and match.has_b1_match():
@@ -881,7 +927,8 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> 
         elif len(ids) == 1:
             sample_id = ids[0]
         else:
-            logging.warning(f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, {match.get_p1()}, {match.get_p2()})")
+            # logging.warning(f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, {match.get_p1()}, {match.get_p2()})")
+            pass
     return sample_id
 
 def group_sample(match, sample_id):
@@ -1361,3 +1408,5 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv)
+
+
