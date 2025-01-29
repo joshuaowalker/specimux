@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
 Specimux: Demultiplex MinION sequences by dual barcode indexes and primers.
@@ -21,33 +21,45 @@ For full terms of use and distribution, please see the LICENSE file accompanying
 
 import argparse
 import csv
+import fcntl
+import hashlib
 import itertools
 import logging
+import math
 import multiprocessing
 import os
 import sys
 import timeit
-import math
 import traceback
 from _operator import itemgetter
+from collections import Counter
+from collections import defaultdict
+from contextlib import contextmanager
+from enum import Enum
+from functools import partial
+from multiprocessing import Pool
+from operator import itemgetter
+from typing import List, Tuple, Dict
+from typing import NamedTuple
+from typing import Optional, Set
+from typing import Union
+from typing import Protocol
+from tqdm import tqdm
 
 import edlib
-from collections import Counter
-from contextlib import ExitStack
-from functools import partial
-from operator import itemgetter
-from typing import List, Tuple
-from typing import NamedTuple
-from typing import Optional, Union
-from enum import Enum
-
+import pybloomfilter
 from Bio import SeqIO
-from Bio.Seq import reverse_complement
-from multiprocessing import Pool
 from Bio.Seq import Seq
+from Bio.Seq import reverse_complement
 from Bio.SeqRecord import SeqRecord
-
-
+from cachetools import LRUCache
+import gzip
+import io
+import mmap
+import tempfile
+import shutil
+import hashlib
+import glob
 
 IUPAC_EQUIV = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
                ("N", "A"), ("N", "C"), ("N", "G"), ("N", "T"),
@@ -81,20 +93,19 @@ class TrimMode:
 class MatchCode:
     SHORT_SEQ = "1A: Sequence Too Short"
     LONG_SEQ = "1B: Sequence Too Long"
-    ORIENTATION_FAILED = " 2: Could Not Determine Orientation"
-    NO_PRIMERS = "3C: No Primer Matches"
-    NO_FWD_PRIMER = "3A: No Forward Primer Matches"
-    NO_REV_PRIMER = "3B: No Reverse Primer Matches"
-    NO_BARCODES = "4E: No Barcode Matches"
-    NO_FWD_BARCODE = "4A: No Forward Barcode Matches"
-    FWD_BARCODE_TRUNCATED = "4B: No Forward Barcode Matches (May be truncated)"
-    NO_REV_BARCODE = "4C: No Reverse Barcode Matches"
-    REV_BARCODE_TRUNCATED = "4D: No Reverse Barcode Matches (May be truncated)"
-    MULTIPLE_PRIMER_PAIRS_MATCHED = "5: Multiple Primer Pair Full Matches"
-    AMBIGUOUS_BARCODES = "6C: Multiple Matches for Both Barcodes"
-    AMBIGUOUS_FWD_BARCODE = "6A: Multiple Matches for Forward Barcode"
-    AMBIGUOUS_REV_BARCODE = "6B: Multiple Matches for Reverse Barcode"
-    MATCHED = " 7: Matched"
+    NO_PRIMERS = "2C: No Primer Matches"
+    NO_FWD_PRIMER = "2A: No Forward Primer Matches"
+    NO_REV_PRIMER = "2B: No Reverse Primer Matches"
+    NO_BARCODES = "3E: No Barcode Matches"
+    NO_FWD_BARCODE = "3A: No Forward Barcode Matches"
+    FWD_BARCODE_TRUNCATED = "3B: No Forward Barcode Matches (May be truncated)"
+    NO_REV_BARCODE = "3C: No Reverse Barcode Matches"
+    REV_BARCODE_TRUNCATED = "3D: No Reverse Barcode Matches (May be truncated)"
+    MULTIPLE_PRIMER_PAIRS_MATCHED = "4: Multiple Primer/Orientation Full Matches"
+    AMBIGUOUS_BARCODES = "5C: Multiple Matches for Both Barcodes"
+    AMBIGUOUS_FWD_BARCODE = "5A: Multiple Matches for Forward Barcode"
+    AMBIGUOUS_REV_BARCODE = "5B: Multiple Matches for Reverse Barcode"
+    MATCHED = " 6: Matched"
 
 class Barcode(Enum):
     B1 = 1
@@ -142,8 +153,9 @@ class MatchResult:
 
 class SequenceMatch:
 
-    def __init__(self, sequence_length, barcode_length):
-        self.sequence_length = sequence_length
+    def __init__(self, sequence, barcode_length):
+        self.sequence_length = len(sequence)
+        self.sequence = sequence
         self.p1_match: Optional[MatchResult] = None
         self._b1_matches: List[Tuple[str, MatchResult, float]] = []
         self.p2_match: Optional[MatchResult] = None
@@ -373,31 +385,28 @@ class Specimens:
         return self._barcode_length
 
 class MatchParameters:
-    def __init__(self, max_dist_primers, max_dist_index, search_len):
+    def __init__(self, max_dist_primers: Dict[str, int], max_dist_index: int, search_len: int, preorient: bool):
         self.max_dist_primers = max_dist_primers
         self.max_dist_index = max_dist_index
         self.search_len = search_len
+        self.preorient = preorient
+
 
 class WriteOperation(NamedTuple):
     sample_id: str
     seq_id: str
     distance_code: str
     sequence: str
-    quality_scores: List[int]
-    match: SequenceMatch
+    quality_sequence: str
+    p1_location : Tuple[int, int]
+    p2_location : Tuple[int, int]
+    b1_location : Tuple[int, int]
+    b2_location : Tuple[int, int]
 
 class WorkItem(NamedTuple):
     seq_number: int
     seq_records: List  # This now contains actual sequence records, not an iterator
     parameters: MatchParameters
-
-
-import os
-from typing import Dict, List, Optional
-from cachetools import LRUCache
-from collections import defaultdict
-import logging
-from contextlib import contextmanager
 
 
 class FileHandleCache(LRUCache):
@@ -416,28 +425,18 @@ class FileHandleCache(LRUCache):
         return key, file_handle
 
 class CachedFileManager:
-    """Manages a pool of file handles with LRU caching and write buffering."""
+    """Manages a pool of file handles with LRU caching, write buffering, and locking."""
 
-    def __init__(self, max_open_files: int, buffer_size: int):
-        """
-        Initialize the file manager.
-
-        Args:
-            max_open_files: Maximum number of files to keep open at once
-            buffer_size: Number of sequences to buffer before writing to disk
-        """
+    def __init__(self, max_open_files: int, buffer_size: int, output_dir: str):
         self.max_open_files = max_open_files
         self.buffer_size = buffer_size
-
         self.file_cache = FileHandleCache(maxsize=max_open_files, file_manager=self)
+        self.write_buffers = defaultdict(list)
 
-        self.write_buffers: Dict[str, List[str]] = defaultdict(list)
-
-        # Track if file has been opened before (for append vs truncate)
-        self.files_opened: Dict[str, bool] = {}
-
-        # Count of buffer flushes for debugging
-        self.flush_count = 0
+        # Create lock directory
+        self.lock_dir = os.path.join(output_dir, ".specimux_locks")
+        os.makedirs(self.lock_dir, exist_ok=True)
+        self.locks = {}
 
     def __enter__(self):
         return self
@@ -449,64 +448,42 @@ class CachedFileManager:
         finally:
             self.close_all()
 
-    @contextmanager
-    def get_file(self, filename: str) -> Optional[object]:
-        """
-        Get a file handle for writing, managing the cache as needed.
-
-        Args:
-            filename: Path to the file to open
-
-        Returns:
-            A context-managed file handle
-        """
-        try:
-            f = self.file_cache[filename]
-        except KeyError:
-            # If file handle isn't cached, we need to open it.
-            # We open in write mode the first time, and then subsequently append
-            mode = 'a' if self.files_opened.get(filename, False) else 'w'
-            try:
-                f = open(filename, mode)
-                self.files_opened[filename] = True
-                # Add to cache, which may trigger eviction of least recently used file
-                self.file_cache[filename] = f
-            except OSError as e:
-                logging.error(f"Failed to open file {filename}: {e}")
-                raise
-
-        yield f
-
     def write(self, filename: str, data: str):
-        """
-        Write data to a file through the buffer system.
-
-        Args:
-            filename: File to write to
-            data: String data to write
-        """
+        """Write data to a file through the buffer system."""
         self.write_buffers[filename].append(data)
 
         if len(self.write_buffers[filename]) >= self.buffer_size:
             self.flush_buffer(filename)
 
     def flush_buffer(self, filename: str):
-        """
-        Flush the buffer for a specific file to disk.
-
-        Args:
-            filename: File whose buffer to flush
-        """
+        """Flush the buffer for a specific file to disk."""
         if not self.write_buffers[filename]:
             return
 
-        buffer_data = ''.join(self.write_buffers[filename])
-        with self.get_file(filename) as f:
-            f.write(buffer_data)
-            f.flush()  # Ensure data is written to OS
+        # Get or create lock
+        if filename not in self.locks:
+            lock_path = self._get_lock_path(filename)
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o666)
+            self.locks[filename] = fd
 
-        self.write_buffers[filename].clear()
-        self.flush_count += 1
+        # Hold lock for entire write operation
+        fcntl.lockf(self.locks[filename], fcntl.LOCK_EX)
+        try:
+            buffer_data = ''.join(self.write_buffers[filename])
+
+            try:
+                f = self.file_cache[filename]
+            except KeyError:
+                f = open(filename, 'a')  # Always append mode
+                self.file_cache[filename] = f
+
+            f.write(buffer_data)
+            f.flush()
+            os.fsync(f.fileno())  # Ensure data is written to disk
+            self.write_buffers[filename].clear()
+
+        finally:
+            fcntl.lockf(self.locks[filename], fcntl.LOCK_UN)
 
     def flush_all(self):
         """Flush all buffers to disk."""
@@ -514,13 +491,24 @@ class CachedFileManager:
             self.flush_buffer(filename)
 
     def close_all(self):
-        """Close all open files."""
-        for f in self.file_cache.values():
-            try:
+        """Close all files and release all locks."""
+        try:
+            self.flush_all()
+            for f in self.file_cache.values():
                 f.close()
-            except Exception as e:
-                logging.warning(f"Error closing file: {e}")
-        self.file_cache.clear()
+            self.file_cache.clear()
+        finally:
+            # Always clean up locks
+            for fd in self.locks.values():
+                try:
+                    os.close(fd)
+                except Exception as e:
+                    logging.warning(f"Error closing lock file: {e}")
+            self.locks.clear()
+
+    def __del__(self):
+        """Ensure cleanup on garbage collection"""
+        self.close_all()
 
     def close_file(self, filename: str):
         """
@@ -536,6 +524,13 @@ class CachedFileManager:
             except Exception as e:
                 logging.warning(f"Error closing file {filename}: {e}")
 
+    def _get_lock_path(self, filename: str) -> str:
+        """Get path for lock file in shared directory"""
+        # Use hash of absolute path to avoid issues with long filenames
+        abs_path = os.path.abspath(filename)
+        file_hash = hashlib.md5(abs_path.encode()).hexdigest()
+        return os.path.join(self.lock_dir, f"{file_hash}.lock")
+
 
 class OutputManager:
     """Manages output files with caching and buffering."""
@@ -545,7 +540,7 @@ class OutputManager:
         self.output_dir = output_dir
         self.prefix = prefix
         self.is_fastq = is_fastq
-        self.file_manager = CachedFileManager(max_open_files, buffer_size)
+        self.file_manager = CachedFileManager(max_open_files, buffer_size, output_dir)
 
     def __enter__(self):
         os.makedirs(self.output_dir, exist_ok=True)
@@ -562,22 +557,210 @@ class OutputManager:
         return os.path.join(self.output_dir, f"{self.prefix}{safe_id}{extension}")
 
     def write_sequence(self, sample_id: str, header: str, sequence: str,
-                       quality_scores: Optional[List[int]] = None):
+                       quality_seq: Optional[str] = None):
         """Write a sequence to the appropriate output file."""
         filename = self._make_filename(sample_id)
-
-        # Build the output string
         output = []
-        output.append(f"{'@' if self.is_fastq else '>'}{header}\n")
-        output.append(f"{sequence}\n")
+        output.append('@' if self.is_fastq else '>')
+        output.append(header+"\n")
+        output.append(sequence+"\n")
         if self.is_fastq:
             output.append("+\n")
-            output.append("".join(chr(q + 33) for q in quality_scores) + "\n")
+            output.append(quality_seq+"\n")
 
         self.file_manager.write(filename, ''.join(output))
 
 class WorkerException(Exception):
     pass
+
+class BarcodePrefilter(Protocol):
+    """Protocol defining the interface for barcode prefilters"""
+    def match(self, barcode: str, sequence: str) -> bool:
+        """Check if barcode potentially matches sequence"""
+        ...
+
+class PassthroughPrefilter:
+
+    def match(self, barcode: str, sequence: str) -> bool:
+        #always call edlib.align
+        return True
+
+class BloomPrefilter:
+    """Fast barcode pre-filter using Bloom filters with proper file handling"""
+
+    def __init__(self, barcodes: List[str], max_distance: int, error_rate: float = 0.05,
+                 filename: Optional[str] = None):
+        """Initialize bloom filter for barcode matching
+
+        Args:
+            barcodes: List of barcodes to add to filter
+            max_distance: Maximum edit distance for matches
+            error_rate: Acceptable false positive rate
+            filename: Optional file to store the filter
+        """
+        if not barcodes:
+            raise ValueError("Must provide at least one barcode")
+
+        self.barcodes = list(set(barcodes))  # Deduplicate
+        self.barcode_length = len(self.barcodes[0])
+        self.max_distance = max_distance
+        self.error_rate = error_rate
+        self.min_length = self.barcode_length - max_distance
+
+        # Calculate filter size using first barcode as sample
+        sample_variants = len(self._generate_variants(self.barcodes[0]))
+        total_combinations = sample_variants * len(self.barcodes)
+        logging.info(f"Building Bloom filter for estimated {total_combinations} variants")
+
+        # Create and populate filter
+        if filename:
+            self.bloom_filter = pybloomfilter.BloomFilter(total_combinations, error_rate, filename)
+        else:
+            self.bloom_filter = pybloomfilter.BloomFilter(total_combinations, error_rate)
+
+        total_variants = 0
+        # Add progress bar wrapping barcodes iteration
+        for barcode in tqdm(self.barcodes, desc="Building Bloom filter", unit="barcode"):
+            variants = self._generate_variants(barcode)
+            total_variants += len(variants)
+            for variant in variants:
+                # Use fixed width format with truncation
+                truncated = variant[:self.min_length]
+                key = barcode + truncated
+                self.bloom_filter.add(key)
+
+        logging.info(f"Added {total_variants} actual variants to Bloom filter")
+
+    def _generate_variants(self, barcode: str) -> Set[str]:
+        """Generate all possible variants of a barcode within max_distance."""
+        variants = {barcode}
+        bases = "ACGT"
+
+        def add_variants_recursive(current: str, distance_left: int, variants: Set[str]):
+            if distance_left == 0:
+                return
+
+            # Substitutions
+            for i in range(len(current)):
+                for base in bases:
+                    if base != current[i]:
+                        new_str = current[:i] + base + current[i + 1:]
+                        variants.add(new_str)
+                        add_variants_recursive(new_str, distance_left - 1, variants)
+
+            # Deletions
+            for i in range(len(current)):
+                new_str = current[:i] + current[i + 1:]
+                variants.add(new_str)
+                add_variants_recursive(new_str, distance_left - 1, variants)
+
+            # Insertions
+            for i in range(len(current) + 1):
+                for base in bases:
+                    new_str = current[:i] + base + current[i:]
+                    variants.add(new_str)
+                    add_variants_recursive(new_str, distance_left - 1, variants)
+
+        add_variants_recursive(barcode, self.max_distance, variants)
+        return variants
+
+    @staticmethod
+    def get_cache_path(barcodes: List[str], max_distance: int, error_rate: float = 0.05) -> str:
+
+        """Generate a unique cache filename based on inputs."""
+        m = hashlib.sha256()
+        for bc in sorted(barcodes):  # Sort for consistency
+            m.update(bc.encode())
+        m.update(str(max_distance).encode())
+        m.update(str(error_rate).encode())
+
+        hash_prefix = m.hexdigest()[:16]
+        cache_dir = os.path.join(os.path.expanduser("~"), ".specimux", "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        return os.path.join(cache_dir,
+                            f"bloom_prefilter_{hash_prefix}_k{max_distance}_e{error_rate}.bf")
+
+    @classmethod
+    def create_filter(cls, barcode_rcs: List[str], max_distance: int, error_rate: float = 0.05) -> str:
+        """Initialize bloom filter for barcode matching
+
+        Args:
+            barcode_rcs: Barcodes in the direction which they will be matched
+            max_distance: Maximum edit distance for matches
+            error_rate: Acceptable false positive rate
+
+        Returns:
+            str: Path to the created/cached bloom filter file
+        """
+
+        # Get cache paths
+        cache_path = cls.get_cache_path(barcode_rcs, max_distance, error_rate)
+        lock_path = cache_path + '.lock'
+
+        # Create lock file if needed
+        if not os.path.exists(lock_path):
+            open(lock_path, 'w').close()
+
+        # Create filter with proper locking
+        with open(lock_path, 'r') as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                if not os.path.exists(cache_path):
+                    logging.info("Creating initial Bloom filter...")
+                    prefilter = cls(barcode_rcs, max_distance, error_rate, filename=cache_path)
+                    prefilter.save(cache_path)
+                    prefilter.close()
+                    logging.info(f"Saved Bloom filter to cache: {cache_path}")
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+        return cache_path
+
+    @classmethod
+    def load_readonly(cls, filename: str, barcodes: List[str], max_distance: int) -> 'BloomPrefilter':
+        """Load BloomPrefilter from file in read-only mode"""
+        instance = cls.__new__(cls)
+        instance.barcodes = list(set(barcodes))
+        instance.barcode_length = len(instance.barcodes[0])
+        instance.max_distance = max_distance
+        instance.min_length = instance.barcode_length - max_distance
+
+        try:
+            # Open with read-only mmap
+            instance.bloom_filter = pybloomfilter.BloomFilter.open(filename, mode='r')
+        except Exception as e:
+            raise ValueError(f"Failed to load read-only filter: {e}")
+
+        return instance
+
+    def save(self, filename: str):
+        """Save filter to file with proper syncing"""
+        self.bloom_filter.sync()
+
+    def match(self, barcode: str, sequence: str) -> bool:
+        """Check if barcode matches sequence within max_distance."""
+        # Truncate sequence to minimum length
+        truncated = sequence[:self.min_length]
+
+        if barcode not in self.barcodes:
+            return True
+
+        # Concatenate in same order as when building filter
+        key = barcode + truncated
+        return key in self.bloom_filter
+
+    def close(self):
+        """Close the filter and release resources"""
+        if hasattr(self, 'bloom_filter'):
+            self.bloom_filter.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
 
 def read_barcode_file(filename: str) -> Specimens:
     """
@@ -709,21 +892,26 @@ def create_write_operation(sample_id, args, seq, match):
         quality_scores = quality_scores[s:e]
         match.trim_locations(s)
 
+    quality_seq = "".join(chr(q + 33) for q in quality_scores)
     return WriteOperation(
         sample_id=sample_id,
         seq_id=seq.id,
         distance_code=match.distance_code(),
         sequence=str(formatted_seq),
-        quality_scores=quality_scores,
-        match=match
+        quality_sequence=quality_seq,
+        p1_location=match.get_p1_location(),
+        p2_location=match.get_p2_location(),
+        b1_location=match.get_barcode1_location,
+        b2_location=match.get_barcode2_location,
     )
 
 
 
 def process_sequences(seq_records: List[SeqRecord],
-                     parameters: MatchParameters,
-                     specimens: Specimens,
-                     args: argparse.Namespace) -> Tuple[List[WriteOperation], Counter, Counter]:
+                      parameters: MatchParameters,
+                      specimens: Specimens,
+                      args: argparse.Namespace,
+                      prefilter: BarcodePrefilter) -> Tuple[List[WriteOperation], Counter, Counter]:
     classifications = Counter()
     unmatched_barcodes = Counter()
     write_ops = []
@@ -731,41 +919,38 @@ def process_sequences(seq_records: List[SeqRecord],
     for seq in seq_records:
         sample_id = SampleId.UNKNOWN
 
-        match = SequenceMatch(len(seq), specimens.b_length())
+        match = SequenceMatch(seq, specimens.b_length())
 
         if args.min_length != -1 and len(seq) < args.min_length:
             classification = MatchCode.SHORT_SEQ
         elif args.max_length != -1 and len(seq) > args.max_length:
             classification = MatchCode.LONG_SEQ
         else:
-            (oriented, seq, rseq) = determine_orientation(parameters, seq, specimens)
-            if not oriented:
-                classification = MatchCode.ORIENTATION_FAILED
+            rseq = seq.reverse_complement()
+            rseq.id = seq.id
+            rseq.description = seq.description
+
+            matches = match_sequence(prefilter, parameters, seq, rseq, specimens)
+            match, multimatch = choose_best_match(matches)
+            if multimatch:
+                classification = MatchCode.MULTIPLE_PRIMER_PAIRS_MATCHED
+                sample_id = SampleId.AMBIGUOUS
             else:
-                #extract string versions for performance - roughly 18% improvement
-                s = str(seq.seq)
-                rs = str(rseq.seq)
+                sample_id = match_sample(match, sample_id, specimens)
+                classification = classify_match(match, sample_id, specimens)
 
-                matches = match_sequence(parameters, s, rs, specimens)
-                match, multimatch = choose_best_match(matches)
-                if multimatch:
-                    classification = MatchCode.MULTIPLE_PRIMER_PAIRS_MATCHED
-                    sample_id = SampleId.AMBIGUOUS
-                else:
-                    sample_id = match_sample(match, sample_id, specimens)
-                    classification = classify_match(match, sample_id, specimens)
+            if args.group_unknowns:
+                sample_id = group_sample(match, sample_id)
 
-                if args.group_unknowns:
-                    sample_id = group_sample(match, sample_id)
-
-                unmatched_barcode = analyze_barcode_region(seq.seq, match, specimens.b_length())
-                if unmatched_barcode:
-                    unmatched_barcodes[unmatched_barcode] += 1
+            unmatched_barcode = analyze_barcode_region(seq.seq, match, specimens.b_length())
+            if unmatched_barcode:
+                unmatched_barcodes[unmatched_barcode] += 1
 
         classifications[classification] += 1
         if args.debug:
             logging.debug(f"{classification}")
-        write_op = create_write_operation(sample_id, args, seq, match)
+
+        write_op = create_write_operation(sample_id, args, match.sequence, match)
         write_ops.append(write_op)
 
     return write_ops, classifications, unmatched_barcodes
@@ -849,8 +1034,10 @@ def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool
     for m in matches:
         score = 0
         if m.p1_match and m.p2_match and m.has_b1_match() and m.has_b2_match():
-            score = 4
+            score = 5
         elif m.p1_match and m.p2_match and (m.has_b1_match() or m.has_b2_match()):
+            score = 4
+        elif (m.p1_match or m.p2_match) and (m.has_b1_match() or m.has_b2_match()):
             score = 3
         elif m.p1_match and m.p2_match:
             score = 2
@@ -866,8 +1053,8 @@ def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool
     if best_match is None:
         raise RuntimeError("Failed to select best match despite having matches")
 
-    # ambiguity between primer pairs only really matters when there was a full match
-    if best_score == 4 and multimatch:
+    # ambiguity between matches only really matters when there was a full match
+    if best_score == 5 and multimatch:
         return best_match, True
     else:
         return best_match, False
@@ -894,22 +1081,92 @@ def group_sample(match, sample_id):
             sample_id = SampleId.PREFIX_FWD_MATCH + b1s[0]
     return sample_id
 
-def match_sequence(parameters: MatchParameters, seq: str, rseq: str, specimens: Specimens) -> List[SequenceMatch]:
+class Orientation(Enum):
+    FORWARD = 1
+    REVERSE = 2
+    UNKNOWN = 3
+
+
+def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
+                          primer_pairs: List[PrimerPairInfo]) -> Orientation:
+    """Determine sequence orientation by checking primer matches.
+    Returns FORWARD/REVERSE only when highly confident, otherwise UNKNOWN."""
+
+    forward_matches = 0
+    reverse_matches = 0
+
+    for pair in primer_pairs:
+        # Forward orientation: p1 at start, p2 at end
+        fwd_p1 = align_seq(pair.p1, seq, parameters.max_dist_primers[pair.p1],
+                           0, parameters.search_len)
+        fwd_p2 = align_seq(pair.p2, seq, parameters.max_dist_primers[pair.p2],
+                           len(seq) - parameters.search_len, len(seq))
+
+        # Reverse orientation: p2 at start, p1 at end
+        rev_p1 = align_seq(pair.p1, rseq, parameters.max_dist_primers[pair.p1],
+                           0, parameters.search_len)
+        rev_p2 = align_seq(pair.p2, rseq, parameters.max_dist_primers[pair.p2],
+                           len(seq) - parameters.search_len, len(seq))
+
+        # Only count pairs where we see reasonable positioning of primers
+        if fwd_p1.matched() or fwd_p2.matched():
+            forward_matches += 1
+        if rev_p1.matched() or rev_p2.matched():
+            reverse_matches += 1
+
+    # Only return an orientation if we have clear evidence in one direction
+    # and no evidence in the other
+    if forward_matches > 0 and reverse_matches == 0:
+        return Orientation.FORWARD
+    elif reverse_matches > 0 and forward_matches == 0:
+        return Orientation.REVERSE
+    else:
+        return Orientation.UNKNOWN
+
+def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq: SeqRecord, rseq: SeqRecord, specimens: Specimens) -> List[SequenceMatch]:
     """Match sequence against primers and barcodes"""
+    # extract string versions for performance - roughly 18% improvement
+    s = str(seq.seq)
+    rs = str(rseq.seq)
+
+    primer_pairs = specimens.get_primer_pairs()
+    if parameters.preorient:
+        orientation = determine_orientation(parameters, s, rs, primer_pairs)
+    else:
+        orientation = Orientation.UNKNOWN
 
     matches = []
 
-    for primer_pair in specimens.get_primer_pairs():
-        match = SequenceMatch(len(seq), specimens.b_length())
-        match_one_end(match, parameters, rseq, True, primer_pair, Primer.P1, Barcode.B1)
-        match_one_end(match, parameters, seq, False, primer_pair, Primer.P2, Barcode.B2)
+    for primer_pair in primer_pairs:
+        if orientation == Orientation.FORWARD:
+            # Only try forward orientation
+            match = SequenceMatch(seq, specimens.b_length())
+            match_one_end(prefilter, match, parameters, rs, True, primer_pair, Primer.P1, Barcode.B1)
+            match_one_end(prefilter, match, parameters, s, False, primer_pair, Primer.P2, Barcode.B2)
+            matches.append(match)
 
-        matches.append(match)
+        elif orientation == Orientation.REVERSE:
+            # Only try reverse orientation
+            match = SequenceMatch(rseq, specimens.b_length())
+            match_one_end(prefilter, match, parameters, s, True, primer_pair, Primer.P1, Barcode.B1)
+            match_one_end(prefilter, match, parameters, rs, False, primer_pair, Primer.P2, Barcode.B2)
+            matches.append(match)
+
+        else:
+            # Try both orientations
+            match = SequenceMatch(seq, specimens.b_length())
+            match_one_end(prefilter, match, parameters, rs, True, primer_pair, Primer.P1, Barcode.B1)
+            match_one_end(prefilter, match, parameters, s, False, primer_pair, Primer.P2, Barcode.B2)
+            matches.append(match)
+
+            match = SequenceMatch(rseq, specimens.b_length())
+            match_one_end(prefilter, match, parameters, s, True, primer_pair, Primer.P1, Barcode.B1)
+            match_one_end(prefilter, match, parameters, rs, False, primer_pair, Primer.P2, Barcode.B2)
+            matches.append(match)
 
     return matches
 
-
-def match_one_end(match: SequenceMatch, parameters: MatchParameters, sequence: str,
+def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters: MatchParameters, sequence: str,
                   reversed_sequence: bool, primer_pair: PrimerPairInfo,
                   which_primer: Primer, which_barcode: Barcode) -> None:
     """Match primers and barcodes at one end of the sequence."""
@@ -933,6 +1190,10 @@ def match_one_end(match: SequenceMatch, parameters: MatchParameters, sequence: s
             bm = None
             bc = None
             for l in primer_match.locations():
+                target_seq = sequence[l[1] + 1:]
+                if not prefilter.match(b_rc, target_seq):
+                    continue
+
                 barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
                                           l[1] + 1, len(sequence), AlignMode.PREFIX)
                 if barcode_match.matched():
@@ -943,62 +1204,6 @@ def match_one_end(match: SequenceMatch, parameters: MatchParameters, sequence: s
             if bm:
                 match.add_barcode_match(bm, bc, reversed_sequence, which_barcode)
 
-
-def determine_orientation(parameters: MatchParameters, seq: SeqRecord,
-                        specimens: Specimens) -> Tuple[bool, SeqRecord, SeqRecord]:
-    """Determine sequence orientation by checking primer pairs"""
-    rseq = seq.reverse_complement()
-    rseq.id = seq.id
-    rseq.description = seq.description
-
-    best_distance = float('inf')
-    reverse_sequence = None
-
-    for primer_pair in specimens.get_primer_pairs():
-        p1 = primer_pair.p1
-        p2 = primer_pair.p2
-
-        # Check sequence in both orientations
-        p1_match = align_seq(p1, seq, int(len(p1) * 0.5), 0, parameters.search_len)
-        p1r_match = align_seq(p1, rseq, int(len(p1) * 0.5), 0, parameters.search_len)
-        p2_match = align_seq(p2, seq, int(len(p2) * 0.5), 0, parameters.search_len)
-        p2r_match = align_seq(p2, rseq, int(len(p2) * 0.5), 0, parameters.search_len)
-
-        vals = []
-        if p1_match.matched(): vals.append(p1_match.distance())
-        if p2_match.matched(): vals.append(p2_match.distance())
-        if p1r_match.matched(): vals.append(p1r_match.distance())
-        if p2r_match.matched(): vals.append(p2r_match.distance())
-
-        if len(vals) == 0:
-            continue  # Try next primer pair
-
-        current_best = min(vals)
-        if current_best < best_distance:
-            best_distance = current_best
-
-            if (p1_match.distance() == current_best or p2r_match.distance() == current_best) and \
-                    (not p2_match.matched() or p2_match.distance() > current_best) and \
-                    (not p1r_match.matched() or p1r_match.distance() > current_best):
-                reverse_sequence = False
-            elif (p1r_match.distance() == current_best or p2_match.distance() == current_best) and \
-                    (not p2r_match.matched() or p2r_match.distance() > current_best) and \
-                    (not p1_match.matched() or p1_match.distance() > current_best):
-                reverse_sequence = True
-            else:
-                logging.debug(
-                    f"Could not determine orientation for primer pair: {p1_match.distance()} {p2_match.distance()} {p1r_match.distance()} {p2r_match.distance()} {len(seq)}")
-                continue  # Try next primer pair
-
-    if reverse_sequence is None:
-        logging.debug(f"Could not orient sequence - no unambiguous primer matches")
-        return False, seq, rseq
-
-    if reverse_sequence:
-        return True, rseq, seq
-    return True, seq, rseq
-
-
 def output_write_operation(write_op: WriteOperation,
                            output_manager: OutputManager,
                            args: argparse.Namespace) -> None:
@@ -1006,22 +1211,22 @@ def output_write_operation(write_op: WriteOperation,
         fh = sys.stdout
         formatted_seq = write_op.sequence
         if args.color:
-            formatted_seq = color_sequence(formatted_seq, write_op.match,
-                                           write_op.quality_scores)
+            formatted_seq = color_sequence(formatted_seq, write_op.quality_scores, write_op.p1_location, write_op.p2_location,
+                                           write_op.b1_location, write_op.b2_location)
 
         header_symbol = '@' if args.isfastq else '>'
         fh.write(f"{header_symbol}{write_op.seq_id} {write_op.distance_code} {write_op.sample_id}\n")
         fh.write(f"{formatted_seq}\n")
         if args.isfastq:
             fh.write("+\n")
-            fh.write("".join(chr(q + 33) for q in write_op.quality_scores) + "\n")
+            fh.write(write_op.quality_sequence + "\n")
     else:
         # Use new buffered file manager
-        header = f"{write_op.seq_id} {write_op.distance_code} {write_op.sample_id}"
+        header = write_op.seq_id + " " + write_op.distance_code + " " + write_op.sample_id
         output_manager.write_sequence(write_op.sample_id, header,
-                                      write_op.sequence, write_op.quality_scores)
+                                      write_op.sequence, write_op.quality_sequence)
 
-def color_sequence(seq, match, quality_scores):
+def color_sequence(seq, quality_scores, p1_location, p2_location, b1_location, b2_location):
     blue = "\033[0;34m"
     green = "\033[0;32m"
     red = "\033[0;31m"
@@ -1046,16 +1251,16 @@ def color_sequence(seq, match, quality_scores):
                         colored_seq[i] = color + seq[i] + color_reset
 
     # Color barcode1 (blue)
-    color_region(match.get_barcode1_location(), blue)
+    color_region(b1_location, blue)
 
     # Color primer1 (green)
-    color_region(match.get_p1_location(), green)
+    color_region(p1_location, green)
 
     # Color primer2 (green)
-    color_region(match.get_p2_location(), green)
+    color_region(p2_location, green)
 
     # Color barcode2 (blue)
-    color_region(match.get_barcode2_location(), blue)
+    color_region(b2_location, blue)
 
     # Fill in uncolored regions
     for i in range(seq_len):
@@ -1072,7 +1277,8 @@ def version():
     # 0.1 September 14, 2024 - rewritten from minibar.py
     # 0.2 November 10, 2024 - support for multiple primer pairs
     # 0.3 December 4, 2024 - code & doc cleanup, write pooling
-    return "specimux.py version 0.3"
+    # 0.4 February 1, 2025 - bloom filter acceleration
+    return "specimux.py version 0.4"
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Specimux: Demultiplex MinION sequences by dual barcode indexes and primers.")
@@ -1096,6 +1302,8 @@ def parse_args(argv):
     parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--top-unmatched-barcodes", type=int, default=0, help="Display the top N unmatched barcode strings")
 
+    parser.add_argument("--disable-prefilter", action="store_true", help="Disable barcode prefiltering (bloom filter optimization)")
+    parser.add_argument("--disable-preorient", action="store_true", help="Disable heuristic pre-orientation")
     parser.add_argument("-t", "--threads", type=int, default=-1, help="Number of worker threads to use")
     parser.add_argument("-v", "--version", action="version", version=version())
 
@@ -1122,31 +1330,139 @@ def process_num_seqs(args, parser):
             parser.error("Invalid format for -n option. Use an integer or 'start,num' with integers.")
 
 
+# Global variables for worker processes
+_barcode_prefilter = PassthroughPrefilter()
+_output_manager = None
 
-def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace) -> Tuple[List[WriteOperation], Counter, Counter]:
+def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespace):
+    """Initialize worker process with shared resources"""
+    global _output_manager, _barcode_prefilter
     try:
         l = logging.DEBUG if args.debug else logging.INFO
         logging.basicConfig(level=l, format='%(asctime)s - %(levelname)s - %(message)s')
 
-        return process_sequences(work_item.seq_records, work_item.parameters, specimens, args)
+        if not args.disable_prefilter:
+            barcodes = barcodes_for_bloom_prefilter(specimens)
+            cache_path = BloomPrefilter.get_cache_path(barcodes, max_distance)
+            _barcode_prefilter = BloomPrefilter.load_readonly(cache_path, barcodes, max_distance)
+
+        # Create output manager for this worker
+        if args.output_to_files:
+            _output_manager = OutputManager(args.output_dir, args.output_file_prefix,
+                                            args.isfastq, max_open_files=50, buffer_size=100)
+            _output_manager.__enter__()
+
+    except Exception as e:
+        logging.error(f"Failed to initialize worker: {e}")
+        raise
+
+def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
+    """Process a batch of sequences and write results directly"""
+    global _output_manager, _barcode_prefilter
+    try:
+        write_ops, classifications, unmatched_barcodes = process_sequences(
+            work_item.seq_records, work_item.parameters, specimens, args, _barcode_prefilter)
+
+        # Write sequences directly from worker
+        if args.output_to_files and _output_manager is not None:
+            try:
+                for write_op in write_ops:
+                    output_write_operation(write_op, _output_manager, args)
+                # Ensure buffer is flushed after each batch
+                _output_manager.file_manager.flush_all()
+            except Exception as e:
+                logging.error(f"Error writing output: {e}")
+                raise
+
+        return classifications, unmatched_barcodes
     except Exception as e:
         logging.error(traceback.format_exc())
+        # On error, try to clean up immediately rather than waiting for atexit
+        if _output_manager is not None:
+            try:
+                logging.debug("Worker cleaning up output manager")
+                _output_manager.__exit__(None, None, None)
+            except Exception as e:
+                logging.error(f"Error cleaning up worker output manager: {e}")
         raise WorkerException(e)
+
+def barcodes_for_bloom_prefilter(specimens):
+    # Collect barcodes
+    all_b1s = set()
+    all_b2s = set()
+    for pair in specimens.get_primer_pairs():
+        all_b1s.update(pair.b1s)
+        all_b2s.update(pair.b2s)
+    barcode_rcs = [reverse_complement(b) for b in all_b1s] + [reverse_complement(b) for b in all_b2s]
+    return barcode_rcs
+
+
+def estimate_sequence_count(filename: str, args: argparse.Namespace) -> int:
+    """Estimate total sequences based on file size and sampling"""
+    if args.num_seqs > 0:
+        return args.num_seqs
+
+    # Get file size
+    file_size = os.path.getsize(filename)
+
+    # Sample first 1000 sequences to get average record size
+    sample_size = 1000
+    seq_records = open_sequence_file(filename, args)
+    total_bytes = 0
+    for i, record in enumerate(itertools.islice(seq_records, sample_size)):
+        total_bytes += len(str(record.seq))
+        if args.isfastq:
+            total_bytes += len(record.id) + len(record.description) + 2  # +2 for @ and newlines
+            total_bytes += len(record.letter_annotations["phred_quality"]) + 3  # +3 for + and newlines
+        else:
+            total_bytes += len(record.id) + len(record.description) + 2  # +2 for > and newline
+
+    if i == 0:
+        return 0
+
+    avg_record_size = total_bytes / (i + 1)
+    raw_estimate = file_size / avg_record_size
+
+    # Round to 2 significant figures, rounding up
+    if raw_estimate > 0:
+        raw_estimate *= 1.05 # fudge to avoid disappointment
+        magnitude = math.floor(math.log10(raw_estimate))
+        scaled = raw_estimate / (10 ** (magnitude - 1))
+        rounded = math.ceil(scaled) * (10 ** (magnitude - 1))
+        estimated_sequences = int(rounded)
+    else:
+        estimated_sequences = 0
+
+    logging.info(f"Estimated {estimated_sequences:,} sequences based on file size")
+
+    return estimated_sequences
+
+
+def cleanup_locks(output_dir: str):
+    """Remove the shared lock directory after all workers are done"""
+    lock_dir = os.path.join(output_dir, ".specimux_locks")
+    try:
+        shutil.rmtree(lock_dir, ignore_errors=True)
+    except Exception as e:
+        logging.warning(f"Error cleaning up lock directory: {e}")
+
 
 def specimux_mp(args):
     specimens = read_barcode_file(args.barcode_file)
     specimens.validate()
     parameters = setup_match_parameters(args, specimens)
 
+    total_seqs = estimate_sequence_count(args.sequence_file, args)
     seq_records = open_sequence_file(args.sequence_file, args)
 
-    start_time = timeit.default_timer()
+    create_output_files(args, specimens)
 
+    start_time = timeit.default_timer()
     sequence_block_size = 1000
     last_seq_to_output = args.num_seqs
     all_seqs = last_seq_to_output < 0
 
-    # Skip to the start_seq if necessary
+    # Skip to start_seq if necessary
     if args.start_seq > 1:
         for _ in itertools.islice(seq_records, args.start_seq - 1):
             pass
@@ -1154,58 +1470,87 @@ def specimux_mp(args):
     classifications = Counter()
     unmatched_barcodes = Counter()
 
-    with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq) as output_manager:
-        if args.threads == -1:
-            num_processes = multiprocessing.cpu_count()
-        else:
-            num_processes = args.threads
+    num_processes = args.threads if args.threads > 0 else multiprocessing.cpu_count()
+    logging.info(f"Will run {num_processes} worker processes")
 
-        logging.info(f"Will run {num_processes} worker processes")
+    with Pool(processes=num_processes,
+              initializer=init_worker,
+              initargs=(specimens, parameters.max_dist_index, args)) as pool:
 
+        worker_func = partial(worker, specimens=specimens, args=args)
 
-        with Pool(processes=num_processes) as pool:
-            worker_func = partial(worker, specimens=specimens, args=args)
+        try:
+            pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
+            for batch_class, batch_unmatched in pool.imap_unordered(
+                    worker_func,
+                    (WorkItem(i, batch, parameters)
+                     for i, batch in enumerate(iter_batches(seq_records, sequence_block_size,
+                                                            last_seq_to_output, all_seqs)))):
+                classifications += batch_class
+                unmatched_barcodes += batch_unmatched
 
-            def producer():
-                num_seqs = 0
-                while all_seqs or num_seqs < last_seq_to_output:
-                    to_read = sequence_block_size if all_seqs else min(sequence_block_size, last_seq_to_output - num_seqs)
-                    seq_batch = list(itertools.islice(seq_records, to_read))
-                    if not seq_batch:
-                        break
-                    work_item = WorkItem(num_seqs, seq_batch, parameters)
-                    yield work_item
-                    num_seqs += len(seq_batch)
+                # Update progress
+                batch_size = sum(batch_class.values())
+                pbar.update(batch_size)
 
-            try:
-                for write_ops, batch_classifications, batch_unmatched in pool.imap_unordered(worker_func, producer()):
-                    classifications += batch_classifications
-                    unmatched_barcodes += batch_unmatched
-                    for write_op in write_ops:
-                        output_write_operation(write_op, output_manager, args)
+                # Update progress description
+                total_processed = sum(classifications.values())
+                matched = classifications[MatchCode.MATCHED]
+                match_rate = matched / total_processed if total_processed > 0 else 0
+                pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
 
-                    total_processed = sum(classifications.values())
-                    matched = classifications[MatchCode.MATCHED]
-                    pct = matched/total_processed if total_processed > 0 else 0
-                    print(f"read: {total_processed}\t\tmatched: {matched}\t\t{pct:.2%}", end='\r', file=sys.stderr)
-                    sys.stderr.flush()
-            except WorkerException as e:
-                logging.error(f"Unexpected error in worker (see details above): {e}")
-                sys.exit(1)
+            pbar.close()
+
+        except WorkerException as e:
+            logging.error(f"Unexpected error in worker (see details above): {e}")
+            sys.exit(1)
 
     elapsed = timeit.default_timer() - start_time
-
-    print()
-    logging.info(f"Elapsed time: : {elapsed:.2f} seconds")
-
+    logging.info(f"Elapsed time: {elapsed:.2f} seconds")
     output_diagnostics(args, classifications, unmatched_barcodes)
+
+    cleanup_locks(args.output_dir)
+
+
+def create_output_files(args, specimens):
+    # Create output directory and files if needed
+    if args.output_to_files:
+        os.makedirs(args.output_dir, exist_ok=True)
+
+        # Pre-create all output files
+        required_files = {
+            os.path.join(args.output_dir, f"{args.output_file_prefix}unknown.fastq"),
+            os.path.join(args.output_dir, f"{args.output_file_prefix}ambiguous.fastq")
+        }
+        for specimen_id in specimens._specimen_ids:
+            required_files.add(os.path.join(args.output_dir,
+                                            f"{args.output_file_prefix}{specimen_id}.fastq"))
+
+        for filename in required_files:
+            with open(filename, 'w') as f:
+                pass
+
+
+def iter_batches(seq_records, batch_size: int, max_seqs: int, all_seqs: bool):
+    """Helper to iterate over sequence batches"""
+    num_seqs = 0
+    while all_seqs or num_seqs < max_seqs:
+        to_read = batch_size if all_seqs else min(batch_size, max_seqs - num_seqs)
+        batch = list(itertools.islice(seq_records, to_read))
+        if not batch:
+            break
+        yield batch
+        num_seqs += len(batch)
 
 def specimux(args):
     specimens = read_barcode_file(args.barcode_file)
     specimens.validate()
     parameters = setup_match_parameters(args, specimens)
 
+    total_seqs = estimate_sequence_count(args.sequence_file, args)
     seq_records = open_sequence_file(args.sequence_file, args)
+
+    create_output_files(args, specimens)
 
     start_time = timeit.default_timer()
 
@@ -1223,31 +1568,42 @@ def specimux(args):
 
     with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq) as output_manager:
         num_seqs = 0
+        prefilter = PassthroughPrefilter()
+        if not args.disable_prefilter:
+            barcode_rcs = barcodes_for_bloom_prefilter(specimens)
+            cache_path = BloomPrefilter.get_cache_path(barcode_rcs, parameters.max_dist_index)
+            prefilter = BloomPrefilter.load_readonly(cache_path, barcode_rcs, parameters.max_dist_index)
+
+        pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
         while all_seqs or num_seqs < last_seq_to_output:
             to_read = sequence_block_size if all_seqs else min(sequence_block_size, last_seq_to_output - num_seqs)
             seq_batch = list(itertools.islice(seq_records, to_read))
             if not seq_batch:
                 break
-            write_ops, batch_classifications, batch_unmatched = process_sequences(seq_batch, parameters, specimens, args)
+
+            write_ops, batch_classifications, batch_unmatched = process_sequences(seq_batch, parameters, specimens,
+                                                                                  args, prefilter)
             classifications += batch_classifications
             unmatched_barcodes += batch_unmatched
             for write_op in write_ops:
                 output_write_operation(write_op, output_manager, args)
 
-            num_seqs += len(seq_batch)
+            batch_size = len(seq_batch)
+            num_seqs += batch_size
+            pbar.update(batch_size)
 
+            # Update progress bar description with match rate
             total_processed = sum(classifications.values())
             matched = classifications[MatchCode.MATCHED]
-            pct = matched / total_processed if total_processed > 0 else 0
-            print(f"read: {total_processed}\t\tmatched: {matched}\t\t{pct:.2%}", end='\r', file=sys.stderr)
-            sys.stderr.flush()
+            match_rate = matched / total_processed if total_processed > 0 else 0
+            pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
+
+        pbar.close()
 
     elapsed = timeit.default_timer() - start_time
-
-    print()
-    logging.info(f"Elapsed time: : {elapsed:.2f} seconds")
-
+    logging.info(f"Elapsed time: {elapsed:.2f} seconds")
     output_diagnostics(args, classifications, unmatched_barcodes)
+
 
 def output_diagnostics(args, classifications, unmatched_barcodes):
     if args.diagnostics:
@@ -1289,13 +1645,11 @@ def setup_match_parameters(args, specimens):
         return m
 
     def _bp_adjusted_length(primer):
-        """Calculate "adjusted length" for primers accounting for degeneracy"""
         score = 0
         for b in primer:
             if b in ['A', 'C', 'G', 'T']: score += 3
             elif b in ['K', 'M', 'R', 'S', 'W', 'Y']: score += 2
             elif b in ['B', 'D', 'H', 'V']: score += 1
-
         return score / 3.0
 
     # Collect all barcodes across primer pairs
@@ -1321,15 +1675,10 @@ def setup_match_parameters(args, specimens):
     primers = list(set(primers))
     min_primer_dist = _sanity_check_distance(primers, "All Primers and Reverse Complements", args)
 
-    combined_barcodes_and_primers = combined_barcodes + primers
-    _sanity_check_distance(combined_barcodes_and_primers,
-                           "Forward Barcodes + Reverse Complement of Reverse Barcodes + All Primers", args)
-
     max_search_area = args.search_len
-
     max_dist_index = math.ceil(min_bc_dist / 2.0)
-
-    if args.index_edit_distance != -1: max_dist_index = args.index_edit_distance
+    if args.index_edit_distance != -1:
+        max_dist_index = args.index_edit_distance
 
     logging.info(f"Using Edit Distance Thresholds {max_dist_index} for barcode indexes")
 
@@ -1345,19 +1694,40 @@ def setup_match_parameters(args, specimens):
     for p, pt in primer_thresholds.items():
         logging.info(f"Using Edit Distance Threshold {pt} for primer {p}")
 
-    parameters = MatchParameters(primer_thresholds, max_dist_index, max_search_area)
+    if args.disable_preorient:
+        logging.info("Sequence pre-orientation disabled, may run slower")
+        preorient = False
+    else:
+        preorient = True
+
+    parameters = MatchParameters(primer_thresholds, max_dist_index, max_search_area, preorient)
+
+    if not args.disable_prefilter:
+        if specimens.b_length() > 13:
+            logging.warning("Barcode prefilter not tested for barcodes longer than 13 nt.  You may need to use --disable-prefilter")
+        if max_dist_index > 3:
+            logging.warning("Barcode prefilter not tested for edit distance greater than 3.  You may need to use --disable-prefilter")
+        barcode_rcs = barcodes_for_bloom_prefilter(specimens)
+        BloomPrefilter.create_filter(barcode_rcs, parameters.max_dist_index)
+        logging.info("Using Bloom Filter optimization for barcode matching")
+    else:
+        logging.info("Barcode prefiltering disabled, may run slower")
+
     return parameters
 
 def main(argv):
     args = parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
 
-    l = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(level=l, format='%(asctime)s - %(levelname)s - %(message)s')
-
-    if args.threads == 1:
-        specimux(args)
+    if args.output_to_files:
+        specimux_mp(args)  # Use multiprocess for file output
     else:
-        specimux_mp(args)
+        if args.threads > 1:
+            logging.warning(f"Multithreading only supported for file output. Ignoring --threads {args.threads}")
+        specimux(args)     # Use single process for console output
 
 if __name__ == "__main__":
     main(sys.argv)
