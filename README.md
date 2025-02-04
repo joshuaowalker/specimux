@@ -21,17 +21,13 @@ testing ground, ensuring Specimux's capabilities align closely with the needs of
 fungal biodiversity research. By enhancing the speed and accuracy of sequence demultiplexing,
 Specimux aims to allow human sequence validators to focus their efforts more effectively.
 
+
 ## Requirements
 
-**specimux.py** is written in Python and is compatible with Python 3. It requires the following dependencies:
+**specimux.py** is written in Python and is compatible with Python 3. It requires several Python packages which can be installed using the provided `requirements.txt` file:
 
-- edlib (install using `pip install edlib`)
-- BioPython
-
-You can install all required dependencies using:
-
-```
-pip install edlib biopython
+```bash 
+pip install -r requirements.txt
 ```
 
 Specimux has been tested on MacOS and Linux machines.
@@ -60,10 +56,11 @@ usage: specimux.py [-h] [--min-length MIN_LENGTH] [--max-length MAX_LENGTH]
                    [-O OUTPUT_DIR] [--color]
                    [--trim {none,tails,barcodes,primers}] [-d] [-D]
                    [--top-unmatched-barcodes TOP_UNMATCHED_BARCODES]
-                   [-t THREADS] [-v]
+                   [--disable-prefilter] [--disable-preorient] [-t THREADS]
+                   [-v]
                    barcode_file sequence_file
 
-Specimux: Demultiplex MinION sequence by dual barcode indexes and primers.
+Specimux: Demultiplex MinION sequences by dual barcode indexes and primers.
 
 positional arguments:
   barcode_file          File containing barcode information
@@ -108,10 +105,20 @@ options:
   -D, --debug           Enable debug logging
   --top-unmatched-barcodes TOP_UNMATCHED_BARCODES
                         Display the top N unmatched barcode strings
+  --disable-prefilter   Disable barcode prefiltering (bloom filter
+                        optimization)
+  --disable-preorient   Disable heuristic pre-orientation
   -t THREADS, --threads THREADS
                         Number of worker threads to use
   -v, --version         show program's version number and exit
 ```
+
+### Performance Monitoring
+The tool now provides better progress monitoring:
+- Estimated total sequences based on file sampling
+- Live progress bar with match rate updates
+- Memory usage optimization through buffered writes
+- Improved multiprocessing coordination
 
 ## Major Features in Specimux
 
@@ -178,6 +185,8 @@ Specimux provides options to filter sequences based on length:
 Specimux utilizes multiprocessing to improve performance, particularly to offset the additional computational overhead
 introduced by the enhanced alignment checks. This parallel processing approach allows Specimux to leverage multi-core
 systems effectively.
+
+Note: Multiprocessing is only supported when using file output (-F option). When writing to stdout, the tool will run in single-process mode regardless of the --threads setting.
 
 ### How it works
 
@@ -270,28 +279,25 @@ The matching process follows this hierarchy:
     - "Sequence Too Short" - Sequence is shorter than --min-length
     - "Sequence Too Long" - Sequence is longer than --max-length
 
-2. **Orientation Detection**
-    - "Could Not Determine Orientation" - No clear primer matches to establish sequence direction
-
-3. **Primer Matching**
+2. **Primer Matching**
     - "No Primer Matches" - Neither forward nor reverse primer found
     - "No Forward Primer Matches" - Forward primer not found but reverse primer present
     - "No Reverse Primer Matches" - Reverse primer not found but forward primer present
 
-4. **Barcode Matching** (only attempted if primers found)
+3. **Barcode Matching** (only attempted if primers found)
     - "No Forward Barcode Matches" - No matching forward barcode after forward primer
     - "No Reverse Barcode Matches" - No matching reverse barcode after reverse primer
     - "No Forward Barcode Matches (May be truncated)" - No forward barcode found but sequence is short at that end
     - "No Reverse Barcode Matches (May be truncated)" - No reverse barcode found but sequence is short at that end
 
-5. **Multiple Primer Ambiguity**
+4. **Multiple Primer Ambiguity**
    - "Multiple Primer Pair Full Matches" - Multiple primer pairs matched with both barcodes also matching
-6. **Specimen Ambiguity Checks**
+5. **Specimen Ambiguity Checks**
     - "Multiple Matches for Forward Barcode" - Multiple forward barcodes match within the ambiguity threshold
     - "Multiple Matches for Reverse Barcode" - Multiple reverse barcodes match within the ambiguity threshold
     - "Multiple Matches for Both Barcodes" - Both ends have multiple matching barcodes
     - "Multiple Primer Pair Matches" - Multiple primer pairs match equally well (only with mixed primer sets)
-7. **Success**
+6. **Success**
     - "Matched" - Successful unambiguous match of primers and barcodes
 
 Each classification represents a terminal state - once a sequence receives a classification, no further matching is
@@ -438,6 +444,13 @@ Note that this is a diagnostic tool and should not be used for production analys
 matches that did not meet the full matching criteria and may contain incorrectly assigned sequences.  This feature may
 be removed or enhanced in future versions.  Feedback is welcome.
 
+## Internal File Organization
+Specimux creates the following directory structure:
+- ~/.specimux/cache/: Stores cached Bloom filters
+- output_dir/.specimux_locks/: Temporary lock files for multiprocessing
+
+If you encounter issues, try removing these files
+
 ## Diagnostic Output
 
 Specimux offers two levels of diagnostic information:
@@ -492,6 +505,37 @@ ONT01.03-C01-CM23-10262-Run25-iNat179083983	AGCAATCGCGCAC	CTTGGTCATTTAGAGGAAGTAA
 ```
 
 The header line is auto-detected (and ignored) by default.
+
+## Performance Optimizations
+
+### Bloom Filter Prefiltering
+Version 0.4 introduces Bloom filter-based prefiltering for barcode matching, which can significantly improve performance when processing large datasets. The prefilter quickly eliminates impossible barcode matches before running more expensive alignment algorithms.
+
+Some considerations when using the Bloom filter optimization:
+- Currently optimized for barcodes up to 13nt in length
+- Best performance with edit distances ≤ 3
+- Can be disabled with --disable-prefilter if needed
+- Filter files are cached in ~/.specimux/cache/ for reuse
+
+### Sequence Pre-orientation
+The tool now includes a heuristic pre-orientation step that attempts to determine sequence orientation before full matching. This can improve performance by:
+- Reducing the number of alignment operations needed
+- Allowing early filtering of unlikely orientations
+- Can be disabled with --disable-preorient if causing issues
+
+### Enhanced File Handling
+- Improved buffering and caching for file operations
+- Multiprocess-safe file handling for multiprocessing
+- Automatic cleanup of temporary files
+- Progress bar with live match rate updates
+
+
+## Version History
+- 0.4 (February 2025): Added Bloom filter optimization for barcode matching, improved file handling with multiprocessing
+- 0.3 (December 2024): Code cleanup and write pooling improvements
+- 0.2 (November 2024): Added support for multiple primer pairs
+- 0.1 (September 2024): Initial release
+
 
 ## References
 [1]: Stephen Douglas Russell 2023. Primary Data Analysis - Basecalling, Demultiplexing, and Consensus Building for ONT Fungal Barcodes. 
