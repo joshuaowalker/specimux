@@ -125,7 +125,7 @@ class PrimerInfo:
         self.primer_rc = reverse_complement(seq.upper())
         self.barcodes = set()
         self.specimens = set()
-
+        self.pools = pools
 
 class PrimerRegistry:
     """Manages primers and their relationships to pools"""
@@ -270,7 +270,6 @@ class MatchResult:
         self._edlib_match['locations'] = [(loc[0] + s, loc[1] + s) for loc in self._edlib_match['locations']]  # adjust relative match to absolute
 
 class SequenceMatch:
-
     def __init__(self, sequence, barcode_length):
         self.sequence_length = len(sequence)
         self.sequence = sequence
@@ -280,8 +279,17 @@ class SequenceMatch:
         self._b2_matches: List[Tuple[str, MatchResult, float]] = []
         self._p1: Optional[PrimerInfo] = None
         self._p2: Optional[PrimerInfo] = None
+        self._pool: Optional[str] = None  # New: track the pool
         self.ambiguity_threshold = 1.0
         self._barcode_length = barcode_length
+
+    def set_pool(self, pool: str):
+        """Set the primer pool for this match"""
+        self._pool = pool
+
+    def get_pool(self) -> Optional[str]:
+        """Get the primer pool for this match"""
+        return self._pool
 
     def add_barcode_match(self, match: MatchResult, barcode: str, reverse: bool, which: Barcode):
         m = match
@@ -499,6 +507,13 @@ class Specimens:
         self._primer_pairings[primer] = rv
         return rv
 
+    def get_specimen_pool(self, specimen_id: str) -> Optional[str]:
+        """Get the primer pool for a specimen"""
+        for spec_id, pool, _, _, _, _ in self._specimens:
+            if spec_id == specimen_id:
+                return pool
+        return None
+
     def b_length(self):
         return self._barcode_length
 
@@ -542,7 +557,6 @@ class MatchParameters:
         self.search_len = search_len
         self.preorient = preorient
 
-
 class WriteOperation(NamedTuple):
     sample_id: str
     seq_id: str
@@ -550,10 +564,13 @@ class WriteOperation(NamedTuple):
     sequence: str
     quality_sequence: str
     quality_scores: List[int]
-    p1_location : Tuple[int, int]
-    p2_location : Tuple[int, int]
-    b1_location : Tuple[int, int]
-    b2_location : Tuple[int, int]
+    p1_location: Tuple[int, int]
+    p2_location: Tuple[int, int]
+    b1_location: Tuple[int, int]
+    b2_location: Tuple[int, int]
+    primer_pool: str
+    p1_name: str
+    p2_name: str
 
 class WorkItem(NamedTuple):
     seq_number: int
@@ -685,7 +702,7 @@ class CachedFileManager:
 
 
 class OutputManager:
-    """Manages output files with caching and buffering."""
+    """Manages output files with pool-based organization."""
 
     def __init__(self, output_dir: str, prefix: str, is_fastq: bool,
                  max_open_files: int = 200, buffer_size: int = 500):
@@ -702,23 +719,51 @@ class OutputManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         return self.file_manager.__exit__(exc_type, exc_val, exc_tb)
 
-    def _make_filename(self, sample_id: str) -> str:
-        """Create a filename for a sample ID, ensuring it's safe for the filesystem."""
-        safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in sample_id)
+    def _make_filename(self, sample_id: str, pool: str, p1: str, p2: str) -> str:
+        """Create a filename with pool-based organization."""
         extension = '.fastq' if self.is_fastq else '.fasta'
-        return os.path.join(self.output_dir, f"{self.prefix}{safe_id}{extension}")
 
-    def write_sequence(self, sample_id: str, header: str, sequence: str,
-                       quality_seq: Optional[str] = None):
+        # Handle None values
+        sample_id = sample_id or SampleId.UNKNOWN
+        pool = pool or "unknown"
+        p1 = p1 or "unknown"
+        p2 = p2 or "unknown"
+
+        # Handle unknown/special cases
+        if sample_id in [SampleId.UNKNOWN, SampleId.AMBIGUOUS]:
+            if pool == "unknown":
+                # Complete unknown - no pool match
+                return os.path.join(self.output_dir, "unknown", f"{self.prefix}{sample_id}{extension}")
+            else:
+                # Known pool but unknown primers
+                return os.path.join(self.output_dir, pool, "unknown", f"{self.prefix}{sample_id}{extension}")
+
+        # Regular case - organize by pool and primer pair
+        safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in sample_id)
+        primer_dir = f"{p1}-{p2}"
+        return os.path.join(self.output_dir, pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
+
+    def write_sequence(self, write_op: WriteOperation):
         """Write a sequence to the appropriate output file."""
-        filename = self._make_filename(sample_id)
+        filename = self._make_filename(write_op.sample_id, write_op.primer_pool,
+                                       write_op.p1_name, write_op.p2_name)
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+        # Format header to include primer information
+        header = (f"{write_op.seq_id} {write_op.distance_code} "
+                  f"pool={write_op.primer_pool} "
+                  f"primers={write_op.p1_name}+{write_op.p2_name} "
+                  f"{write_op.sample_id}")
+
         output = []
         output.append('@' if self.is_fastq else '>')
-        output.append(header+"\n")
-        output.append(sequence+"\n")
+        output.append(header + "\n")
+        output.append(write_op.sequence + "\n")
         if self.is_fastq:
             output.append("+\n")
-            output.append(quality_seq+"\n")
+            output.append(write_op.quality_sequence + "\n")
 
         self.file_manager.write(filename, ''.join(output))
 
@@ -1042,6 +1087,7 @@ def get_quality_seq(seq):
     else:
         return [40]*len(seq)
 
+
 def create_write_operation(sample_id, args, seq, match):
     formatted_seq = seq.seq
     quality_scores = get_quality_seq(seq)
@@ -1062,6 +1108,14 @@ def create_write_operation(sample_id, args, seq, match):
         match.trim_locations(s)
 
     quality_seq = "".join(chr(q + 33) for q in quality_scores)
+
+    # Get primer names, using "unknown" if not matched
+    p1_name = match.get_p1().name if match.get_p1() else "unknown"
+    p2_name = match.get_p2().name if match.get_p2() else "unknown"
+
+    # Get pool name - could come from specimen or default to "unknown"
+    primer_pool = match.get_pool() if match.get_pool() else "unknown"
+
     return WriteOperation(
         sample_id=sample_id,
         seq_id=seq.id,
@@ -1073,8 +1127,10 @@ def create_write_operation(sample_id, args, seq, match):
         p2_location=match.get_p2_location(),
         b1_location=match.get_barcode1_location(),
         b2_location=match.get_barcode2_location(),
+        primer_pool=primer_pool,
+        p1_name=p1_name,
+        p2_name=p2_name
     )
-
 
 
 def process_sequences(seq_records: List[SeqRecord],
@@ -1088,6 +1144,7 @@ def process_sequences(seq_records: List[SeqRecord],
 
     for seq in seq_records:
         sample_id = SampleId.UNKNOWN
+        pool = None
 
         match = SequenceMatch(seq, specimens.b_length())
 
@@ -1106,8 +1163,10 @@ def process_sequences(seq_records: List[SeqRecord],
                 classification = MatchCode.MULTIPLE_PRIMER_PAIRS_MATCHED
                 sample_id = SampleId.AMBIGUOUS
             else:
-                sample_id = match_sample(match, sample_id, specimens)
+                sample_id, pool = match_sample(match, sample_id, specimens)
                 classification = classify_match(match, sample_id, specimens)
+                if pool:
+                    match.set_pool(pool)  # Set the pool in the match object for output
 
             if args.group_unknowns:
                 sample_id = group_sample(match, sample_id)
@@ -1124,7 +1183,6 @@ def process_sequences(seq_records: List[SeqRecord],
         write_ops.append(write_op)
 
     return write_ops, classifications, unmatched_barcodes
-
 
 def analyze_barcode_region(seq: str, match: SequenceMatch, bc_len: int) -> Optional[str]:
     if match.has_b1_match() and match.p2_match and not match.has_b2_match():
@@ -1225,7 +1283,10 @@ def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool
     else:
         return best_match, False
 
-def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> str:
+
+def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> Tuple[str, Optional[str]]:
+    """Returns tuple of (sample_id, pool_name)"""
+    pool = None
     if match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match():
         ids = specimens.specimens_for_barcodes_and_primers(
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
@@ -1233,9 +1294,18 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> 
             sample_id = SampleId.AMBIGUOUS
         elif len(ids) == 1:
             sample_id = ids[0]
+            # For full matches, get pool from specimen record
+            pool = specimens.get_specimen_pool(ids[0])
         else:
-            logging.warning(f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, {match.get_p1()}, {match.get_p2()})")
-    return sample_id
+            logging.warning(
+                f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, {match.get_p1()}, {match.get_p2()})")
+    elif match.p1_match and match.p2_match:
+        # Partial match - find common pool for organizing output
+        common_pools = set(match.get_p1().pools).intersection(match.get_p2().pools)
+        if common_pools:
+            pool = list(common_pools)[0]
+
+    return sample_id, pool
 
 def group_sample(match, sample_id):
     if sample_id in [SampleId.UNKNOWN, SampleId.AMBIGUOUS]:
@@ -1372,9 +1442,7 @@ def output_write_operation(write_op: WriteOperation,
             fh.write("+\n")
             fh.write(write_op.quality_sequence + "\n")
     else:
-        header = write_op.seq_id + " " + write_op.distance_code + " " + write_op.sample_id
-        output_manager.write_sequence(write_op.sample_id, header,
-                                      write_op.sequence, write_op.quality_sequence)
+        output_manager.write_sequence(write_op)
 
 def color_sequence(seq: str, quality_scores: List[int], p1_location: Tuple[int, int],
                    p2_location: Tuple[int, int], b1_location: Tuple[int, int], b2_location: Tuple[int, int]):
@@ -1667,23 +1735,29 @@ def specimux_mp(args):
 
 
 def create_output_files(args, specimens):
-    # Create output directory and files if needed
+    """Create directory structure for output files"""
     if args.output_to_files:
+        # Create base output directory
         os.makedirs(args.output_dir, exist_ok=True)
 
-        # Pre-create all output files
-        required_files = {
-            os.path.join(args.output_dir, f"{args.output_file_prefix}unknown.fastq"),
-            os.path.join(args.output_dir, f"{args.output_file_prefix}ambiguous.fastq")
-        }
-        for specimen_id in specimens._specimen_ids:
-            required_files.add(os.path.join(args.output_dir,
-                                            f"{args.output_file_prefix}{specimen_id}.fastq"))
+        # Create unknown directory for complete unknowns
+        os.makedirs(os.path.join(args.output_dir, "unknown"), exist_ok=True)
 
-        for filename in required_files:
-            with open(filename, 'w') as f:
-                pass
+        # Create pool directories and their substructure
+        for pool in specimens._primer_registry.get_pools():
+            pool_dir = os.path.join(args.output_dir, pool)
 
+            # Create pool directory
+            os.makedirs(pool_dir, exist_ok=True)
+
+            # Create unknown directory within pool
+            os.makedirs(os.path.join(pool_dir, "unknown"), exist_ok=True)
+
+            # Create primer pair directories
+            for fwd_primer in specimens._primer_registry.get_pool_primers(pool, Primer.FWD):
+                for rev_primer in specimens._primer_registry.get_pool_primers(pool, Primer.REV):
+                    primer_dir = f"{fwd_primer.name}-{rev_primer.name}"
+                    os.makedirs(os.path.join(pool_dir, primer_dir), exist_ok=True)
 
 def iter_batches(seq_records, batch_size: int, max_seqs: int, all_seqs: bool):
     """Helper to iterate over sequence batches"""
