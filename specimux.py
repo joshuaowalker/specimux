@@ -116,6 +116,45 @@ class Primer(Enum):
     FWD = 3
     REV = 4
 
+
+class PrimerInfo:
+    def __init__(self, name: str, seq: str, direction: Primer, pools: List[str]):
+        self.name = name
+        self.primer = seq.upper()
+        self.direction = direction
+        self.primer_rc = reverse_complement(seq.upper())
+        self.barcodes = set()
+        self.specimens = set()
+
+
+class PrimerRegistry:
+
+    def __init__(self):
+        self._primers: Dict[str, PrimerInfo] = {}  # name -> PrimerInfo
+
+    def add_primer(self, primer: PrimerInfo) -> None:
+        """
+        Add a primer to the registry
+
+        Args:
+            primer: PrimerInfo object to add
+
+        Raises:
+            ValueError: If primer name already exists
+        """
+        if primer.name in self._primers:
+            raise ValueError(f"Duplicate primer name: {primer.name}")
+
+        # Store primer
+        self._primers[primer.name] = primer
+
+
+    def get_primer(self, name: str) -> Optional[PrimerInfo]:
+        """Get a primer by name"""
+        return self._primers.get(name)
+
+
+
 class MatchResult:
     """Wrapper around edlib match result"""
     def __init__(self, edlib_match):
@@ -161,8 +200,8 @@ class SequenceMatch:
         self._b1_matches: List[Tuple[str, MatchResult, float]] = []
         self.p2_match: Optional[MatchResult] = None
         self._b2_matches: List[Tuple[str, MatchResult, float]] = []
-        self._p1: Optional[str] = None
-        self._p2: Optional[str] = None
+        self._p1: Optional[PrimerInfo] = None
+        self._p2: Optional[PrimerInfo] = None
         self.ambiguity_threshold = 1.0
         self._barcode_length = barcode_length
 
@@ -197,7 +236,7 @@ class SequenceMatch:
         best_distance = self.b2_distance()
         return [b for b, _, d in self._b2_matches if abs(d - best_distance) < self.ambiguity_threshold]
 
-    def set_primer_match(self, match: MatchResult, primer: str, reverse: bool, which: Primer):
+    def set_primer_match(self, match: MatchResult, primer: PrimerInfo, reverse: bool, which: Primer):
         m = match
         if reverse:
             m = m.reversed(self.sequence_length)
@@ -208,10 +247,10 @@ class SequenceMatch:
             self.p2_match = m
             self._p2 = primer
 
-    def get_p1(self):
+    def get_p1(self) -> PrimerInfo:
         return self._p1
 
-    def get_p2(self):
+    def get_p2(self) -> PrimerInfo:
         return self._p2
 
     def get_p1_location(self):
@@ -290,42 +329,38 @@ class SequenceMatch:
         b2d = self.b2_distance()
         return format(f"({p1d},{b1d},{p2d},{b2d})")
 
-class PrimerInfo:
-    def __init__(self, primer: str, direction: Primer):
-        self.primer = primer.upper()
-        self.direction = direction
-        self.primer_rc = reverse_complement(primer.upper())
-        self.barcodes = set()
-        self.specimens = set()
-
 class Specimens:
-    def __init__(self):
+    def __init__(self, primer_registry: PrimerRegistry):
         self._specimens = []  # List of (id, b1, p1, b2, p2) tuples for reference
         self._barcode_length = 0
         self._primers = {}
         self._specimen_ids = set()
         self._primer_pairings = {}
+        self._primer_registry = primer_registry
 
-    def add_specimen(self, specimen_id, b1, p1, b2, p2):
+    def add_specimen(self, specimen_id, pool, b1, p1, b2, p2):
         """Add a specimen with its barcodes and primers"""
         if specimen_id in self._specimen_ids:
             raise ValueError(format(f"Duplicate specimen id in index file: {specimen_id}"))
         self._specimen_ids.add(specimen_id)
 
-        self._specimens.append((specimen_id, b1, p1, b2, p2))
         self._barcode_length = max(self._barcode_length, len(b1), len(b2))
 
-        if p1 not in self._primers:
-            self._primers[p1] = PrimerInfo(p1, Primer.FWD)
-        primer_info = self._primers[p1]
+        ps1 = self._primer_registry.get_primer(p1).primer
+        if ps1 not in self._primers:
+            self._primers[ps1] = self._primer_registry.get_primer(p1)
+        primer_info = self._primers[ps1]
         primer_info.barcodes.add(b1)
         primer_info.specimens.add(specimen_id)
 
-        if p2 not in self._primers:
-            self._primers[p2] = PrimerInfo(p2, Primer.REV)
-        primer_info = self._primers[p2]
+        ps2 = self._primer_registry.get_primer(p2).primer
+        if ps2 not in self._primers:
+            self._primers[ps2] = self._primer_registry.get_primer(p2)
+        primer_info = self._primers[ps2]
         primer_info.barcodes.add(b2)
         primer_info.specimens.add(specimen_id)
+
+        self._specimens.append((specimen_id, b1, p1, b2, p2))
 
     def get_primers(self, direction: Primer) -> List[PrimerInfo]:
         return [p for p in self._primers.values() if p.direction == direction]
@@ -377,11 +412,11 @@ class Specimens:
         if len(set(len(b) for b in all_b2s)) > 1:
             logging.warning("Reverse barcodes have inconsistent lengths")
 
-    def specimens_for_barcodes_and_primers(self, b1_list, b2_list, p1_matched, p2_matched):
+    def specimens_for_barcodes_and_primers(self, b1_list: List[str], b2_list: List[str], p1_matched: PrimerInfo, p2_matched: PrimerInfo) -> List[str]:
         matching_specimens = []
         for spec_id, b1, p1, b2, p2 in self._specimens:
-            if (p1_matched.upper() == p1 and
-                    p2_matched.upper() == p2 and
+            if (p1_matched.name == p1 and
+                    p2_matched.name == p2 and
                     b1.upper() in b1_list and
                     b2.upper() in b2_list):
                 matching_specimens.append(spec_id)
@@ -768,13 +803,55 @@ class BloomPrefilter:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+def read_primers_file(filename: str) -> PrimerRegistry:
+    """
+    Read primers file and build primer registry and pools
 
-def read_barcode_file(filename: str) -> Specimens:
+    Returns:
+        Tuple of (primer_registry, pool_dict) where:
+            primer_registry manages all primers and their relationships
+            pool_dict maps pool names to PrimerPool objects for backwards compatibility
+    """
+    registry = PrimerRegistry()
+
+    # First pass - create pools and PrimerInfo objects
+    for record in SeqIO.parse(filename, "fasta"):
+        name = record.id
+        sequence = str(record.seq)
+
+        # Parse description for pool and position
+        desc = record.description
+        pool_names = []
+        position = None
+
+        for field in desc.split():
+            if field.startswith("pool="):
+                pool_names = field[5:].split(";")
+            elif field.startswith("position="):
+                position = field[9:]
+
+        if not pool_names or not position:
+            raise ValueError(f"Missing pool or position for primer {name}")
+
+        if position == "forward":
+            direction = Primer.FWD
+        elif position == "reverse":
+            direction = Primer.REV
+        else:
+            raise ValueError(f"Unrecognized primer position {position}")
+
+        # Create PrimerInfo and add to registry
+        primer = PrimerInfo(name, sequence, direction, pool_names)
+        registry.add_primer(primer)
+
+    return registry
+
+def read_specimen_file(filename: str, primer_registry: PrimerRegistry) -> Specimens:
     """
     Read a tab-separated barcode file and return a Specimens object.
     Each line contains: sample_id, forward_barcode, forward_primer, reverse_barcode, reverse_primer
     """
-    specimens = Specimens()
+    specimens = Specimens(primer_registry)
 
     with open(filename, 'r', newline='') as f:
         reader = csv.reader(f, delimiter='\t')
@@ -783,60 +860,19 @@ def read_barcode_file(filename: str) -> Specimens:
         if not first_line:
             raise ValueError("The barcode file is empty")
 
-        # Check if it's a header
-        if not _is_valid_data_line(first_line):
-            # If it's not valid data, assume it's a header and move to the next line
-            first_line = next(reader, None)
-            if not first_line:
-                raise ValueError("The barcode file contains only a header")
-
-        # Process the first line of data
-        if len(first_line) != 5:
-            raise ValueError(f"First data line does not have 5 columns: {first_line}")
-
-        if not _is_valid_data_line(first_line):
-            raise ValueError(f"Invalid data in first line: {first_line}")
-
-        sample_id, forward_barcode, forward_primer, reverse_barcode, reverse_primer = first_line
-        specimens.add_specimen(sample_id, forward_barcode.upper(), forward_primer.upper(),
-                               reverse_barcode.upper(), reverse_primer.upper())
-
         # Process the rest of the lines
-        for row_num, row in enumerate(reader, start=2):
-            if len(row) != 5:
+        for row_num, row in enumerate(reader, start=1):
+            if len(row) != 6:
                 raise ValueError(f"Line {row_num} does not have 5 columns: {row}")
 
-            if not _is_valid_data_line(row):
-                raise ValueError(f"Invalid data in line {row_num}: {row}")
-
-            sample_id, forward_barcode, forward_primer, reverse_barcode, reverse_primer = row
-            specimens.add_specimen(sample_id, forward_barcode.upper(), forward_primer.upper(),
-                                   reverse_barcode.upper(), reverse_primer.upper())
+            sample_id, primer_pool, forward_barcode, forward_primer, reverse_barcode, reverse_primer = row
+            specimens.add_specimen(sample_id, primer_pool, forward_barcode.upper(), forward_primer,
+                                   reverse_barcode.upper(), reverse_primer)
 
     if len(specimens._specimens) == 0:
         raise ValueError("No valid data found in the barcode file")
 
     return specimens
-
-def _is_valid_data_line(line: List[str]) -> bool:
-    """
-    Check if a line contains valid data.
-
-    This function checks if the barcodes and primers contain only DNA letters (A, T, G, C).
-
-    Args:
-    line (List[str]): A list of strings representing a line from the file
-
-    Returns:
-    bool: True if the line contains valid data, False otherwise
-    """
-    if len(line) != 5:
-        return False
-
-    _, forward_barcode, forward_primer, reverse_barcode, reverse_primer = line
-    dna_sequences = [forward_barcode, forward_primer, reverse_barcode, reverse_primer]
-
-    return all(set(seq.upper()).issubset(IUPAC_CODES) for seq in dna_sequences)
 
 def open_sequence_file(filename, args):
     file_format = "fastq" if filename.endswith((".fastq", ".fq")) else "fasta"
@@ -1167,7 +1203,7 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
 
     # If we found matching primers, look for corresponding barcodes
     if primer_match.matched():
-        match.set_primer_match(primer_match, primer, reversed_sequence, which_primer)
+        match.set_primer_match(primer_match, primer_info, reversed_sequence, which_primer)
 
         # Get relevant barcodes for this primer pair
         barcodes = primer_info.barcodes
@@ -1199,7 +1235,7 @@ def output_write_operation(write_op: WriteOperation,
         fh = sys.stdout
         formatted_seq = write_op.sequence
         if args.color:
-            formatted_seq = color_sequence(formatted_seq, write_op.quality_scores, write_op.p1_location, write_op.p2_location,
+            formatted_seq = color_sequence(formatted_seq, write_op.quality_sequence, write_op.p1_location, write_op.p2_location,
                                            write_op.b1_location, write_op.b2_location)
 
         header_symbol = '@' if args.isfastq else '>'
@@ -1270,8 +1306,9 @@ def version():
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Specimux: Demultiplex MinION sequences by dual barcode indexes and primers.")
-    
-    parser.add_argument("barcode_file", help="File containing barcode information")
+
+    parser.add_argument("primer_file", help="Fasta file containing primer information")
+    parser.add_argument("specimen_file", help="TSV file containing specimen mapping with barcodes and primers")
     parser.add_argument("sequence_file", help="Sequence file in Fasta or Fastq format, gzipped or plain text")
 
     parser.add_argument("--min-length", type=int, default=-1, help="Minimum sequence length.  Shorter sequences will be skipped (default: no filtering)")
@@ -1437,7 +1474,8 @@ def cleanup_locks(output_dir: str):
 
 
 def specimux_mp(args):
-    specimens = read_barcode_file(args.barcode_file)
+    primer_registry = read_primers_file(args.primer_file)
+    specimens = read_specimen_file(args.specimen_file, primer_registry)
     specimens.validate()
     parameters = setup_match_parameters(args, specimens)
 
@@ -1532,7 +1570,8 @@ def iter_batches(seq_records, batch_size: int, max_seqs: int, all_seqs: bool):
         num_seqs += len(batch)
 
 def specimux(args):
-    specimens = read_barcode_file(args.barcode_file)
+    primer_registry = read_primers_file(args.primer_file)
+    specimens = read_specimen_file(args.specimen_file, primer_registry)
     specimens.validate()
     parameters = setup_match_parameters(args, specimens)
 
