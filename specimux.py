@@ -440,6 +440,7 @@ class WriteOperation(NamedTuple):
     distance_code: str
     sequence: str
     quality_sequence: str
+    quality_scores: List[int]
     p1_location : Tuple[int, int]
     p2_location : Tuple[int, int]
     b1_location : Tuple[int, int]
@@ -942,10 +943,11 @@ def create_write_operation(sample_id, args, seq, match):
         distance_code=match.distance_code(),
         sequence=str(formatted_seq),
         quality_sequence=quality_seq,
+        quality_scores=quality_scores,
         p1_location=match.get_p1_location(),
         p2_location=match.get_p2_location(),
-        b1_location=match.get_barcode1_location,
-        b2_location=match.get_barcode2_location,
+        b1_location=match.get_barcode1_location(),
+        b2_location=match.get_barcode2_location(),
     )
 
 
@@ -1235,7 +1237,7 @@ def output_write_operation(write_op: WriteOperation,
         fh = sys.stdout
         formatted_seq = write_op.sequence
         if args.color:
-            formatted_seq = color_sequence(formatted_seq, write_op.quality_sequence, write_op.p1_location, write_op.p2_location,
+            formatted_seq = color_sequence(formatted_seq, write_op.quality_scores, write_op.p1_location, write_op.p2_location,
                                            write_op.b1_location, write_op.b2_location)
 
         header_symbol = '@' if args.isfastq else '>'
@@ -1245,12 +1247,12 @@ def output_write_operation(write_op: WriteOperation,
             fh.write("+\n")
             fh.write(write_op.quality_sequence + "\n")
     else:
-        # Use new buffered file manager
         header = write_op.seq_id + " " + write_op.distance_code + " " + write_op.sample_id
         output_manager.write_sequence(write_op.sample_id, header,
                                       write_op.sequence, write_op.quality_sequence)
 
-def color_sequence(seq, quality_scores, p1_location, p2_location, b1_location, b2_location):
+def color_sequence(seq: str, quality_scores: List[int], p1_location: Tuple[int, int],
+                   p2_location: Tuple[int, int], b1_location: Tuple[int, int], b2_location: Tuple[int, int]):
     blue = "\033[0;34m"
     green = "\033[0;32m"
     red = "\033[0;31m"
@@ -1263,11 +1265,11 @@ def color_sequence(seq, quality_scores, p1_location, p2_location, b1_location, b
 
     def color_region(location, color):
         if location is not None:
-            start, end = location
-            if start < 0 or end < 0:
+            cstart, cend = location
+            if cstart < 0 or end < 0:
                 return
 
-            for i in range(start, end + 1):  # Include the end position
+            for i in range(cstart, cend + 1):  # Include the end position
                 if i < seq_len:
                     if quality_scores[i] < 10:
                         colored_seq[i] = color + seq[i].lower() + color_reset
