@@ -847,31 +847,39 @@ def read_primers_file(filename: str) -> PrimerRegistry:
 
     return registry
 
+
 def read_specimen_file(filename: str, primer_registry: PrimerRegistry) -> Specimens:
     """
-    Read a tab-separated barcode file and return a Specimens object.
-    Each line contains: sample_id, forward_barcode, forward_primer, reverse_barcode, reverse_primer
+    Read a tab-separated specimen file and return a Specimens object.
+    Expected columns: SampleID, PrimerPool, FwIndex, FwPrimer, RvIndex, RvPrimer
     """
     specimens = Specimens(primer_registry)
 
+    expected_columns = {'SampleID', 'PrimerPool', 'FwIndex', 'FwPrimer', 'RvIndex', 'RvPrimer'}
+
     with open(filename, 'r', newline='') as f:
-        reader = csv.reader(f, delimiter='\t')
+        reader = csv.DictReader(f, delimiter='\t')
 
-        first_line = next(reader, None)
-        if not first_line:
-            raise ValueError("The barcode file is empty")
+        # Validate columns
+        missing_cols = expected_columns - set(reader.fieldnames)
+        if missing_cols:
+            raise ValueError(f"Missing required columns in specimen file: {missing_cols}")
 
-        # Process the rest of the lines
         for row_num, row in enumerate(reader, start=1):
-            if len(row) != 6:
-                raise ValueError(f"Line {row_num} does not have 5 columns: {row}")
-
-            sample_id, primer_pool, forward_barcode, forward_primer, reverse_barcode, reverse_primer = row
-            specimens.add_specimen(sample_id, primer_pool, forward_barcode.upper(), forward_primer,
-                                   reverse_barcode.upper(), reverse_primer)
+            try:
+                specimens.add_specimen(
+                    specimen_id=row['SampleID'],
+                    pool=row['PrimerPool'],
+                    b1=row['FwIndex'].upper(),
+                    p1=row['FwPrimer'],
+                    b2=row['RvIndex'].upper(),
+                    p2=row['RvPrimer']
+                )
+            except (KeyError, ValueError) as e:
+                raise ValueError(f"Error processing row {row_num}: {e}")
 
     if len(specimens._specimens) == 0:
-        raise ValueError("No valid data found in the barcode file")
+        raise ValueError("No valid data found in the specimen file")
 
     return specimens
 
