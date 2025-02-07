@@ -128,16 +128,20 @@ class PrimerInfo:
 
 
 class PrimerRegistry:
+    """Manages primers and their relationships to pools"""
 
     def __init__(self):
         self._primers: Dict[str, PrimerInfo] = {}  # name -> PrimerInfo
+        self._pools: Dict[str, Set[str]] = {}  # pool -> set of primer names
+        self._pool_primers: Dict[str, Dict[Primer, List[PrimerInfo]]] = {}  # pool -> {direction -> [PrimerInfo]}
 
-    def add_primer(self, primer: PrimerInfo) -> None:
+    def add_primer(self, primer: PrimerInfo, pools: List[str]) -> None:
         """
-        Add a primer to the registry
+        Add a primer to the registry and its pools
 
         Args:
             primer: PrimerInfo object to add
+            pools: List of pool names this primer belongs to
 
         Raises:
             ValueError: If primer name already exists
@@ -148,11 +152,85 @@ class PrimerRegistry:
         # Store primer
         self._primers[primer.name] = primer
 
+        # Add to pools
+        for pool in pools:
+            if pool not in self._pools:
+                self._pools[pool] = set()
+                self._pool_primers[pool] = {
+                    Primer.FWD: [],
+                    Primer.REV: []
+                }
+            self._pools[pool].add(primer.name)
+            self._pool_primers[pool][primer.direction].append(primer)
 
     def get_primer(self, name: str) -> Optional[PrimerInfo]:
         """Get a primer by name"""
         return self._primers.get(name)
 
+    def get_primers_in_pool(self, pool: str) -> List[PrimerInfo]:
+        """Get all primers in a pool"""
+        if pool not in self._pools:
+            return []
+        primers = []
+        for direction in [Primer.FWD, Primer.REV]:
+            primers.extend(self._pool_primers[pool][direction])
+        return primers
+
+    def get_pools(self) -> List[str]:
+        """Get list of all pool names"""
+        return list(self._pools.keys())
+
+    def get_pool_primers(self, pool: str, direction: Optional[Primer] = None) -> List[PrimerInfo]:
+        """
+        Get primers in a pool, optionally filtered by direction
+
+        Args:
+            pool: Name of the pool
+            direction: Optional primer direction to filter by
+
+        Returns:
+            List of PrimerInfo objects
+        """
+        if pool not in self._pools:
+            return []
+        if direction:
+            return self._pool_primers[pool][direction]
+        return self.get_primers_in_pool(pool)
+
+    def primer_in_pool(self, primer_name: str, pool: str) -> bool:
+        """Check if a primer is in a pool"""
+        return pool in self._pools and primer_name in self._pools[pool]
+
+    def validate_pools(self) -> None:
+        """
+        Validate pool configurations
+
+        Raises:
+            ValueError: If validation fails
+        """
+        for pool in self._pools:
+            # Each pool must have at least one forward and one reverse primer
+            if not self._pool_primers[pool][Primer.FWD]:
+                raise ValueError(f"Pool {pool} has no forward primers")
+            if not self._pool_primers[pool][Primer.REV]:
+                raise ValueError(f"Pool {pool} has no reverse primers")
+
+    def get_pool_stats(self) -> Dict:
+        """Get statistics about pools and primers"""
+        stats = {
+            'total_primers': len(self._primers),
+            'total_pools': len(self._pools),
+            'pools': {}
+        }
+
+        for pool in self._pools:
+            stats['pools'][pool] = {
+                'forward_primers': len(self._pool_primers[pool][Primer.FWD]),
+                'reverse_primers': len(self._pool_primers[pool][Primer.REV]),
+                'total_primers': len(self.get_primers_in_pool(pool))
+            }
+
+        return stats
 
 
 class MatchResult:
@@ -329,16 +407,17 @@ class SequenceMatch:
         b2d = self.b2_distance()
         return format(f"({p1d},{b1d},{p2d},{b2d})")
 
+
 class Specimens:
     def __init__(self, primer_registry: PrimerRegistry):
-        self._specimens = []  # List of (id, b1, p1, b2, p2) tuples for reference
+        self._specimens = []  # List of (id, pool, b1, p1s, b2, p2s) tuples for reference
         self._barcode_length = 0
         self._primers = {}
         self._specimen_ids = set()
         self._primer_pairings = {}
         self._primer_registry = primer_registry
 
-    def add_specimen(self, specimen_id, pool, b1, p1, b2, p2):
+    def add_specimen(self, specimen_id: str, pool: str, b1: str, p1: str, b2: str, p2: str):
         """Add a specimen with its barcodes and primers"""
         if specimen_id in self._specimen_ids:
             raise ValueError(format(f"Duplicate specimen id in index file: {specimen_id}"))
@@ -346,21 +425,62 @@ class Specimens:
 
         self._barcode_length = max(self._barcode_length, len(b1), len(b2))
 
-        ps1 = self._primer_registry.get_primer(p1).primer
-        if ps1 not in self._primers:
-            self._primers[ps1] = self._primer_registry.get_primer(p1)
-        primer_info = self._primers[ps1]
-        primer_info.barcodes.add(b1)
-        primer_info.specimens.add(specimen_id)
+        # Handle wildcards and get list of possible primers
+        p1_list = self._resolve_primer_name(p1, pool, Primer.FWD)
+        p2_list = self._resolve_primer_name(p2, pool, Primer.REV)
 
-        ps2 = self._primer_registry.get_primer(p2).primer
-        if ps2 not in self._primers:
-            self._primers[ps2] = self._primer_registry.get_primer(p2)
-        primer_info = self._primers[ps2]
-        primer_info.barcodes.add(b2)
-        primer_info.specimens.add(specimen_id)
+        # Register primers and barcodes
+        for p1_info in p1_list:
+            ps1 = p1_info.primer
+            if ps1 not in self._primers:
+                self._primers[ps1] = p1_info
+            primer_info = self._primers[ps1]
+            primer_info.barcodes.add(b1)
+            primer_info.specimens.add(specimen_id)
 
-        self._specimens.append((specimen_id, b1, p1, b2, p2))
+        for p2_info in p2_list:
+            ps2 = p2_info.primer
+            if ps2 not in self._primers:
+                self._primers[ps2] = p2_info
+            primer_info = self._primers[ps2]
+            primer_info.barcodes.add(b2)
+            primer_info.specimens.add(specimen_id)
+
+        self._specimens.append((specimen_id, pool, b1, p1_list, b2, p2_list))
+
+    def _resolve_primer_name(self, primer_name: str, pool: str, direction: Primer) -> List[PrimerInfo]:
+        """Resolve a primer name (including wildcards) to a list of PrimerInfo objects"""
+        if primer_name == '-' or primer_name == '*':  # Handle wildcards
+            # Get all primers in the specified pool and direction
+            primers = []
+            for p in self._primer_registry.get_primers_in_pool(pool):
+                if p.direction == direction:
+                    primers.append(p)
+            if not primers:
+                raise ValueError(f"No {direction.name} primers found in pool {pool}")
+            return primers
+        else:
+            # Get specific primer
+            primer = self._primer_registry.get_primer(primer_name)
+            if not primer:
+                raise ValueError(f"Primer not found: {primer_name}")
+            if primer.direction != direction:
+                raise ValueError(f"Primer {primer_name} is not a {direction.name} primer")
+            if not self._primer_registry.primer_in_pool(primer_name, pool):
+                raise ValueError(f"Primer {primer_name} is not in pool {pool}")
+            return [primer]
+
+    def specimens_for_barcodes_and_primers(self, b1_list: List[str], b2_list: List[str],
+                                           p1_matched: PrimerInfo, p2_matched: PrimerInfo) -> List[str]:
+        matching_specimens = []
+        for spec_id, pool, b1, p1s, b2, p2s in self._specimens:
+            if (p1_matched in p1s and
+                    p2_matched in p2s and
+                    b1.upper() in b1_list and
+                    b2.upper() in b2_list):
+                matching_specimens.append(spec_id)
+
+        return matching_specimens
 
     def get_primers(self, direction: Primer) -> List[PrimerInfo]:
         return [p for p in self._primers.values() if p.direction == direction]
@@ -378,6 +498,9 @@ class Specimens:
 
         self._primer_pairings[primer] = rv
         return rv
+
+    def b_length(self):
+        return self._barcode_length
 
     def validate(self):
         self._validate_barcodes_globally_unique()
@@ -411,20 +534,6 @@ class Specimens:
             logging.warning("Forward barcodes have inconsistent lengths")
         if len(set(len(b) for b in all_b2s)) > 1:
             logging.warning("Reverse barcodes have inconsistent lengths")
-
-    def specimens_for_barcodes_and_primers(self, b1_list: List[str], b2_list: List[str], p1_matched: PrimerInfo, p2_matched: PrimerInfo) -> List[str]:
-        matching_specimens = []
-        for spec_id, b1, p1, b2, p2 in self._specimens:
-            if (p1_matched.name == p1 and
-                    p2_matched.name == p2 and
-                    b1.upper() in b1_list and
-                    b2.upper() in b2_list):
-                matching_specimens.append(spec_id)
-
-        return matching_specimens
-
-    def b_length(self):
-        return self._barcode_length
 
 class MatchParameters:
     def __init__(self, max_dist_primers: Dict[str, int], max_dist_index: int, search_len: int, preorient: bool):
@@ -806,16 +915,13 @@ class BloomPrefilter:
 
 def read_primers_file(filename: str) -> PrimerRegistry:
     """
-    Read primers file and build primer registry and pools
+    Read primers file and build primer registry
 
     Returns:
-        Tuple of (primer_registry, pool_dict) where:
-            primer_registry manages all primers and their relationships
-            pool_dict maps pool names to PrimerPool objects for backwards compatibility
+        PrimerRegistry object managing all primers and their relationships
     """
     registry = PrimerRegistry()
 
-    # First pass - create pools and PrimerInfo objects
     for record in SeqIO.parse(filename, "fasta"):
         name = record.id
         sequence = str(record.seq)
@@ -831,22 +937,33 @@ def read_primers_file(filename: str) -> PrimerRegistry:
             elif field.startswith("position="):
                 position = field[9:]
 
-        if not pool_names or not position:
-            raise ValueError(f"Missing pool or position for primer {name}")
+        if not pool_names:
+            raise ValueError(f"Missing pool specification for primer {name}")
+        if not position:
+            raise ValueError(f"Missing position specification for primer {name}")
 
         if position == "forward":
             direction = Primer.FWD
         elif position == "reverse":
             direction = Primer.REV
         else:
-            raise ValueError(f"Unrecognized primer position {position}")
+            raise ValueError(f"Invalid primer position '{position}' for {name}")
 
         # Create PrimerInfo and add to registry
         primer = PrimerInfo(name, sequence, direction, pool_names)
-        registry.add_primer(primer)
+        registry.add_primer(primer, pool_names)
+
+    # Validate pool configurations
+    registry.validate_pools()
+
+    # Log pool statistics
+    stats = registry.get_pool_stats()
+    logging.info(f"Loaded {stats['total_primers']} primers in {stats['total_pools']} pools")
+    for pool, pool_stats in stats['pools'].items():
+        logging.info(f"Pool {pool}: {pool_stats['forward_primers']} forward, "
+                    f"{pool_stats['reverse_primers']} reverse primers")
 
     return registry
-
 
 def read_specimen_file(filename: str, primer_registry: PrimerRegistry) -> Specimens:
     """
