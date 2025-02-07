@@ -957,7 +957,6 @@ class BloomPrefilter:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
 def read_primers_file(filename: str) -> PrimerRegistry:
     """
     Read primers file and build primer registry
@@ -978,7 +977,9 @@ def read_primers_file(filename: str) -> PrimerRegistry:
 
         for field in desc.split():
             if field.startswith("pool="):
-                pool_names = field[5:].split(";")
+                # Split pool names on either comma or semicolon
+                pool_str = field[5:]
+                pool_names = [p.strip() for p in pool_str.replace(';', ',').split(',')]
             elif field.startswith("position="):
                 position = field[9:]
 
