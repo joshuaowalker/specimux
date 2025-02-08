@@ -729,16 +729,6 @@ class OutputManager:
         p1 = p1 or "unknown"
         p2 = p2 or "unknown"
 
-        # Handle unknown/special cases
-        if sample_id in [SampleId.UNKNOWN, SampleId.AMBIGUOUS]:
-            if pool == "unknown":
-                # Complete unknown - no pool match
-                return os.path.join(self.output_dir, "unknown", f"{self.prefix}{sample_id}{extension}")
-            else:
-                # Known pool but unknown primers
-                return os.path.join(self.output_dir, pool, "unknown", f"{self.prefix}{sample_id}{extension}")
-
-        # Regular case - organize by pool and primer pair
         safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in sample_id)
         primer_dir = f"{p1}-{p2}"
         return os.path.join(self.output_dir, pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
@@ -1293,6 +1283,10 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> 
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
         if len(ids) > 1:
             sample_id = SampleId.AMBIGUOUS
+            pools = Counter()
+            for id in ids:
+                pools[specimens.get_specimen_pool(id)] += 1
+            pool = pools.most_common(1)[0][0]
         elif len(ids) == 1:
             sample_id = ids[0]
             # For full matches, get pool from specimen record
@@ -1305,6 +1299,10 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> 
         common_pools = set(match.get_p1().pools).intersection(match.get_p2().pools)
         if common_pools:
             pool = list(common_pools)[0]
+    elif match.p1_match:
+        pool = match.get_p1().pools[0]
+    elif match.p2_match:
+        pool = match.get_p2().pools[0]
 
     return sample_id, pool
 
