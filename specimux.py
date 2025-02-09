@@ -424,12 +424,16 @@ class Specimens:
         self._specimen_ids = set()
         self._primer_pairings = {}
         self._primer_registry = primer_registry
+        self._active_pools = set()  # Track pools actually used by specimens
 
     def add_specimen(self, specimen_id: str, pool: str, b1: str, p1: str, b2: str, p2: str):
         """Add a specimen with its barcodes and primers"""
         if specimen_id in self._specimen_ids:
             raise ValueError(format(f"Duplicate specimen id in index file: {specimen_id}"))
         self._specimen_ids.add(specimen_id)
+
+        # Track active pools
+        self._active_pools.add(pool)
 
         self._barcode_length = max(self._barcode_length, len(b1), len(b2))
 
@@ -455,6 +459,34 @@ class Specimens:
             primer_info.specimens.add(specimen_id)
 
         self._specimens.append((specimen_id, pool, b1, p1_list, b2, p2_list))
+
+    def prune_unused_pools(self):
+        """Remove pools that aren't used by any specimens"""
+        # Get list of all unused pools
+        all_pools = set(self._primer_registry.get_pools())
+        unused_pools = all_pools - self._active_pools
+
+        if unused_pools:
+            logging.info(f"Removing unused pools: {unused_pools}")
+
+            # Remove unused pools from all primers
+            for primer in self._primers.values():
+                primer.pools = [p for p in primer.pools if p in self._active_pools]
+
+            # Update primer registry
+            for pool in unused_pools:
+                # Remove pool from registry's internal data structures
+                if pool in self._primer_registry._pools:
+                    del self._primer_registry._pools[pool]
+                if pool in self._primer_registry._pool_primers:
+                    del self._primer_registry._pool_primers[pool]
+
+            # Update pool stats in logs
+            stats = self._primer_registry.get_pool_stats()
+            logging.info(f"After pruning: {stats['total_primers']} primers in {stats['total_pools']} pools")
+            for pool, pool_stats in stats['pools'].items():
+                logging.info(f"Pool {pool}: {pool_stats['forward_primers']} forward, "
+                             f"{pool_stats['reverse_primers']} reverse primers")
 
     def _resolve_primer_name(self, primer_name: str, pool: str, direction: Primer) -> List[PrimerInfo]:
         """Resolve a primer name (including wildcards) to a list of PrimerInfo objects"""
@@ -520,10 +552,7 @@ class Specimens:
     def validate(self):
         self._validate_barcodes_globally_unique()
         self._validate_barcode_lengths()
-        # TODO
-        # logging.info(f"Number of unique primer pairs: {len(self._primer_pairs)}")
-        # for pair in self._primer_pairs.values():
-        #     logging.info(f"Primer pair {pair.p1}/{pair.p2}: {len(pair.specimens)} specimens")
+        self.prune_unused_pools()
 
     def _validate_barcodes_globally_unique(self):
         all_b1s = set()
@@ -1242,6 +1271,7 @@ def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool
     best_score = -1
     best_match = None
     multimatch = False
+    best_pool = None
 
     if not matches:
         raise ValueError("No matches provided to choose_best_match")
@@ -1261,12 +1291,17 @@ def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool
         if score > best_score:
             best_score = score
             best_match = m
+            best_pool = m.get_pool()
             multimatch = False
         elif score == best_score:
             multimatch = True
+            if best_pool != m.get_pool():
+                best_pool = "unknown"
 
     if best_match is None:
         raise RuntimeError("Failed to select best match despite having matches")
+
+    best_match.set_pool(best_pool)
 
     # ambiguity between matches only really matters when there was a full match
     if best_score == 5 and multimatch:
@@ -1275,34 +1310,30 @@ def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool
         return best_match, False
 
 
+
 def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> Tuple[str, Optional[str]]:
     """Returns tuple of (sample_id, pool_name)"""
-    pool = None
+    # Start with previously determined pool from primers
+    pool = match.get_pool()
+
     if match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match():
         ids = specimens.specimens_for_barcodes_and_primers(
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
         if len(ids) > 1:
             sample_id = SampleId.AMBIGUOUS
+            # For ambiguous matches, use most common pool from matching specimens
             pools = Counter()
             for id in ids:
                 pools[specimens.get_specimen_pool(id)] += 1
             pool = pools.most_common(1)[0][0]
         elif len(ids) == 1:
             sample_id = ids[0]
-            # For full matches, get pool from specimen record
+            # For unique matches, use specimen's pool
             pool = specimens.get_specimen_pool(ids[0])
         else:
             logging.warning(
-                f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, {match.get_p1()}, {match.get_p2()})")
-    elif match.p1_match and match.p2_match:
-        # Partial match - find common pool for organizing output
-        common_pools = set(match.get_p1().pools).intersection(match.get_p2().pools)
-        if common_pools:
-            pool = list(common_pools)[0]
-    elif match.p1_match:
-        pool = match.get_p1().pools[0]
-    elif match.p2_match:
-        pool = match.get_p2().pools[0]
+                f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, "
+                f"{match.get_p1()}, {match.get_p2()})")
 
     return sample_id, pool
 
@@ -1358,14 +1389,40 @@ def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
     else:
         return Orientation.UNKNOWN
 
-def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq: SeqRecord, rseq: SeqRecord, specimens: Specimens) -> List[SequenceMatch]:
+def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) -> Optional[str]:
+    """
+    Determine the primer pool based on matched primers.
+
+    Args:
+        p1: Forward primer info (or None)
+        p2: Reverse primer info (or None)
+
+    Returns:
+        str: Pool name if one can be determined, None otherwise
+    """
+    if p1 and p2:
+        # Find common pools between primers
+        common_pools = set(p1.pools).intersection(p2.pools)
+        if common_pools:
+            return list(common_pools)[0]
+    elif p1:
+        return p1.pools[0]
+    elif p2:
+        return p2.pools[0]
+    return None
+
+
+def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq: SeqRecord,
+                   rseq: SeqRecord, specimens: Specimens) -> List[SequenceMatch]:
     """Match sequence against primers and barcodes"""
     # extract string versions for performance - roughly 18% improvement
     s = str(seq.seq)
     rs = str(rseq.seq)
 
     if parameters.preorient:
-        orientation = determine_orientation(parameters, s, rs, specimens.get_primers(Primer.FWD), specimens.get_primers(Primer.REV))
+        orientation = determine_orientation(parameters, s, rs,
+                                            specimens.get_primers(Primer.FWD),
+                                            specimens.get_primers(Primer.REV))
     else:
         orientation = Orientation.UNKNOWN
 
@@ -1375,14 +1432,26 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
         for rev_primer in specimens.get_paired_primers(fwd_primer.primer):
             if orientation in [Orientation.FORWARD, Orientation.UNKNOWN]:
                 match = SequenceMatch(seq, specimens.b_length())
-                match_one_end(prefilter, match, parameters, rs, True, fwd_primer, Primer.FWD, Barcode.B1)
-                match_one_end(prefilter, match, parameters, s, False, rev_primer, Primer.REV, Barcode.B2)
+                match_one_end(prefilter, match, parameters, rs, True, fwd_primer,
+                              Primer.FWD, Barcode.B1)
+                match_one_end(prefilter, match, parameters, s, False, rev_primer,
+                              Primer.REV, Barcode.B2)
+                # Set initial pool based on primers
+                pool = get_pool_from_primers(match.get_p1(), match.get_p2())
+                if pool:
+                    match.set_pool(pool)
                 matches.append(match)
 
             if orientation in [Orientation.REVERSE, Orientation.UNKNOWN]:
                 match = SequenceMatch(rseq, specimens.b_length())
-                match_one_end(prefilter, match, parameters, s, True, fwd_primer, Primer.FWD, Barcode.B1)
-                match_one_end(prefilter, match, parameters, rs, False, rev_primer, Primer.REV, Barcode.B2)
+                match_one_end(prefilter, match, parameters, s, True, fwd_primer,
+                              Primer.FWD, Barcode.B1)
+                match_one_end(prefilter, match, parameters, rs, False, rev_primer,
+                              Primer.REV, Barcode.B2)
+                # Set initial pool based on primers
+                pool = get_pool_from_primers(match.get_p1(), match.get_p2())
+                if pool:
+                    match.set_pool(pool)
                 matches.append(match)
     return matches
 
@@ -1964,3 +2033,4 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv)
+
