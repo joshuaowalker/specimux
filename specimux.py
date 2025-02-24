@@ -1527,7 +1527,7 @@ def color_sequence(seq: str, quality_scores: List[int], p1_location: Tuple[int, 
     def color_region(location, color):
         if location is not None:
             cstart, cend = location
-            if cstart < 0 or end < 0:
+            if cstart < 0 or cend < 0:
                 return
 
             for i in range(cstart, cend + 1):  # Include the end position
