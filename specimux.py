@@ -760,7 +760,23 @@ class OutputManager:
 
         safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in sample_id)
         primer_dir = f"{p1}-{p2}"
-        return os.path.join(self.output_dir, pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
+
+        # Determine if this is a full match or a partial/unknown match
+        if sample_id == SampleId.UNKNOWN:
+            # Complete unknown
+            return os.path.join(self.output_dir, pool, primer_dir, "unknown", f"{self.prefix}{safe_id}{extension}")
+        elif sample_id == SampleId.AMBIGUOUS:
+            # Ambiguous match
+            return os.path.join(self.output_dir, pool, primer_dir, "ambiguous", f"{self.prefix}{safe_id}{extension}")
+        elif sample_id.startswith(SampleId.PREFIX_FWD_MATCH):
+            # Forward barcode matched but reverse didn't
+            return os.path.join(self.output_dir, pool, primer_dir, "partial", f"{self.prefix}{safe_id}{extension}")
+        elif sample_id.startswith(SampleId.PREFIX_REV_MATCH):
+            # Reverse barcode matched but forward didn't
+            return os.path.join(self.output_dir, pool, primer_dir, "partial", f"{self.prefix}{safe_id}{extension}")
+        else:
+            # Full match
+            return os.path.join(self.output_dir, pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
 
     def write_sequence(self, write_op: WriteOperation):
         """Write a sequence to the appropriate output file."""
@@ -1157,9 +1173,8 @@ def process_sequences(seq_records: List[SeqRecord],
                       parameters: MatchParameters,
                       specimens: Specimens,
                       args: argparse.Namespace,
-                      prefilter: BarcodePrefilter) -> Tuple[List[WriteOperation], Counter, Counter]:
+                      prefilter: BarcodePrefilter) -> Tuple[List[WriteOperation], Counter]:
     classifications = Counter()
-    unmatched_barcodes = Counter()
     write_ops = []
 
     for seq in seq_records:
@@ -1188,12 +1203,7 @@ def process_sequences(seq_records: List[SeqRecord],
                 if pool:
                     match.set_pool(pool)  # Set the pool in the match object for output
 
-            if args.group_unknowns:
-                sample_id = group_sample(match, sample_id)
-
-            unmatched_barcode = analyze_barcode_region(seq.seq, match, specimens.b_length())
-            if unmatched_barcode:
-                unmatched_barcodes[unmatched_barcode] += 1
+            sample_id = group_sample(match, sample_id)
 
         classifications[classification] += 1
         if args.debug:
@@ -1202,25 +1212,7 @@ def process_sequences(seq_records: List[SeqRecord],
         write_op = create_write_operation(sample_id, args, match.sequence, match)
         write_ops.append(write_op)
 
-    return write_ops, classifications, unmatched_barcodes
-
-def analyze_barcode_region(seq: str, match: SequenceMatch, bc_len: int) -> Optional[str]:
-    if match.has_b1_match() and match.p2_match and not match.has_b2_match():
-        start = match.p2_match.location()[1]
-        end = min(len(seq), start+bc_len)
-        bc_region = seq[start:end]
-        if len(bc_region) < bc_len:
-            bc_region += '-'*(bc_len-len(bc_region))
-        return bc_region + "<"
-    elif match.has_b2_match() and match.p1_match and not match.has_b1_match():
-        end = match.p1_match.location()[0]
-        start = max(0, end - bc_len)
-        bc_region = seq[start:end]
-        if len(bc_region) < bc_len:
-            bc_region = '-'*(bc_len-len(bc_region)) + bc_region
-        return ">"+bc_region
-    else:
-        return None
+    return write_ops, classifications
 
 
 def classify_match(match: SequenceMatch, sample_id: str, specimens: Specimens) -> str:
@@ -1580,7 +1572,6 @@ def parse_args(argv):
     parser.add_argument("-e", "--index-edit-distance", type=int, default=-1, help="Barcode edit distance value, default is half of min distance between barcodes")
     parser.add_argument("-E", "--primer-edit-distance", type=int, default=-1, help="Primer edit distance value, default is min distance between primers")
     parser.add_argument("-l", "--search-len", type=int, default=80, help="Length to search for index and primer at start and end of sequence (default: 80)")
-    parser.add_argument("--group-unknowns", action="store_true", help="Group unknown sequences based on partial matches and classifications")
     parser.add_argument("-F", "--output-to-files", action="store_true", help="Create individual sample files for sequences")
     parser.add_argument("-P", "--output-file-prefix", default="sample_", help="Prefix for individual files when using -F (default: sample_)")
     parser.add_argument("-O", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
@@ -1588,7 +1579,6 @@ def parse_args(argv):
     parser.add_argument("--trim", choices=[TrimMode.NONE, TrimMode.TAILS, TrimMode.BARCODES, TrimMode.PRIMERS], default=TrimMode.BARCODES, help="trimming to apply")
     parser.add_argument("-d", "--diagnostics", action="store_true", help="Output extra diagnostics")
     parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--top-unmatched-barcodes", type=int, default=0, help="Display the top N unmatched barcode strings")
 
     parser.add_argument("--disable-prefilter", action="store_true", help="Disable barcode prefiltering (bloom filter optimization)")
     parser.add_argument("--disable-preorient", action="store_true", help="Disable heuristic pre-orientation")
@@ -1648,7 +1638,7 @@ def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
     """Process a batch of sequences and write results directly"""
     global _output_manager, _barcode_prefilter
     try:
-        write_ops, classifications, unmatched_barcodes = process_sequences(
+        write_ops, classifications = process_sequences(
             work_item.seq_records, work_item.parameters, specimens, args, _barcode_prefilter)
 
         # Write sequences directly from worker
@@ -1662,7 +1652,8 @@ def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
                 logging.error(f"Error writing output: {e}")
                 raise
 
-        return classifications, unmatched_barcodes
+        return classifications
+
     except Exception as e:
         logging.error(traceback.format_exc())
         # On error, try to clean up immediately rather than waiting for atexit
@@ -1758,7 +1749,6 @@ def specimux_mp(args):
             pass
 
     classifications = Counter()
-    unmatched_barcodes = Counter()
 
     num_processes = args.threads if args.threads > 0 else multiprocessing.cpu_count()
     logging.info(f"Will run {num_processes} worker processes")
@@ -1771,13 +1761,12 @@ def specimux_mp(args):
 
         try:
             pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
-            for batch_class, batch_unmatched in pool.imap_unordered(
+            for batch_class in pool.imap_unordered(
                     worker_func,
                     (WorkItem(i, batch, parameters)
                      for i, batch in enumerate(iter_batches(seq_records, sequence_block_size,
                                                             last_seq_to_output, all_seqs)))):
                 classifications += batch_class
-                unmatched_barcodes += batch_unmatched
 
                 # Update progress
                 batch_size = sum(batch_class.values())
@@ -1797,7 +1786,7 @@ def specimux_mp(args):
 
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
-    output_diagnostics(args, classifications, unmatched_barcodes)
+    output_diagnostics(args, classifications)
 
     cleanup_locks(args.output_dir)
 
@@ -1809,7 +1798,7 @@ def create_output_files(args, specimens):
         os.makedirs(args.output_dir, exist_ok=True)
 
         # Create unknown directory for complete unknowns
-        os.makedirs(os.path.join(args.output_dir, "unknown"), exist_ok=True)
+        os.makedirs(os.path.join(args.output_dir, "unknown", "unknown-unknown"), exist_ok=True)
 
         # Create pool directories and their substructure
         for pool in specimens._primer_registry.get_pools():
@@ -1818,14 +1807,27 @@ def create_output_files(args, specimens):
             # Create pool directory
             os.makedirs(pool_dir, exist_ok=True)
 
-            # Create unknown directory within pool
-            os.makedirs(os.path.join(pool_dir, "unknown"), exist_ok=True)
-
             # Create primer pair directories
             for fwd_primer in specimens._primer_registry.get_pool_primers(pool, Primer.FWD):
                 for rev_primer in specimens._primer_registry.get_pool_primers(pool, Primer.REV):
                     primer_dir = f"{fwd_primer.name}-{rev_primer.name}"
+
+                    # Create directories for full matches
                     os.makedirs(os.path.join(pool_dir, primer_dir), exist_ok=True)
+
+                    # Create directories for partial, ambiguous, and unknown matches
+                    os.makedirs(os.path.join(pool_dir, primer_dir, "partial"), exist_ok=True)
+                    os.makedirs(os.path.join(pool_dir, primer_dir, "ambiguous"), exist_ok=True)
+                    os.makedirs(os.path.join(pool_dir, primer_dir, "unknown"), exist_ok=True)
+
+                # Create unknown primer directories
+                unknown_primer_dir = f"{fwd_primer.name}-unknown"
+                os.makedirs(os.path.join(args.output_dir, pool, unknown_primer_dir), exist_ok=True)
+
+            # Create unknown primer directories for reverse only matches
+            for rev_primer in specimens._primer_registry.get_pool_primers(pool, Primer.REV):
+                unknown_primer_dir = f"unknown-{rev_primer.name}"
+                os.makedirs(os.path.join(args.output_dir, pool, unknown_primer_dir), exist_ok=True)
 
 def iter_batches(seq_records, batch_size: int, max_seqs: int, all_seqs: bool):
     """Helper to iterate over sequence batches"""
@@ -1861,7 +1863,6 @@ def specimux(args):
             pass
 
     classifications = Counter()
-    unmatched_barcodes = Counter()
 
     with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq) as output_manager:
         num_seqs = 0
@@ -1878,10 +1879,9 @@ def specimux(args):
             if not seq_batch:
                 break
 
-            write_ops, batch_classifications, batch_unmatched = process_sequences(seq_batch, parameters, specimens,
+            write_ops, batch_classifications = process_sequences(seq_batch, parameters, specimens,
                                                                                   args, prefilter)
             classifications += batch_classifications
-            unmatched_barcodes += batch_unmatched
             for write_op in write_ops:
                 output_write_operation(write_op, output_manager, args)
 
@@ -1899,10 +1899,10 @@ def specimux(args):
 
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
-    output_diagnostics(args, classifications, unmatched_barcodes)
+    output_diagnostics(args, classifications)
 
 
-def output_diagnostics(args, classifications, unmatched_barcodes):
+def output_diagnostics(args, classifications):
     if args.diagnostics:
         # Sort the classifications by their counts in descending order
         sorted_classifications = sorted(
@@ -1921,9 +1921,6 @@ def output_diagnostics(args, classifications, unmatched_barcodes):
         logging.info("Classification Statistics:")
         for classification, count in sorted_classifications:
             logging.info(f"{classification:<{max_name_length}} : {count:>{max_count_length}} ({count / total:2.2%})")
-        logging.info(f"{len(unmatched_barcodes)} distinct barcode strings were unmatched")
-        for barcode, count in unmatched_barcodes.most_common(args.top_unmatched_barcodes):
-            logging.info(f"Barcode: {barcode}\t\t{count:>{max_count_length}}")
 
 def setup_match_parameters(args, specimens):
     def _calculate_distances(sequences):
