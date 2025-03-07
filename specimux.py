@@ -615,11 +615,13 @@ class FileHandleCache(LRUCache):
         self.file_manager = file_manager
 
     def popitem(self):
-        """Override popitem to ensure file handle cleanup on eviction."""
+        """Override popitem to ensure file handle and lock cleanup on eviction."""
         key, file_handle = super().popitem()
         # Ensure buffer is flushed before closing
         self.file_manager.flush_buffer(key)
         file_handle.close()
+        # Also close the corresponding lock if it exists
+        self.file_manager.close_lock(key)
         return key, file_handle
 
 class CachedFileManager:
@@ -708,6 +710,15 @@ class CachedFileManager:
         """Ensure cleanup on garbage collection"""
         self.close_all()
 
+    def close_lock(self, filename: str):
+        """Close a specific lock file if it's open."""
+        if filename in self.locks:
+            try:
+                os.close(self.locks[filename])
+                del self.locks[filename]
+            except Exception as e:
+                logging.warning(f"Error closing lock file for {filename}: {e}")
+                
     def close_file(self, filename: str):
         """
         Close a specific file if it's open.
@@ -2030,4 +2041,5 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv)
+
 
