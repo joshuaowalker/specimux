@@ -298,6 +298,42 @@ Highlights sequence components:
 - Primers in green
 - Low quality bases (<Q10) in lowercase
 
+## Specimen File Converter
+
+If you're upgrading from an earlier version of specimux (or from minibar.py), a converter tool is included to help migrate your specimen files to the new format.
+
+### Legacy Format
+
+Earlier versions used a different specimen file format that included primer sequences directly:
+
+```
+SampleID         FwIndex         FwPrimer                    RvIndex         RvPrimer
+ONT01.01-A01     AGCAATCGCGCAC   CTTGGTCATTTAGAGGAAGTAA      AACCAGCGCCTAG   TCCTCCGCTTATTGATATGC
+ONT01.02-B01     AGCAATCGCGCAC   CTTGGTCATTTAGAGGAAGTAA      ACTCGCGGTGCCA   TCCTCCGCTTATTGATATGC
+```
+
+### Converter Tool
+
+The `v04_specimen_converter.py` script automatically:
+
+1. Extracts all unique primer sequences
+2. Generates a `primers.fasta` file with proper pool annotations
+3. Creates a new specimen file with the required `PrimerPool` column
+4. Replaces primer sequences with primer names
+
+### Usage
+
+```bash
+python v04_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --output-primers=primers.fasta --pool-name=ITS
+```
+
+### Arguments
+
+- `input_file`: The old format specimen file (required)
+- `--output-specimen`: Path for the new format specimen file (default: specimen_new.txt)
+- `--output-primers`: Path for the primers FASTA file (default: primers.fasta)
+- `--pool-name`: Name to use for the primer pool (default: pool1)
+
 ## Version History
 - 0.5 (February 2025): Added Primer Pools and Hierarchical Output
 - 0.4 (February 2025): Added Bloom filter optimization
