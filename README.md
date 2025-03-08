@@ -120,11 +120,13 @@ Specimux organizes output by pool and primer pair:
 output_dir/
   ITS/
     ITS1F-ITS4/
+      primers.fasta
       sample_specimen1.fastq
     unknown/
       sample_unknown.fastq
   RPB2/
     fRPB2-5F-RPB2-7.1R/
+      primers.fasta
       sample_specimen2.fastq
     unknown/
       sample_unknown.fastq
@@ -133,7 +135,8 @@ output_dir/
 ```
 
 Each pool directory contains:
-- Subdirectories for each primer pair combination.  
+- Subdirectories for each primer pair combination. 
+  - A primers.fasta file is created in each subdirectory containing only the primer sequences which matched. 
   - Note: specific primer pair subdirectories are used even when specifying a "*" wildcard for one or both primers in the Specimen File
 - "unknown" subdirectory for sequences matching primers but not barcodes
 - "partial" subdirectory for sequences which match only one barcode

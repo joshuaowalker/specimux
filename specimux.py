@@ -718,7 +718,7 @@ class CachedFileManager:
                 del self.locks[filename]
             except Exception as e:
                 logging.warning(f"Error closing lock file for {filename}: {e}")
-                
+
     def close_file(self, filename: str):
         """
         Close a specific file if it's open.
@@ -1802,8 +1802,29 @@ def specimux_mp(args):
     cleanup_locks(args.output_dir)
 
 
+def write_primers_fasta(output_dir: str, fwd_primer: PrimerInfo, rev_primer: PrimerInfo):
+    """
+    Write a primers.fasta file containing the forward and reverse primers to the specified directory.
+
+    Args:
+        output_dir: Directory to write the primers.fasta file to
+        fwd_primer: Forward primer info
+        rev_primer: Reverse primer info
+    """
+    primer_file_path = os.path.join(output_dir, "primers.fasta")
+
+    with open(primer_file_path, 'w') as f:
+        # Write forward primer
+        f.write(f">{fwd_primer.name} position=forward pool={','.join(fwd_primer.pools)}\n")
+        f.write(f"{fwd_primer.primer}\n")
+
+        # Write reverse primer
+        f.write(f">{rev_primer.name} position=reverse pool={','.join(rev_primer.pools)}\n")
+        f.write(f"{rev_primer.primer}\n")
+
+
 def create_output_files(args, specimens):
-    """Create directory structure for output files"""
+    """Create directory structure for output files and add primers.fasta files"""
     if args.output_to_files:
         # Create base output directory
         os.makedirs(args.output_dir, exist_ok=True)
@@ -1822,9 +1843,13 @@ def create_output_files(args, specimens):
             for fwd_primer in specimens._primer_registry.get_pool_primers(pool, Primer.FWD):
                 for rev_primer in specimens._primer_registry.get_pool_primers(pool, Primer.REV):
                     primer_dir = f"{fwd_primer.name}-{rev_primer.name}"
+                    primer_full_dir = os.path.join(pool_dir, primer_dir)
 
                     # Create directories for full matches
-                    os.makedirs(os.path.join(pool_dir, primer_dir), exist_ok=True)
+                    os.makedirs(primer_full_dir, exist_ok=True)
+
+                    # Write primers.fasta file for this primer pair
+                    write_primers_fasta(primer_full_dir, fwd_primer, rev_primer)
 
                     # Create directories for partial, ambiguous, and unknown matches
                     os.makedirs(os.path.join(pool_dir, primer_dir, "partial"), exist_ok=True)
