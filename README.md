@@ -70,7 +70,7 @@ Primer pools are a core organizing principle in Specimux, allowing logical group
 
 ### Primer File Format
 
-Primers are specified in FASTA format with metadata in the description line:
+Primers are specified in a text file in FASTA format with metadata in the description line:
 
 ```
 >primer_name pool=pool1,pool2 position=forward
@@ -92,6 +92,8 @@ GAYGAYMGWGATCAYTTYGG
 >RPB2-7.1R pool=RPB2 position=reverse
 CCCATRGCYTGYTTMCCCATDGC
 ```
+
+Although the file is technically in FASTA format, you can name it primers.fasta, primers.txt, or anything that makes sense for your workflow.
 
 ### Specimen File Format 
 
@@ -131,9 +133,11 @@ output_dir/
 ```
 
 Each pool directory contains:
-- Subdirectories for each primer pair combination
-- "unknown" directory for sequences matching primers but not barcodes
-- Separate files for ambiguous matches
+- Subdirectories for each primer pair combination.  
+  - Note: specific primer pair subdirectories are used even when specifying a "*" wildcard for one or both primers in the Specimen File
+- "unknown" subdirectory for sequences matching primers but not barcodes
+- "partial" subdirectory for sequences which match only one barcode
+- "ambiguous" subdirectory for sequences which match multiple specimens equally well
 
 ### Pool Management
 
@@ -215,16 +219,16 @@ Raw sequence:
 5' <---tail--->[Forward Barcode][Forward Primer]---target sequence---[Reverse Primer][Reverse Barcode]<---tail---> 3'
 
 --trim none: (entire sequence unchanged)
-   |<-----------------------------------------------full sequence----------------------------------------------->|
+5' <---tail--->[Forward Barcode][Forward Primer]---target sequence---[Reverse Primer][Reverse Barcode]<---tail---> 3'
 
 --trim tails: (remove external regions)
-               |<----------------------------------trimmed sequence--------------------------------->|
+5'             [Forward Barcode][Forward Primer]---target sequence---[Reverse Primer][Reverse Barcode]             3'
 
 --trim barcodes: (default, remove barcodes)
-                                |<-----------------trimmed sequence---------------->|
+5'                              [Forward Primer]---target sequence---[Reverse Primer]                              3'
 
 --trim primers: (remove primers)
-                                                |<trimmed  sequence>|
+5'                                              ---target sequence---                                              3'
 ```
 
 ### Multiprocessing
@@ -237,7 +241,7 @@ Raw sequence:
 ### Performance Optimizations
 
 #### Bloom Filter Prefiltering (v0.4)
-- Quick elimination of impossible barcode matches
+- Uses hashing before sequence alignment to speed up barcode matching
 - Best for barcodes ≤13nt and edit distances ≤3
 - Can disable with --disable-prefilter
 
