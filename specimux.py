@@ -811,7 +811,26 @@ class OutputManager:
             output.append("+\n")
             output.append(write_op.quality_sequence + "\n")
 
-        self.file_manager.write(filename, ''.join(output))
+        output_content = ''.join(output)
+        self.file_manager.write(filename, output_content)
+        
+        # If this is a full match, write it to the pool-level full directory as well
+        if not (write_op.sample_id == SampleId.UNKNOWN or 
+                write_op.sample_id == SampleId.AMBIGUOUS or
+                write_op.sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or
+                write_op.sample_id.startswith(SampleId.PREFIX_REV_MATCH)):
+            
+            # Create additional path for pool-level full directory
+            extension = '.fastq' if self.is_fastq else '.fasta'
+            safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in write_op.sample_id)
+            pool_full_path = os.path.join(self.output_dir, write_op.primer_pool, "full", 
+                                          f"{self.prefix}{safe_id}{extension}")
+            
+            # Ensure the pool full directory exists
+            os.makedirs(os.path.dirname(pool_full_path), exist_ok=True)
+            
+            # Write to pool-level full directory
+            self.file_manager.write(pool_full_path, output_content)
 
 class WorkerException(Exception):
     pass
@@ -1823,6 +1842,29 @@ def write_primers_fasta(output_dir: str, fwd_primer: PrimerInfo, rev_primer: Pri
         f.write(f"{rev_primer.primer}\n")
 
 
+def write_all_primers_fasta(output_dir: str, fwd_primers: List[PrimerInfo], rev_primers: List[PrimerInfo]):
+    """
+    Write a primers.fasta file containing all forward and reverse primers to the specified directory.
+
+    Args:
+        output_dir: Directory to write the primers.fasta file to
+        fwd_primers: List of forward primer info objects
+        rev_primers: List of reverse primer info objects
+    """
+    primer_file_path = os.path.join(output_dir, "primers.fasta")
+
+    with open(primer_file_path, 'w') as f:
+        # Write all forward primers
+        for fwd_primer in fwd_primers:
+            f.write(f">{fwd_primer.name} position=forward pool={','.join(fwd_primer.pools)}\n")
+            f.write(f"{fwd_primer.primer}\n")
+
+        # Write all reverse primers
+        for rev_primer in rev_primers:
+            f.write(f">{rev_primer.name} position=reverse pool={','.join(rev_primer.pools)}\n")
+            f.write(f"{rev_primer.primer}\n")
+
+
 def create_output_files(args, specimens):
     """Create directory structure for output files and add primers.fasta files"""
     if args.output_to_files:
@@ -1836,8 +1878,15 @@ def create_output_files(args, specimens):
         for pool in specimens._primer_registry.get_pools():
             pool_dir = os.path.join(args.output_dir, pool)
 
-            # Create pool directory
+            # Create pool directory and pool-level full directory
             os.makedirs(pool_dir, exist_ok=True)
+            os.makedirs(os.path.join(pool_dir, "full"), exist_ok=True)
+            
+            # Write a primers.fasta file with all primers to the pool-level full directory
+            pool_full_path = os.path.join(pool_dir, "full")
+            write_all_primers_fasta(pool_full_path, 
+                                   specimens._primer_registry.get_pool_primers(pool, Primer.FWD),
+                                   specimens._primer_registry.get_pool_primers(pool, Primer.REV))
 
             # Create primer pair directories
             for fwd_primer in specimens._primer_registry.get_pool_primers(pool, Primer.FWD):
