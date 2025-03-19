@@ -1587,7 +1587,8 @@ def version():
     # 0.2 November 10, 2024 - support for multiple primer pairs
     # 0.3 December 4, 2024 - code & doc cleanup, write pooling
     # 0.4 February 1, 2025 - bloom filter acceleration
-    return "specimux.py version 0.4"
+    # 0.5 March 19, 2025 - added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
+    return "specimux.py version 0.5"
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Specimux: Demultiplex MinION sequences by dual barcode indexes and primers.")
