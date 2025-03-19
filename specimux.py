@@ -787,7 +787,7 @@ class OutputManager:
             return os.path.join(self.output_dir, pool, primer_dir, "partial", f"{self.prefix}{safe_id}{extension}")
         else:
             # Full match
-            return os.path.join(self.output_dir, pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
+            return os.path.join(self.output_dir, pool, primer_dir, "full", f"{self.prefix}{safe_id}{extension}")
 
     def write_sequence(self, write_op: WriteOperation):
         """Write a sequence to the appropriate output file."""
@@ -1845,16 +1845,16 @@ def create_output_files(args, specimens):
                     primer_dir = f"{fwd_primer.name}-{rev_primer.name}"
                     primer_full_dir = os.path.join(pool_dir, primer_dir)
 
-                    # Create directories for full matches
+                    # Create directories for all match types
                     os.makedirs(primer_full_dir, exist_ok=True)
+                    os.makedirs(os.path.join(primer_full_dir, "full"), exist_ok=True)
+                    os.makedirs(os.path.join(primer_full_dir, "partial"), exist_ok=True)
+                    os.makedirs(os.path.join(primer_full_dir, "ambiguous"), exist_ok=True)
+                    os.makedirs(os.path.join(primer_full_dir, "unknown"), exist_ok=True)
 
-                    # Write primers.fasta file for this primer pair
+                    # Write primers.fasta file for this primer pair directory and the full subdirectory
                     write_primers_fasta(primer_full_dir, fwd_primer, rev_primer)
-
-                    # Create directories for partial, ambiguous, and unknown matches
-                    os.makedirs(os.path.join(pool_dir, primer_dir, "partial"), exist_ok=True)
-                    os.makedirs(os.path.join(pool_dir, primer_dir, "ambiguous"), exist_ok=True)
-                    os.makedirs(os.path.join(pool_dir, primer_dir, "unknown"), exist_ok=True)
+                    write_primers_fasta(os.path.join(primer_full_dir, "full"), fwd_primer, rev_primer)
 
                 # Create unknown primer directories
                 unknown_primer_dir = f"{fwd_primer.name}-unknown"
