@@ -1797,7 +1797,7 @@ def specimux_mp(args):
 
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
-    output_diagnostics(args, classifications)
+    output_diagnostics(args, classifications, elapsed)
 
     cleanup_locks(args.output_dir)
 
@@ -1935,28 +1935,64 @@ def specimux(args):
 
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
-    output_diagnostics(args, classifications)
+    output_diagnostics(args, classifications, elapsed)
 
 
-def output_diagnostics(args, classifications):
+def output_diagnostics(args, classifications, elapsed_time=None):
+    # Sort the classifications by their counts in descending order
+    sorted_classifications = sorted(
+        classifications.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    # Find the length of the longest classification name for padding
+    max_name_length = max(len(name) for name, _ in sorted_classifications)
+    # Determine the width needed for the count column
+    max_count_length = len(str(max(count for _, count in sorted_classifications)))
+
+    total = sum(classifications.values())
+    
+    # Generate the classification statistics
+    stats_lines = ["Classification Statistics:"]
+    for classification, count in sorted_classifications:
+        stats_line = f"{classification:<{max_name_length}} : {count:>{max_count_length}} ({count / total:2.2%})"
+        stats_lines.append(stats_line)
+        
+    # Log to console if diagnostics flag is set
     if args.diagnostics:
-        # Sort the classifications by their counts in descending order
-        sorted_classifications = sorted(
-            classifications.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
-
-        # Find the length of the longest classification name for padding
-        max_name_length = max(len(name) for name, _ in sorted_classifications)
-        # Determine the width needed for the count column
-        max_count_length = len(str(max(count for _, count in sorted_classifications)))
-
-        total = sum(classifications.values())
-        # Print the sorted classifications with aligned columns
-        logging.info("Classification Statistics:")
-        for classification, count in sorted_classifications:
-            logging.info(f"{classification:<{max_name_length}} : {count:>{max_count_length}} ({count / total:2.2%})")
+        for line in stats_lines:
+            logging.info(line)
+    
+    # Write to log.txt regardless of diagnostics flag
+    log_file_path = os.path.join(args.output_dir, "log.txt")
+    matched_count = classifications.get(MatchCode.MATCHED, 0)
+    match_rate = matched_count / total if total > 0 else 0
+    
+    with open(log_file_path, 'w') as log_file:
+        log_file.write(f"Specimux Run Summary\n")
+        log_file.write(f"==================\n\n")
+        log_file.write(f"Date: {timeit.time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        log_file.write(f"Command: {' '.join(sys.argv)}\n\n")
+        
+        log_file.write(f"Input Files:\n")
+        log_file.write(f"  Primer File: {args.primer_file}\n")
+        log_file.write(f"  Specimen File: {args.specimen_file}\n")
+        log_file.write(f"  Sequence File: {args.sequence_file}\n\n")
+        
+        log_file.write(f"Run Statistics:\n")
+        log_file.write(f"  Total Sequences Processed: {total:,}\n")
+        log_file.write(f"  Successfully Matched: {matched_count:,} ({match_rate:.2%})\n")
+        if elapsed_time is not None:
+            seqs_per_sec = total / elapsed_time if elapsed_time > 0 else 0
+            log_file.write(f"  Processing Time: {elapsed_time:.2f} seconds\n")
+            log_file.write(f"  Processing Rate: {seqs_per_sec:.2f} sequences/second\n\n")
+        
+        log_file.write("Detailed Classification Statistics:\n")
+        for line in stats_lines[1:]:  # Skip the header line
+            log_file.write(f"  {line}\n")
+            
+    logging.info(f"Summary statistics written to {log_file_path}")
 
 def setup_match_parameters(args, specimens):
     def _calculate_distances(sequences):
