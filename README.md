@@ -114,33 +114,55 @@ specimen2        RPB2        GTACGTAC        *         CATGCATG        *
 
 ### Output Organization
 
-Specimux organizes output by pool and primer pair:
+Specimux organizes output by pool and primer pair with a hierarchical structure:
 
 ```
 output_dir/
   ITS/
-    ITS1F-ITS4/
-      primers.fasta
+    full/                          # Contains all full matches from the ITS pool
+      primers.fasta                # Contains all primers in the ITS pool
       sample_specimen1.fastq
-    unknown/
-      sample_unknown.fastq
-  RPB2/
-    fRPB2-5F-RPB2-7.1R/
-      primers.fasta
       sample_specimen2.fastq
+    ITS1F-ITS4/
+      full/                        # Full matches for this specific primer pair
+        primers.fasta              # Contains just this primer pair
+        sample_specimen1.fastq
+      partial/                     # Partial matches (only one barcode matched)
+        sample_barcode_fwd_ACGTACGT.fastq
+      ambiguous/                   # Ambiguous matches (multiple specimens matched)
+        sample_ambiguous.fastq
+      unknown/                     # Unknown matches (no specimen matched)
+        sample_unknown.fastq
+      primers.fasta                # Contains just this primer pair
+  RPB2/
+    full/                          # Contains all full matches from the RPB2 pool
+      primers.fasta                # Contains all primers in the RPB2 pool
+      sample_specimen3.fastq
+    fRPB2-5F-RPB2-7.1R/
+      full/
+        sample_specimen3.fastq
+      primers.fasta
     unknown/
       sample_unknown.fastq
   unknown/
-    sample_unknown.fastq
+    unknown-unknown/
+      sample_unknown.fastq
 ```
 
 Each pool directory contains:
-- Subdirectories for each primer pair combination. 
-  - A primers.fasta file is created in each subdirectory containing only the primer sequences which matched. 
-  - Note: specific primer pair subdirectories are used even when specifying a "*" wildcard for one or both primers in the Specimen File
-- "unknown" subdirectory for sequences matching primers but not barcodes
-- "partial" subdirectory for sequences which match only one barcode
-- "ambiguous" subdirectory for sequences which match multiple specimens equally well
+- A "full" subdirectory that consolidates all full matches from any primer pair in the pool
+  - Contains a comprehensive primers.fasta with all primers in the pool
+  - Full match sequences are written both here and to their specific primer pair directory
+
+- Subdirectories for each primer pair combination
+  - Each primer pair directory has its own organization:
+    - "full" subdirectory for complete matches (both barcodes and primers matched)
+    - "partial" subdirectory for sequences which match only one barcode
+    - "ambiguous" subdirectory for sequences which match multiple specimens equally well
+    - "unknown" subdirectory for sequences matching primers but not barcodes
+  - A primers.fasta file is created in each primer pair directory containing the specific primer pair
+
+This organization provides both specific access to sequences by primer pair and convenient access to all full matches by pool.
 
 ### Pool Management
 
@@ -260,6 +282,17 @@ Raw sequence:
 
 ## Diagnostic Features
 
+### Run Log
+
+At the end of each run, Specimux creates a log.txt file in the output directory containing:
+- Date and time of the run
+- Command line used
+- Input files (primer, specimen, and sequence files)
+- Run statistics (total sequences, match rate, processing time, etc.)
+- Detailed classification statistics
+
+This log is generated regardless of whether the -d/--diagnostics flag is used and provides a permanent record of each processing run.
+
 ### Classification Statistics (-d)
 
 Shows sequence assignment outcomes:
@@ -335,7 +368,7 @@ python v04_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --outpu
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
-- 0.5 (February 2025): Added Primer Pools and Hierarchical Output
+- 0.5 (March 2025): Added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
 - 0.4 (February 2025): Added Bloom filter optimization
 - 0.3 (December 2024): Code cleanup and write pooling improvements
 - 0.2 (November 2024): Multiple primer pair support
