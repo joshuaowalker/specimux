@@ -60,6 +60,10 @@ import tempfile
 import shutil
 import hashlib
 import glob
+import copy
+import subprocess
+import re
+import os.path
 
 IUPAC_EQUIV = [("Y", "C"), ("Y", "T"), ("R", "A"), ("R", "G"),
                ("N", "A"), ("N", "C"), ("N", "G"), ("N", "T"),
@@ -1114,10 +1118,78 @@ def read_specimen_file(filename: str, primer_registry: PrimerRegistry) -> Specim
 
     return specimens
 
+
+def detect_file_format(filename: str) -> str:
+    """
+    Detect file format from filename, handling compressed files.
+
+    Args:
+        filename: Path to sequence file
+
+    Returns:
+        str: Detected format ('fastq', 'fasta', or other future formats)
+    """
+
+    # Strip compression extensions recursively (handles cases like .fastq.gz.gz)
+    base_name = os.path.basename(filename)
+    compression_exts = ['.gz', '.gzip', '.bz2', '.zip']
+
+    # Keep stripping compression extensions until none are left
+    root, ext = os.path.splitext(base_name)
+    while ext.lower() in compression_exts:
+        base_name = root
+        root, ext = os.path.splitext(base_name)
+
+    # Check for known file formats (case-insensitive)
+    if base_name.lower().endswith(('.fastq', '.fq')):
+        return 'fastq'
+    elif base_name.lower().endswith(('.fasta', '.fa', '.fna')):
+        return 'fasta'
+    else:
+        # Check the first few bytes of the file if extension doesn't help
+        try:
+            # Handle compressed files
+            if filename.endswith(('.gz', '.gzip')):
+                with gzip.open(filename, 'rt') as f:
+                    first_char = f.read(1)
+            else:
+                with open(filename, 'rt') as f:
+                    first_char = f.read(1)
+
+            # Check first character
+            if first_char == '@':
+                return 'fastq'
+            elif first_char == '>':
+                return 'fasta'
+        except Exception:
+            pass
+
+        # Default to FASTA if we can't determine
+        return 'fasta'
+
+
 def open_sequence_file(filename, args):
-    file_format = "fastq" if filename.endswith((".fastq", ".fq")) else "fasta"
-    args.isfastq = file_format == "fastq"
-    return SeqIO.parse(filename, file_format)
+    """
+    Open a sequence file, automatically detecting format and compression.
+
+    Args:
+        filename: Path to sequence file
+        args: Command line arguments, will update args.isfastq based on format
+
+    Returns:
+        SeqIO iterator for the file
+    """
+    is_gzipped = filename.endswith((".gz", ".gzip"))
+
+    # Detect file format
+    file_format = detect_file_format(filename)
+    args.isfastq = file_format == 'fastq'
+
+    if is_gzipped:
+        handle = gzip.open(filename, "rt")  # Open in text mode
+        return SeqIO.parse(handle, file_format)
+    else:
+        return SeqIO.parse(filename, file_format)
 
 def align_seq(query: Union[str, Seq, SeqRecord],
              target: Union[str, Seq, SeqRecord],
@@ -1710,47 +1782,149 @@ def barcodes_for_bloom_prefilter(specimens):
     barcode_rcs = [reverse_complement(b) for b in all_b1s] + [reverse_complement(b) for b in all_b2s]
     return barcode_rcs
 
-
 def estimate_sequence_count(filename: str, args: argparse.Namespace) -> int:
-    """Estimate total sequences based on file size and sampling"""
+    """
+    Estimate total sequences in a file, handling both compressed and uncompressed formats.
+
+    Uses consistent logic for both compressed and uncompressed files, with the only
+    difference being how total file size is determined.
+
+    This and related functions are an embarrassing amount of code just to figure out the
+    100% mark for the progress bar without reading the entire input file.
+
+    Args:
+        filename: Path to the sequence file
+        args: Command line arguments
+
+    Returns:
+        int: Estimated number of sequences in the file
+    """
     if args.num_seqs > 0:
         return args.num_seqs
 
-    # Get file size
-    file_size = os.path.getsize(filename)
+    is_compressed = filename.endswith((".gz", ".gzip"))
 
-    # Sample first 1000 sequences to get average record size
-    sample_size = 1000
-    seq_records = open_sequence_file(filename, args)
-    total_bytes = 0
-    for i, record in enumerate(itertools.islice(seq_records, sample_size)):
-        total_bytes += len(str(record.seq))
-        if args.isfastq:
-            total_bytes += len(record.id) + len(record.description) + 2  # +2 for @ and newlines
-            total_bytes += len(record.letter_annotations["phred_quality"]) + 3  # +3 for + and newlines
-        else:
-            total_bytes += len(record.id) + len(record.description) + 2  # +2 for > and newline
+    # Step 1: Determine total uncompressed bytes
+    if is_compressed:
+        try:
+            # Get compressed and uncompressed sizes using gzip -l
+            compressed_size, uncompressed_size = get_gzip_info(filename)
 
-    if i == 0:
-        return 0
+            if not compressed_size or not uncompressed_size:
+                logging.warning("Could not determine compressed/uncompressed size using gzip -l")
+                return 500000
 
-    avg_record_size = total_bytes / (i + 1)
-    raw_estimate = file_size / avg_record_size
-
-    # Round to 2 significant figures, rounding up
-    if raw_estimate > 0:
-        raw_estimate *= 1.05 # fudge to avoid disappointment
-        magnitude = math.floor(math.log10(raw_estimate))
-        scaled = raw_estimate / (10 ** (magnitude - 1))
-        rounded = math.ceil(scaled) * (10 ** (magnitude - 1))
-        estimated_sequences = int(rounded)
+            total_bytes = uncompressed_size
+            logging.debug(f"File size: {compressed_size:,} bytes compressed, {uncompressed_size:,} bytes uncompressed")
+        except Exception as e:
+            logging.warning(f"Error getting gzip info: {e}")
+            # Fallback to compressed size with a conservative ratio
+            total_bytes = os.path.getsize(filename) * 2.5  # Assume 2.5x compression ratio as fallback
+            logging.warning(f"Using fallback uncompressed size estimate: {total_bytes:,} bytes")
     else:
-        estimated_sequences = 0
+        # For uncompressed files, use the file size directly
+        total_bytes = os.path.getsize(filename)
 
-    logging.info(f"Estimated {estimated_sequences:,} sequences based on file size")
+    # Step 2: Sample sequences to calculate average bytes per sequence (same for both types)
+    try:
+        # Sample first 1000 sequences to get average record size
+        sample_size = 1000
+        seq_records = open_sequence_file(filename, args)
+        records_total_bytes = 0
+        record_count = 0
+
+        for record in itertools.islice(seq_records, sample_size):
+            record_count += 1
+            records_total_bytes += len(str(record.seq))
+            if args.isfastq:
+                records_total_bytes += len(record.id) + len(record.description) + 2  # +2 for @ and newlines
+                records_total_bytes += len(record.letter_annotations["phred_quality"]) + 3  # +3 for + and newlines
+            else:
+                records_total_bytes += len(record.id) + len(record.description) + 2  # +2 for > and newline
+
+        if record_count == 0:
+            logging.warning("Failed to read any sequences from the file")
+            return 10000  # Return a larger default
+
+        # Calculate average bytes per sequence
+        avg_record_size = records_total_bytes / record_count
+
+        # Log actual sampled info for debugging
+        logging.debug(
+            f"Sampled {record_count} sequences, total bytes: {records_total_bytes:,}, avg bytes per seq: {avg_record_size:.1f}")
+
+        # Calculate raw estimate based on total bytes and average record size
+        raw_estimate = total_bytes / avg_record_size
+
+    except Exception as e:
+        logging.warning(f"Error sampling sequences: {e}")
+        # typical 2000 bytes per sequence for ITS-length sequences
+        raw_estimate = total_bytes / 2000
+
+        logging.warning(f"Using fallback estimation method: estimated {raw_estimate:,} sequences")
+
+    # Step 3: Apply adjustment factor and round to nice number
+    if raw_estimate > 0:
+        # Apply a slightly conservative adjustment factor
+        raw_estimate *= 1.05
+
+        # Round to a pleasing number (2 significant figures for large numbers)
+        if raw_estimate > 10000:
+            magnitude = math.floor(math.log10(raw_estimate))
+            scaled = raw_estimate / (10 ** (magnitude - 1))
+            rounded = math.ceil(scaled) * (10 ** (magnitude - 1))
+            estimated_sequences = int(rounded)
+        else:
+            # For smaller numbers, just round up to nearest 100
+            estimated_sequences = math.ceil(raw_estimate / 100) * 100
+    else:
+        estimated_sequences = 500000  # Conservative default
+
+    logging.info(
+        f"Estimated {estimated_sequences:,} sequences based on {'compressed' if is_compressed else 'uncompressed'} file")
 
     return estimated_sequences
 
+
+def get_gzip_info(filename: str) -> Tuple[int, int]:
+    """
+    Get compressed and uncompressed file sizes using gzip -l
+
+    Args:
+        filename: Path to gzipped file
+
+    Returns:
+        Tuple[int, int]: (compressed_size, uncompressed_size)
+
+    Raises:
+        subprocess.CalledProcessError: If gzip -l fails
+        ValueError: If output parsing fails
+    """
+    try:
+        # Run gzip -l on the file
+        result = subprocess.run(['gzip', '-l', filename],
+                                capture_output=True,
+                                text=True,
+                                check=True)
+
+        # Parse the output to extract compressed and uncompressed sizes
+        output = result.stdout.strip()
+
+        # Look for the line with sizes using regex
+        # Format: compressed uncompressed ratio uncompressed_name
+        match = re.search(r'(\d+)\s+(\d+)', output)
+        if match:
+            compressed_size = int(match.group(1))
+            uncompressed_size = int(match.group(2))
+            return compressed_size, uncompressed_size
+        else:
+            raise ValueError(f"Failed to parse gzip output: {output}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error running gzip -l: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error analyzing compression: {e}")
+        raise
 
 def cleanup_locks(output_dir: str):
     """Remove the shared lock directory after all workers are done"""
