@@ -660,28 +660,31 @@ class CachedFileManager:
         if not self.write_buffers[filename]:
             return
 
-        # Get or create lock
+        # Prepare the data outside of any locks
+        buffer_data = ''.join(self.write_buffers[filename])
+        self.write_buffers[filename].clear()
+
+        # Get or open the file handle (no locking needed for this step)
+        try:
+            f = self.file_cache[filename]
+        except KeyError:
+            # Create directory if needed
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            f = open(filename, 'a')  # Always append mode
+            self.file_cache[filename] = f
+
+        # Get or create lock (only for this file)
         if filename not in self.locks:
             lock_path = self._get_lock_path(filename)
             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o666)
             self.locks[filename] = fd
 
-        # Hold lock for entire write operation
+        # Now acquire lock, write data, and release lock
         fcntl.lockf(self.locks[filename], fcntl.LOCK_EX)
         try:
-            buffer_data = ''.join(self.write_buffers[filename])
-
-            try:
-                f = self.file_cache[filename]
-            except KeyError:
-                f = open(filename, 'a')  # Always append mode
-                self.file_cache[filename] = f
-
             f.write(buffer_data)
             f.flush()
             os.fsync(f.fileno())  # Ensure data is written to disk
-            self.write_buffers[filename].clear()
-
         finally:
             fcntl.lockf(self.locks[filename], fcntl.LOCK_UN)
 
