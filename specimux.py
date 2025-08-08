@@ -35,6 +35,7 @@ from _operator import itemgetter
 from collections import Counter
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from multiprocessing import Pool
@@ -610,6 +611,15 @@ class WorkItem(NamedTuple):
     seq_number: int
     seq_records: List  # This now contains actual sequence records, not an iterator
     parameters: MatchParameters
+
+@dataclass
+class MatchSelection:
+    """Enhanced result from choose_best_match with alternatives for mining"""
+    primary_match: 'SequenceMatch'         # Best match (current behavior)
+    is_ambiguous: bool                     # True if alternatives exist  
+    alternative_matches: List['SequenceMatch']  # Other viable matches
+    ambiguity_reason: str                  # Why ambiguous ("pool_conflict", "equal_scores", etc.)
+    best_score: int                        # Score of the primary match
 
 
 class FileHandleCache(LRUCache):
@@ -1275,16 +1285,36 @@ def create_write_operation(sample_id, args, seq, match):
     )
 
 
+def create_write_operations(sample_id, args, seq, match_result: MatchSelection) -> List[WriteOperation]:
+    """Create primary + optional alternative write operations for mining"""
+    ops = [create_write_operation(sample_id, args, seq, match_result.primary_match)]
+    
+    # TODO: Add mining output strategies here when --ambiguity-strategy is implemented
+    # For now, only output primary match to maintain current behavior
+    
+    return ops
+
+
 def process_sequences(seq_records: List[SeqRecord],
                       parameters: MatchParameters,
                       specimens: Specimens,
                       args: argparse.Namespace,
-                      prefilter: BarcodePrefilter) -> Tuple[List[WriteOperation], Counter, Dict]:
+                      prefilter: BarcodePrefilter) -> Tuple[List[WriteOperation], Counter, Dict, Dict]:
     classifications = Counter()
     pool_stats = {}  # Hierarchical statistics by pool and primer pair
+    selection_stats = {  # Two-stage statistics tracking
+        'total_sequences': 0,
+        'candidate_matches': 0,
+        'retained_matches': 0,
+        'discarded_alternatives': 0,
+        'amplification_factor': 0.0,
+        'ambiguity_reasons': Counter(),
+        'selection_outcomes': Counter()
+    }
     write_ops = []
 
     for seq in seq_records:
+        selection_stats['total_sequences'] += 1
         sample_id = SampleId.UNKNOWN
         pool = None
 
@@ -1300,8 +1330,25 @@ def process_sequences(seq_records: List[SeqRecord],
             rseq.description = seq.description
 
             matches = match_sequence(prefilter, parameters, seq, rseq, specimens)
-            match, multimatch = choose_best_match(matches)
-            if multimatch:
+            
+            # Track candidate matches (amplification stage)
+            selection_stats['candidate_matches'] += len(matches)
+            
+            match_result = choose_best_match(matches)
+            
+            # Track selection outcomes
+            selection_stats['ambiguity_reasons'][match_result.ambiguity_reason] += 1
+            if match_result.is_ambiguous:
+                selection_stats['selection_outcomes']['ambiguous'] += 1
+                # Track discarded alternatives (will be refined when policies are implemented)
+                selection_stats['discarded_alternatives'] += len(match_result.alternative_matches)
+            else:
+                selection_stats['selection_outcomes']['unique'] += 1
+            
+            # Use primary match for current processing logic
+            match = match_result.primary_match
+            
+            if match_result.is_ambiguous:
                 classification = MatchCode.MULTIPLE_PRIMER_PAIRS_MATCHED
                 sample_id = SampleId.AMBIGUOUS
             else:
@@ -1316,12 +1363,22 @@ def process_sequences(seq_records: List[SeqRecord],
         if args.debug:
             logging.debug(f"{classification}")
 
-        write_op = create_write_operation(sample_id, args, match.sequence, match)
-        write_ops.append(write_op)
+        # Create write operations (currently just primary, but ready for alternatives)
+        if 'match_result' in locals():
+            new_ops = create_write_operations(sample_id, args, match.sequence, match_result)
+        else:
+            # For non-matching sequences, create single operation with basic match
+            new_ops = [create_write_operation(sample_id, args, seq, match)]
         
-        # Track hierarchical statistics
-        pool_name = write_op.primer_pool
-        primer_pair = f"{write_op.p1_name}-{write_op.p2_name}"
+        # Track retained matches (currently all primary matches are retained)
+        selection_stats['retained_matches'] += len(new_ops)
+        
+        write_ops.extend(new_ops)
+        
+        # Track hierarchical statistics (use primary operation for stats)
+        primary_op = new_ops[0]
+        pool_name = primary_op.primer_pool
+        primer_pair = f"{primary_op.p1_name}-{primary_op.p2_name}"
         
         if pool_name not in pool_stats:
             pool_stats[pool_name] = {
@@ -1360,7 +1417,13 @@ def process_sequences(seq_records: List[SeqRecord],
             pool_stats[pool_name]['unknown'] += 1
             pool_stats[pool_name]['primer_pairs'][primer_pair]['unknown'] += 1
 
-    return write_ops, classifications, pool_stats
+    # Calculate final amplification factor
+    if selection_stats['total_sequences'] > 0:
+        selection_stats['amplification_factor'] = (
+            selection_stats['candidate_matches'] / selection_stats['total_sequences']
+        )
+    
+    return write_ops, classifications, pool_stats, selection_stats
 
 
 def classify_match(match: SequenceMatch, sample_id: str, specimens: Specimens) -> str:
@@ -1406,16 +1469,13 @@ def classify_match(match: SequenceMatch, sample_id: str, specimens: Specimens) -
         classification = MatchCode.MATCHED
     return str(classification)
 
-def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool]:
-    """In case there were matches under multiple primer pairs, choose the best"""
-    best_score = -1
-    best_match = None
-    multimatch = False
-    best_pool = None
-
+def choose_best_match(matches: List[SequenceMatch]) -> MatchSelection:
+    """Enhanced to preserve alternative matches for mining"""
     if not matches:
         raise ValueError("No matches provided to choose_best_match")
 
+    # Score all matches and group by score
+    scored_matches = []
     for m in matches:
         score = 0
         if m.p1_match and m.p2_match and m.has_b1_match() and m.has_b2_match():
@@ -1428,24 +1488,45 @@ def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool
             score = 2
         elif m.p1_match or m.p2_match:
             score = 1
-        if score > best_score:
-            best_score = score
-            best_match = m
-            best_pool = m.get_pool()
-            multimatch = False
-        elif score == best_score:
-            multimatch = True
-            if best_pool != m.get_pool():
-                best_pool = "unknown"
-
-    if best_match is None:
-        raise RuntimeError("Failed to select best match despite having matches")
-
-    best_match.set_pool(best_pool)
-
-    # Return the true multimatch status regardless of score
-    # This ensures that pool ambiguity is properly reported in statistics
-    return best_match, multimatch
+        scored_matches.append((score, m))
+    
+    # Sort by score (descending)
+    scored_matches.sort(key=lambda x: x[0], reverse=True)
+    best_score = scored_matches[0][0]
+    
+    # Collect all matches with best score
+    best_matches = [m for score, m in scored_matches if score == best_score]
+    primary_match = best_matches[0]  # Arbitrary choice for primary
+    
+    # Determine ambiguity
+    is_ambiguous = len(best_matches) > 1
+    alternative_matches = best_matches[1:] if is_ambiguous else []
+    
+    # Determine ambiguity reason and pool assignment
+    if is_ambiguous:
+        pools = [m.get_pool() for m in best_matches]
+        unique_pools = set(pools)
+        
+        if len(unique_pools) > 1:
+            ambiguity_reason = "pool_conflict"
+            final_pool = "unknown"
+        else:
+            ambiguity_reason = "equal_scores"
+            final_pool = pools[0]  # All have same pool
+    else:
+        ambiguity_reason = "none"
+        final_pool = primary_match.get_pool()
+    
+    # Set the pool on the primary match
+    primary_match.set_pool(final_pool)
+    
+    return MatchSelection(
+        primary_match=primary_match,
+        is_ambiguous=is_ambiguous,
+        alternative_matches=alternative_matches,
+        ambiguity_reason=ambiguity_reason,
+        best_score=best_score
+    )
 
 
 
@@ -1591,6 +1672,10 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                 if pool:
                     match.set_pool(pool)
                 matches.append(match)
+    
+    # TODO: Consider whether primer pairs that match almost exactly the same extent 
+    # should be considered distinct matches or not. This affects ambiguity detection
+    # for cases where multiple primer pairs cover nearly identical sequence regions.
     return matches
 
 def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters: MatchParameters, sequence: str,
@@ -1785,7 +1870,7 @@ def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
     """Process a batch of sequences and write results directly"""
     global _output_manager, _barcode_prefilter
     try:
-        write_ops, classifications, pool_stats = process_sequences(
+        write_ops, classifications, pool_stats, selection_stats = process_sequences(
             work_item.seq_records, work_item.parameters, specimens, args, _barcode_prefilter)
 
         # Write sequences directly from worker
@@ -1799,7 +1884,7 @@ def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
                 logging.error(f"Error writing output: {e}")
                 raise
 
-        return classifications, pool_stats
+        return classifications, pool_stats, selection_stats
 
     except Exception as e:
         logging.error(traceback.format_exc())
@@ -2011,12 +2096,15 @@ def specimux_mp(args):
 
         try:
             pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
-            for batch_class, batch_pool_stats in pool.imap_unordered(
+            for batch_class, batch_pool_stats, batch_selection_stats in pool.imap_unordered(
                     worker_func,
                     (WorkItem(i, batch, parameters)
                      for i, batch in enumerate(iter_batches(seq_records, sequence_block_size,
                                                             last_seq_to_output, all_seqs)))):
                 classifications += batch_class
+                
+                # TODO: Merge selection statistics across workers
+                # For now, we'll track them but not aggregate them in multiprocessing mode
                 
                 # Merge pool statistics
                 for pool_name, pool_data in batch_pool_stats.items():
@@ -2072,7 +2160,7 @@ def specimux_mp(args):
 
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
-    output_diagnostics(args, classifications, elapsed, pool_stats)
+    output_diagnostics(args, classifications, elapsed, pool_stats, selection_stats=None)  # TODO: aggregate selection stats across workers
     
     # Clean up empty directories after all processing is complete
     if args.output_to_files:
@@ -2220,6 +2308,15 @@ def specimux(args):
 
     classifications = Counter()
     pool_stats = {}  # Aggregate pool statistics
+    selection_stats = {  # Initialize properly
+        'total_sequences': 0,
+        'candidate_matches': 0,
+        'retained_matches': 0,
+        'discarded_alternatives': 0,
+        'amplification_factor': 0.0,
+        'ambiguity_reasons': Counter(),
+        'selection_outcomes': Counter()
+    }
 
     with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq) as output_manager:
         num_seqs = 0
@@ -2236,9 +2333,17 @@ def specimux(args):
             if not seq_batch:
                 break
 
-            write_ops, batch_classifications, batch_pool_stats = process_sequences(seq_batch, parameters, specimens,
-                                                                                  args, prefilter)
+            write_ops, batch_classifications, batch_pool_stats, batch_selection_stats = process_sequences(
+                seq_batch, parameters, specimens, args, prefilter)
             classifications += batch_classifications
+            
+            # Aggregate selection statistics
+            selection_stats['total_sequences'] += batch_selection_stats['total_sequences']
+            selection_stats['candidate_matches'] += batch_selection_stats['candidate_matches']
+            selection_stats['retained_matches'] += batch_selection_stats['retained_matches']
+            selection_stats['discarded_alternatives'] += batch_selection_stats['discarded_alternatives']
+            selection_stats['ambiguity_reasons'] += batch_selection_stats['ambiguity_reasons']
+            selection_stats['selection_outcomes'] += batch_selection_stats['selection_outcomes']
             
             # Merge pool statistics (same logic as multiprocess version)
             for pool_name, pool_data in batch_pool_stats.items():
@@ -2290,10 +2395,16 @@ def specimux(args):
             pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
 
         pbar.close()
+    
+    # Calculate final amplification factor
+    if selection_stats['total_sequences'] > 0:
+        selection_stats['amplification_factor'] = (
+            selection_stats['candidate_matches'] / selection_stats['total_sequences']
+        )
 
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
-    output_diagnostics(args, classifications, elapsed, pool_stats)
+    output_diagnostics(args, classifications, elapsed, pool_stats, selection_stats)
     
     # Clean up empty directories after all processing is complete
     if args.output_to_files:
@@ -2334,7 +2445,7 @@ def cleanup_empty_directories(output_dir: str):
         if len(removed_dirs) > 10:
             logging.debug(f"  ... and {len(removed_dirs) - 10} more")
 
-def output_diagnostics(args, classifications, elapsed_time=None, pool_stats=None):
+def output_diagnostics(args, classifications, elapsed_time=None, pool_stats=None, selection_stats=None):
     # Sort the classifications by their counts in descending order
     sorted_classifications = sorted(
         classifications.items(),
@@ -2387,6 +2498,26 @@ def output_diagnostics(args, classifications, elapsed_time=None, pool_stats=None
         log_file.write("Detailed Classification Statistics:\n")
         for line in stats_lines[1:]:  # Skip the header line
             log_file.write(f"  {line}\n")
+        
+        # Add selection/amplification statistics if available
+        if selection_stats and selection_stats.get('total_sequences', 0) > 0:
+            log_file.write("\n\nSequence Processing Flow:\n")
+            log_file.write("========================\n\n")
+            log_file.write(f"  Input Sequences: {selection_stats['total_sequences']:,}\n")
+            log_file.write(f"  Candidate Matches (after primer detection): {selection_stats['candidate_matches']:,}\n")
+            log_file.write(f"  Amplification Factor: {selection_stats['amplification_factor']:.2f}x\n")
+            log_file.write(f"  Retained Matches (after selection): {selection_stats['retained_matches']:,}\n")
+            log_file.write(f"  Discarded Alternatives: {selection_stats['discarded_alternatives']:,}\n")
+            
+            if selection_stats['ambiguity_reasons']:
+                log_file.write("\n  Ambiguity Reasons:\n")
+                for reason, count in selection_stats['ambiguity_reasons'].most_common():
+                    log_file.write(f"    {reason}: {count:,}\n")
+            
+            if selection_stats['selection_outcomes']:
+                log_file.write("\n  Selection Outcomes:\n")
+                for outcome, count in selection_stats['selection_outcomes'].most_common():
+                    log_file.write(f"    {outcome}: {count:,}\n")
         
         # Add hierarchical pool and primer-pair statistics if available
         if pool_stats:
