@@ -55,6 +55,7 @@ from Bio.SeqRecord import SeqRecord
 from cachetools import LRUCache
 import gzip
 import io
+import json
 import mmap
 import tempfile
 import shutil
@@ -2441,8 +2442,158 @@ def output_diagnostics(args, classifications, elapsed_time=None, pool_stats=None
                             log_file.write(f"      Unknown: {pp_data['unknown']:,} ({pp_data['unknown']/pp_total:.2%} of primer pair)\n")
                 
                 log_file.write("\n")
+    
+    # Generate processing flow statistics if pool stats are available
+    if pool_stats:
+        generate_flow_stats(args, pool_stats, total)
             
     logging.info(f"Summary statistics written to {log_file_path}")
+
+
+def generate_flow_stats(args, pool_stats, total):
+    """Generate processing flow statistics as JSON.
+    
+    Creates nodes and links representing the sequence processing flow:
+    Total → First-Primer → Second-Primer → Match-Outcomes → Pool
+    
+    The output JSON is compatible with Sankey diagram visualization tools.
+    """
+    if not pool_stats:
+        return
+    
+    nodes = []
+    links = []
+    primer_pair_flows = {}  # Track flows by primer combination
+    
+    # Root node
+    nodes.append({"id": "total", "name": f"Total ({total:,} sequences)"})
+    
+    # Collect all primer pairs and their flows
+    for pool_name, pool_data in pool_stats.items():
+        for primer_pair, pp_data in pool_data['primer_pairs'].items():
+            pp_total = pp_data['total']
+            if pp_total == 0:
+                continue
+                
+            # Parse primer pair
+            p1, p2 = primer_pair.split('-', 1)
+            
+            # Track this flow
+            flow_key = (p1, p2, pool_name)
+            if flow_key not in primer_pair_flows:
+                primer_pair_flows[flow_key] = {
+                    'total': 0,
+                    'matched': 0,
+                    'partial': 0,
+                    'ambiguous': 0,
+                    'unknown': 0
+                }
+            
+            # Aggregate counts for this primer combination in this pool
+            primer_pair_flows[flow_key]['total'] += pp_total
+            primer_pair_flows[flow_key]['matched'] += pp_data['matched']
+            primer_pair_flows[flow_key]['partial'] += pp_data['partial']
+            primer_pair_flows[flow_key]['ambiguous'] += pp_data['ambiguous']
+            primer_pair_flows[flow_key]['unknown'] += pp_data['unknown']
+    
+    # Create flows: Total → P1 → P2 → Pool → Outcomes
+    p1_totals = {}  # Track totals for each first primer
+    p2_totals = {}  # Track totals for each second primer
+    pool_totals = {}  # Track totals for each pool
+    
+    # First pass: aggregate by first primer
+    for (p1, p2, pool_name), flow_data in primer_pair_flows.items():
+        p1_totals[p1] = p1_totals.get(p1, 0) + flow_data['total']
+    
+    # Create first primer nodes and links from total
+    for p1 in sorted(p1_totals.keys(), key=lambda x: (x == "unknown", x)):
+        p1_id = f"p1_{p1}"
+        nodes.append({"id": p1_id, "name": f"{p1} (fwd)"})
+        links.append({"source": "total", "target": p1_id, "value": p1_totals[p1]})
+    
+    # Second pass: aggregate by primer pair (p1+p2)
+    for (p1, p2, pool_name), flow_data in primer_pair_flows.items():
+        pp_key = f"{p1}+{p2}"
+        p2_totals[pp_key] = p2_totals.get(pp_key, 0) + flow_data['total']
+    
+    # Create second primer nodes and links from first primers
+    p1_to_p2 = {}  # Track which p1 connects to which p2
+    for (p1, p2, pool_name), flow_data in primer_pair_flows.items():
+        pp_key = f"{p1}+{p2}"
+        if pp_key not in p1_to_p2:
+            p1_to_p2[pp_key] = {'p1': p1, 'p2': p2, 'total': 0}
+        p1_to_p2[pp_key]['total'] += flow_data['total']
+    
+    for pp_key in sorted(p2_totals.keys(), key=lambda x: ("unknown" in x, x)):
+        p1 = p1_to_p2[pp_key]['p1']
+        p2 = p1_to_p2[pp_key]['p2']
+        
+        p2_id = f"p2_{pp_key}"
+        p1_id = f"p1_{p1}"
+        
+        nodes.append({"id": p2_id, "name": f"{p1}+{p2}"})
+        links.append({"source": p1_id, "target": p2_id, "value": p2_totals[pp_key]})
+    
+    # Third pass: create outcome nodes and links from primer pairs
+    match_types = [
+        ('matched', 'Matched'),
+        ('partial', 'Partial'), 
+        ('ambiguous', 'Ambiguous'),
+        ('unknown', 'Unknown')
+    ]
+    
+    # Add outcome nodes
+    for match_key, match_label in match_types:
+        outcome_id = f"outcome_{match_key}"
+        nodes.append({"id": outcome_id, "name": match_label})
+    
+    # Add links from primer pairs to outcomes
+    for (p1, p2, pool_name), flow_data in primer_pair_flows.items():
+        pp_key = f"{p1}+{p2}"
+        p2_id = f"p2_{pp_key}"
+        
+        for match_key, match_label in match_types:
+            count = flow_data[match_key]
+            if count > 0:
+                outcome_id = f"outcome_{match_key}"
+                links.append({"source": p2_id, "target": outcome_id, "value": count})
+    
+    # Finally: create pool nodes and links from outcomes
+    # Add pool nodes
+    pool_nodes_added = set()
+    for (p1, p2, pool_name), flow_data in primer_pair_flows.items():
+        if pool_name not in pool_nodes_added:
+            pool_id = f"pool_{pool_name}"
+            nodes.append({"id": pool_id, "name": f"{pool_name} pool"})
+            pool_nodes_added.add(pool_name)
+    
+    # Add links from outcomes to pools
+    for (p1, p2, pool_name), flow_data in primer_pair_flows.items():
+        pool_id = f"pool_{pool_name}"
+        
+        for match_key, match_label in match_types:
+            count = flow_data[match_key]
+            if count > 0:
+                outcome_id = f"outcome_{match_key}"
+                links.append({"source": outcome_id, "target": pool_id, "value": count})
+    
+    flow_data = {
+        "metadata": {
+            "title": "Specimux Processing Flow (Primer → Outcome → Pool)",
+            "description": "Flow showing primers detected, barcode matching outcomes, then pool assignment",
+            "total_sequences": total,
+            "generated_by": "specimux"
+        },
+        "nodes": nodes,
+        "links": links
+    }
+    
+    # Write to JSON file
+    stats_file_path = os.path.join(args.output_dir, "stats.json")
+    with open(stats_file_path, 'w') as f:
+        json.dump(flow_data, f, indent=2)
+    
+    logging.info(f"Processing flow statistics written to {stats_file_path}")
 
 def setup_match_parameters(args, specimens):
     def _calculate_distances(sequences):

@@ -343,6 +343,56 @@ Highlights sequence components:
 - Primers in green
 - Low quality bases (<Q10) in lowercase
 
+## Processing Flow Visualization
+
+Specimux generates a `stats.json` file containing detailed statistics about sequence processing flow, compatible with Sankey diagram visualization tools. This provides a visual representation of how sequences move through the processing pipeline: primer detection → outcome classification → pool assignment.
+
+### Visualization Tool
+
+The included `visualize_stats.py` script creates interactive Sankey diagrams from the stats.json file:
+
+```bash
+# Basic usage
+python visualize_stats.py stats.json
+
+# Custom output file
+python visualize_stats.py stats.json my_flow_diagram.html
+
+# Custom dimensions
+python visualize_stats.py stats.json --width 1600 --height 800
+```
+
+### Dependencies
+
+The visualization tool requires plotly:
+
+```bash
+pip install plotly
+```
+
+### Features
+
+- **Interactive Diagrams**: Hover over nodes and flows to see exact counts
+- **Color Coding**: Different colors for primer types, outcomes, and pools
+- **Customizable**: Adjustable dimensions for different display needs
+- **Self-Contained**: Generated HTML files work offline and can be shared easily
+
+### Flow Stages
+
+The diagram shows sequence processing through these stages:
+
+1. **Total Sequences**: Starting point showing all input sequences
+2. **First Primer Detection**: Sequences grouped by detected forward primer
+3. **Primer Pair Formation**: Complete primer pair identification
+4. **Outcome Classification**: Matched, Partial, Ambiguous, or Unknown outcomes
+5. **Pool Assignment**: Final assignment to primer pools
+
+This visualization helps identify:
+- Which primers are most/least effective
+- Where sequences are lost in the pipeline
+- Pool assignment patterns and potential issues
+- Overall processing efficiency
+
 ## Specimen File Converter
 
 If you're upgrading from an earlier version of specimux (or from minibar.py), a converter tool is included to help migrate your specimen files to the new format.
@@ -380,7 +430,7 @@ python v04_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --outpu
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
-- 0.5.1 (August 2025): Reorganized output with match-type-first directory structure for easier access to primary data, added automatic cleanup of empty directories
+- 0.5.1 (August 2025): Reorganized output with match-type-first directory structure for easier access to primary data, added automatic cleanup of empty directories, added processing flow statistics (stats.json) and interactive Sankey diagram visualization
 - 0.5 (March 2025): Added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
 - 0.4 (February 2025): Added Bloom filter optimization
 - 0.3 (December 2024): Code cleanup and write pooling improvements
