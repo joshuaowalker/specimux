@@ -114,55 +114,67 @@ specimen2        RPB2        GTACGTAC        *         CATGCATG        *
 
 ### Output Organization
 
-Specimux organizes output by pool and primer pair with a hierarchical structure:
+Specimux organizes output with match quality at the top level, making it easy to access your primary data (full matches) while keeping partial matches and unknowns organized separately:
 
 ```
 output_dir/
-  ITS/
-    full/                          # Contains all full matches from the ITS pool
-      primers.fasta                # Contains all primers in the ITS pool
-      sample_specimen1.fastq
+  full/                            # All complete matches (PRIMARY DATA)
+    ITS/                           # Pool-level aggregation
+      sample_specimen1.fastq       # All ITS full matches collected here
       sample_specimen2.fastq
-    ITS1F-ITS4/
-      full/                        # Full matches for this specific primer pair
-        primers.fasta              # Contains just this primer pair
+      primers.fasta                # All primers in the ITS pool
+      ITS1F-ITS4/                  # Primer-pair specific matches
         sample_specimen1.fastq
-      partial/                     # Partial matches (only one barcode matched)
-        sample_barcode_fwd_ACGTACGT.fastq
-      ambiguous/                   # Ambiguous matches (multiple specimens matched)
-        sample_ambiguous.fastq
-      unknown/                     # Unknown matches (no specimen matched)
-        sample_unknown.fastq
-      primers.fasta                # Contains just this primer pair
-  RPB2/
-    full/                          # Contains all full matches from the RPB2 pool
-      primers.fasta                # Contains all primers in the RPB2 pool
+        sample_specimen2.fastq
+        primers.fasta              # Just this primer pair
+    RPB2/
       sample_specimen3.fastq
-    fRPB2-5F-RPB2-7.1R/
-      full/
-        sample_specimen3.fastq
       primers.fasta
+      fRPB2-5F-RPB2-7.1R/
+        sample_specimen3.fastq
+        primers.fasta
+  
+  partial/                         # One barcode matched (RECOVERY CANDIDATES)
+    ITS/
+      ITS1F-ITS4/
+        sample_barcode_fwd_ACGTACGT.fastq
+      ITS1F-unknown/               # Forward primer only detected
+        sample_barcode_fwd_ACGTACGT.fastq
+      unknown-ITS4/                # Reverse primer only detected
+        sample_barcode_rev_TGCATGCA.fastq
+  
+  ambiguous/                       # Multiple specimens matched
+    ITS/
+      ITS1F-ITS4/
+        sample_ambiguous.fastq
+  
+  unknown/                         # No barcodes matched
+    ITS/
+      ITS1F-ITS4/                  # Primers detected but no barcodes
+        sample_unknown.fastq
     unknown/
-      sample_unknown.fastq
-  unknown/
-    unknown-unknown/
-      sample_unknown.fastq
+      unknown-unknown/             # No primers detected at all
+        sample_unknown.fastq
+  
+  log.txt                          # Run statistics and classification report
 ```
 
-Each pool directory contains:
-- A "full" subdirectory that consolidates all full matches from any primer pair in the pool
-  - Contains a comprehensive primers.fasta with all primers in the pool
-  - Full match sequences are written both here and to their specific primer pair directory
+#### Directory Structure Benefits
 
-- Subdirectories for each primer pair combination
-  - Each primer pair directory has its own organization:
-    - "full" subdirectory for complete matches (both barcodes and primers matched)
-    - "partial" subdirectory for sequences which match only one barcode
-    - "ambiguous" subdirectory for sequences which match multiple specimens equally well
-    - "unknown" subdirectory for sequences matching primers but not barcodes
-  - A primers.fasta file is created in each primer pair directory containing the specific primer pair
+The match-type-first organization provides several advantages:
 
-This organization provides both specific access to sequences by primer pair and convenient access to all full matches by pool.
+1. **Primary Data Access**: Full matches are immediately accessible in the `full/` directory without navigating through multiple subdirectories
+2. **Clean Separation**: Partial matches and unknowns are segregated, reducing clutter when accessing your primary demultiplexed data
+3. **Convenient Aggregation**: Pool-level directories (e.g., `full/ITS/`) collect all successful matches for that target region
+4. **Recovery Options**: The `partial/` directory contains sequences that may be recoverable using tools like `speciharvest.py`
+5. **Automatic Cleanup**: Empty directories are automatically removed after processing to keep the output clean
+
+#### Key Directories
+
+- **full/[pool]/**: Contains ALL full matches for that pool, regardless of primer pair. Sequences appear both here and in their specific primer-pair subdirectory for maximum flexibility
+- **full/[pool]/[primer1-primer2]/**: Contains full matches for this specific primer pair only
+- **partial/[pool]/[primer1-unknown]/**: Contains sequences where only one primer was detected (potential recovery candidates)
+- **unknown/unknown/unknown-unknown/**: Contains sequences where no primers could be identified
 
 ### Pool Management
 
@@ -368,6 +380,7 @@ python v04_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --outpu
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.5.1 (August 2025): Reorganized output with match-type-first directory structure for easier access to primary data, added automatic cleanup of empty directories
 - 0.5 (March 2025): Added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
 - 0.4 (February 2025): Added Bloom filter optimization
 - 0.3 (December 2024): Code cleanup and write pooling improvements

@@ -767,7 +767,7 @@ class OutputManager:
         return self.file_manager.__exit__(exc_type, exc_val, exc_tb)
 
     def _make_filename(self, sample_id: str, pool: str, p1: str, p2: str) -> str:
-        """Create a filename with pool-based organization."""
+        """Create a filename with match-type-first organization."""
         extension = '.fastq' if self.is_fastq else '.fasta'
 
         # Handle None values
@@ -779,22 +779,22 @@ class OutputManager:
         safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in sample_id)
         primer_dir = f"{p1}-{p2}"
 
-        # Determine if this is a full match or a partial/unknown match
+        # Determine match type and construct path with match type first
         if sample_id == SampleId.UNKNOWN:
             # Complete unknown
-            return os.path.join(self.output_dir, pool, primer_dir, "unknown", f"{self.prefix}{safe_id}{extension}")
+            return os.path.join(self.output_dir, "unknown", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
         elif sample_id == SampleId.AMBIGUOUS:
             # Ambiguous match
-            return os.path.join(self.output_dir, pool, primer_dir, "ambiguous", f"{self.prefix}{safe_id}{extension}")
+            return os.path.join(self.output_dir, "ambiguous", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
         elif sample_id.startswith(SampleId.PREFIX_FWD_MATCH):
             # Forward barcode matched but reverse didn't
-            return os.path.join(self.output_dir, pool, primer_dir, "partial", f"{self.prefix}{safe_id}{extension}")
+            return os.path.join(self.output_dir, "partial", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
         elif sample_id.startswith(SampleId.PREFIX_REV_MATCH):
             # Reverse barcode matched but forward didn't
-            return os.path.join(self.output_dir, pool, primer_dir, "partial", f"{self.prefix}{safe_id}{extension}")
+            return os.path.join(self.output_dir, "partial", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
         else:
             # Full match
-            return os.path.join(self.output_dir, pool, primer_dir, "full", f"{self.prefix}{safe_id}{extension}")
+            return os.path.join(self.output_dir, "full", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
 
     def write_sequence(self, write_op: WriteOperation):
         """Write a sequence to the appropriate output file."""
@@ -821,22 +821,22 @@ class OutputManager:
         output_content = ''.join(output)
         self.file_manager.write(filename, output_content)
         
-        # If this is a full match, write it to the pool-level full directory as well
+        # If this is a full match, write it to the pool-level aggregation directory as well
         if not (write_op.sample_id == SampleId.UNKNOWN or 
                 write_op.sample_id == SampleId.AMBIGUOUS or
                 write_op.sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or
                 write_op.sample_id.startswith(SampleId.PREFIX_REV_MATCH)):
             
-            # Create additional path for pool-level full directory
+            # Create additional path for pool-level aggregation in full directory
             extension = '.fastq' if self.is_fastq else '.fasta'
             safe_id = "".join(c if c.isalnum() or c in "._-$#" else "_" for c in write_op.sample_id)
-            pool_full_path = os.path.join(self.output_dir, write_op.primer_pool, "full", 
+            pool_full_path = os.path.join(self.output_dir, "full", write_op.primer_pool, 
                                           f"{self.prefix}{safe_id}{extension}")
             
             # Ensure the pool full directory exists
             os.makedirs(os.path.dirname(pool_full_path), exist_ok=True)
             
-            # Write to pool-level full directory
+            # Write to pool-level aggregation directory
             self.file_manager.write(pool_full_path, output_content)
 
 class WorkerException(Exception):
@@ -1995,6 +1995,10 @@ def specimux_mp(args):
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
     output_diagnostics(args, classifications, elapsed)
+    
+    # Clean up empty directories after all processing is complete
+    if args.output_to_files:
+        cleanup_empty_directories(args.output_dir)
 
     cleanup_locks(args.output_dir)
 
@@ -2049,48 +2053,59 @@ def create_output_files(args, specimens):
         # Create base output directory
         os.makedirs(args.output_dir, exist_ok=True)
 
-        # Create unknown directory for complete unknowns
-        os.makedirs(os.path.join(args.output_dir, "unknown", "unknown-unknown"), exist_ok=True)
-
-        # Create pool directories and their substructure
-        for pool in specimens._primer_registry.get_pools():
-            pool_dir = os.path.join(args.output_dir, pool)
-
-            # Create pool directory and pool-level full directory
-            os.makedirs(pool_dir, exist_ok=True)
-            os.makedirs(os.path.join(pool_dir, "full"), exist_ok=True)
+        # Create match-type directories at the top level
+        match_types = ["full", "partial", "ambiguous", "unknown"]
+        for match_type in match_types:
+            os.makedirs(os.path.join(args.output_dir, match_type), exist_ok=True)
+        
+        # Create unknown pool directories for sequences with unrecognized pools or no primers
+        for match_type in ["partial", "unknown"]:
+            unknown_pool_dir = os.path.join(args.output_dir, match_type, "unknown")
+            os.makedirs(unknown_pool_dir, exist_ok=True)
+            # Create directories for various primer detection scenarios
+            os.makedirs(os.path.join(unknown_pool_dir, "unknown-unknown"), exist_ok=True)
             
-            # Write a primers.fasta file with all primers to the pool-level full directory
-            pool_full_path = os.path.join(pool_dir, "full")
+            # Also need to handle cases where primers are detected but not in recognized pools
+            # These directories will be created dynamically based on detected primers
+            # For now, we'll rely on the write_sequence method to create them as needed
+        
+        # Create pool directories under each match type
+        for pool in specimens._primer_registry.get_pools():
+            # Create pool directories under each match type
+            for match_type in match_types:
+                pool_dir = os.path.join(args.output_dir, match_type, pool)
+                os.makedirs(pool_dir, exist_ok=True)
+            
+            # Write primers.fasta file to the pool-level full directory
+            pool_full_path = os.path.join(args.output_dir, "full", pool)
             write_all_primers_fasta(pool_full_path, 
                                    specimens._primer_registry.get_pool_primers(pool, Primer.FWD),
                                    specimens._primer_registry.get_pool_primers(pool, Primer.REV))
 
-            # Create primer pair directories
+            # Create primer pair directories under appropriate match types
             for fwd_primer in specimens._primer_registry.get_pool_primers(pool, Primer.FWD):
                 for rev_primer in specimens._primer_registry.get_pool_primers(pool, Primer.REV):
                     primer_dir = f"{fwd_primer.name}-{rev_primer.name}"
-                    primer_full_dir = os.path.join(pool_dir, primer_dir)
+                    
+                    # Create primer-pair directories under each match type
+                    for match_type in match_types:
+                        primer_full_dir = os.path.join(args.output_dir, match_type, pool, primer_dir)
+                        os.makedirs(primer_full_dir, exist_ok=True)
+                    
+                    # Write primers.fasta file for the full match primer-pair directory
+                    full_primer_dir = os.path.join(args.output_dir, "full", pool, primer_dir)
+                    write_primers_fasta(full_primer_dir, fwd_primer, rev_primer)
 
-                    # Create directories for all match types
-                    os.makedirs(primer_full_dir, exist_ok=True)
-                    os.makedirs(os.path.join(primer_full_dir, "full"), exist_ok=True)
-                    os.makedirs(os.path.join(primer_full_dir, "partial"), exist_ok=True)
-                    os.makedirs(os.path.join(primer_full_dir, "ambiguous"), exist_ok=True)
-                    os.makedirs(os.path.join(primer_full_dir, "unknown"), exist_ok=True)
-
-                    # Write primers.fasta file for this primer pair directory and the full subdirectory
-                    write_primers_fasta(primer_full_dir, fwd_primer, rev_primer)
-                    write_primers_fasta(os.path.join(primer_full_dir, "full"), fwd_primer, rev_primer)
-
-                # Create unknown primer directories
+                # Create partial primer directories (forward primer only)
                 unknown_primer_dir = f"{fwd_primer.name}-unknown"
-                os.makedirs(os.path.join(args.output_dir, pool, unknown_primer_dir), exist_ok=True)
+                os.makedirs(os.path.join(args.output_dir, "partial", pool, unknown_primer_dir), exist_ok=True)
+                os.makedirs(os.path.join(args.output_dir, "unknown", pool, unknown_primer_dir), exist_ok=True)
 
-            # Create unknown primer directories for reverse only matches
+            # Create partial primer directories (reverse primer only)
             for rev_primer in specimens._primer_registry.get_pool_primers(pool, Primer.REV):
                 unknown_primer_dir = f"unknown-{rev_primer.name}"
-                os.makedirs(os.path.join(args.output_dir, pool, unknown_primer_dir), exist_ok=True)
+                os.makedirs(os.path.join(args.output_dir, "partial", pool, unknown_primer_dir), exist_ok=True)
+                os.makedirs(os.path.join(args.output_dir, "unknown", pool, unknown_primer_dir), exist_ok=True)
 
 def iter_batches(seq_records, batch_size: int, max_seqs: int, all_seqs: bool):
     """Helper to iterate over sequence batches"""
@@ -2163,7 +2178,45 @@ def specimux(args):
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
     output_diagnostics(args, classifications, elapsed)
+    
+    # Clean up empty directories after all processing is complete
+    if args.output_to_files:
+        cleanup_empty_directories(args.output_dir)
 
+
+def cleanup_empty_directories(output_dir: str):
+    """Remove empty directories from the output tree.
+    
+    Works bottom-up to remove directories that contain no files,
+    only removing directories that were created by specimux.
+    """
+    if not os.path.exists(output_dir):
+        return
+    
+    # List to track directories removed for logging
+    removed_dirs = []
+    
+    # Walk the directory tree bottom-up
+    for dirpath, dirnames, filenames in os.walk(output_dir, topdown=False):
+        # Skip the base output directory itself
+        if dirpath == output_dir:
+            continue
+            
+        # Check if directory is empty (no files and no remaining subdirectories)
+        try:
+            if not filenames and not os.listdir(dirpath):
+                os.rmdir(dirpath)
+                removed_dirs.append(dirpath)
+        except OSError:
+            # Directory not empty or cannot be removed, skip it
+            pass
+    
+    if removed_dirs:
+        logging.debug(f"Removed {len(removed_dirs)} empty directories")
+        for dir_path in removed_dirs[:10]:  # Show first 10 for debugging
+            logging.debug(f"  Removed: {dir_path}")
+        if len(removed_dirs) > 10:
+            logging.debug(f"  ... and {len(removed_dirs) - 10} more")
 
 def output_diagnostics(args, classifications, elapsed_time=None):
     # Sort the classifications by their counts in descending order
