@@ -1443,11 +1443,9 @@ def choose_best_match(matches: List[SequenceMatch]) -> Tuple[SequenceMatch, bool
 
     best_match.set_pool(best_pool)
 
-    # ambiguity between matches only really matters when there was a full match
-    if best_score == 5 and multimatch:
-        return best_match, True
-    else:
-        return best_match, False
+    # Return the true multimatch status regardless of score
+    # This ensures that pool ambiguity is properly reported in statistics
+    return best_match, multimatch
 
 
 
