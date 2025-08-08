@@ -1278,8 +1278,9 @@ def process_sequences(seq_records: List[SeqRecord],
                       parameters: MatchParameters,
                       specimens: Specimens,
                       args: argparse.Namespace,
-                      prefilter: BarcodePrefilter) -> Tuple[List[WriteOperation], Counter]:
+                      prefilter: BarcodePrefilter) -> Tuple[List[WriteOperation], Counter, Dict]:
     classifications = Counter()
+    pool_stats = {}  # Hierarchical statistics by pool and primer pair
     write_ops = []
 
     for seq in seq_records:
@@ -1316,8 +1317,49 @@ def process_sequences(seq_records: List[SeqRecord],
 
         write_op = create_write_operation(sample_id, args, match.sequence, match)
         write_ops.append(write_op)
+        
+        # Track hierarchical statistics
+        pool_name = write_op.primer_pool
+        primer_pair = f"{write_op.p1_name}-{write_op.p2_name}"
+        
+        if pool_name not in pool_stats:
+            pool_stats[pool_name] = {
+                'total': 0,
+                'matched': 0,
+                'partial': 0,
+                'ambiguous': 0,
+                'unknown': 0,
+                'primer_pairs': {}
+            }
+        
+        if primer_pair not in pool_stats[pool_name]['primer_pairs']:
+            pool_stats[pool_name]['primer_pairs'][primer_pair] = {
+                'total': 0,
+                'matched': 0,
+                'partial': 0,
+                'ambiguous': 0,
+                'unknown': 0
+            }
+        
+        # Update counters
+        pool_stats[pool_name]['total'] += 1
+        pool_stats[pool_name]['primer_pairs'][primer_pair]['total'] += 1
+        
+        # Categorize the match
+        if classification == MatchCode.MATCHED:
+            pool_stats[pool_name]['matched'] += 1
+            pool_stats[pool_name]['primer_pairs'][primer_pair]['matched'] += 1
+        elif sample_id == SampleId.AMBIGUOUS:
+            pool_stats[pool_name]['ambiguous'] += 1
+            pool_stats[pool_name]['primer_pairs'][primer_pair]['ambiguous'] += 1
+        elif sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or sample_id.startswith(SampleId.PREFIX_REV_MATCH):
+            pool_stats[pool_name]['partial'] += 1
+            pool_stats[pool_name]['primer_pairs'][primer_pair]['partial'] += 1
+        else:
+            pool_stats[pool_name]['unknown'] += 1
+            pool_stats[pool_name]['primer_pairs'][primer_pair]['unknown'] += 1
 
-    return write_ops, classifications
+    return write_ops, classifications, pool_stats
 
 
 def classify_match(match: SequenceMatch, sample_id: str, specimens: Specimens) -> str:
@@ -1744,7 +1786,7 @@ def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
     """Process a batch of sequences and write results directly"""
     global _output_manager, _barcode_prefilter
     try:
-        write_ops, classifications = process_sequences(
+        write_ops, classifications, pool_stats = process_sequences(
             work_item.seq_records, work_item.parameters, specimens, args, _barcode_prefilter)
 
         # Write sequences directly from worker
@@ -1758,7 +1800,7 @@ def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
                 logging.error(f"Error writing output: {e}")
                 raise
 
-        return classifications
+        return classifications, pool_stats
 
     except Exception as e:
         logging.error(traceback.format_exc())
@@ -1957,6 +1999,7 @@ def specimux_mp(args):
             pass
 
     classifications = Counter()
+    pool_stats = {}  # Aggregate pool statistics
 
     num_processes = args.threads if args.threads > 0 else multiprocessing.cpu_count()
     logging.info(f"Will run {num_processes} worker processes")
@@ -1969,12 +2012,48 @@ def specimux_mp(args):
 
         try:
             pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
-            for batch_class in pool.imap_unordered(
+            for batch_class, batch_pool_stats in pool.imap_unordered(
                     worker_func,
                     (WorkItem(i, batch, parameters)
                      for i, batch in enumerate(iter_batches(seq_records, sequence_block_size,
                                                             last_seq_to_output, all_seqs)))):
                 classifications += batch_class
+                
+                # Merge pool statistics
+                for pool_name, pool_data in batch_pool_stats.items():
+                    if pool_name not in pool_stats:
+                        pool_stats[pool_name] = {
+                            'total': 0,
+                            'matched': 0,
+                            'partial': 0,
+                            'ambiguous': 0,
+                            'unknown': 0,
+                            'primer_pairs': {}
+                        }
+                    
+                    # Merge pool-level counts
+                    pool_stats[pool_name]['total'] += pool_data['total']
+                    pool_stats[pool_name]['matched'] += pool_data['matched']
+                    pool_stats[pool_name]['partial'] += pool_data['partial']
+                    pool_stats[pool_name]['ambiguous'] += pool_data['ambiguous']
+                    pool_stats[pool_name]['unknown'] += pool_data['unknown']
+                    
+                    # Merge primer-pair counts
+                    for primer_pair, pp_data in pool_data['primer_pairs'].items():
+                        if primer_pair not in pool_stats[pool_name]['primer_pairs']:
+                            pool_stats[pool_name]['primer_pairs'][primer_pair] = {
+                                'total': 0,
+                                'matched': 0,
+                                'partial': 0,
+                                'ambiguous': 0,
+                                'unknown': 0
+                            }
+                        pp_stats = pool_stats[pool_name]['primer_pairs'][primer_pair]
+                        pp_stats['total'] += pp_data['total']
+                        pp_stats['matched'] += pp_data['matched']
+                        pp_stats['partial'] += pp_data['partial']
+                        pp_stats['ambiguous'] += pp_data['ambiguous']
+                        pp_stats['unknown'] += pp_data['unknown']
 
                 # Update progress
                 batch_size = sum(batch_class.values())
@@ -1994,7 +2073,7 @@ def specimux_mp(args):
 
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
-    output_diagnostics(args, classifications, elapsed)
+    output_diagnostics(args, classifications, elapsed, pool_stats)
     
     # Clean up empty directories after all processing is complete
     if args.output_to_files:
@@ -2141,6 +2220,7 @@ def specimux(args):
             pass
 
     classifications = Counter()
+    pool_stats = {}  # Aggregate pool statistics
 
     with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq) as output_manager:
         num_seqs = 0
@@ -2157,9 +2237,46 @@ def specimux(args):
             if not seq_batch:
                 break
 
-            write_ops, batch_classifications = process_sequences(seq_batch, parameters, specimens,
+            write_ops, batch_classifications, batch_pool_stats = process_sequences(seq_batch, parameters, specimens,
                                                                                   args, prefilter)
             classifications += batch_classifications
+            
+            # Merge pool statistics (same logic as multiprocess version)
+            for pool_name, pool_data in batch_pool_stats.items():
+                if pool_name not in pool_stats:
+                    pool_stats[pool_name] = {
+                        'total': 0,
+                        'matched': 0,
+                        'partial': 0,
+                        'ambiguous': 0,
+                        'unknown': 0,
+                        'primer_pairs': {}
+                    }
+                
+                # Merge pool-level counts
+                pool_stats[pool_name]['total'] += pool_data['total']
+                pool_stats[pool_name]['matched'] += pool_data['matched']
+                pool_stats[pool_name]['partial'] += pool_data['partial']
+                pool_stats[pool_name]['ambiguous'] += pool_data['ambiguous']
+                pool_stats[pool_name]['unknown'] += pool_data['unknown']
+                
+                # Merge primer-pair counts
+                for primer_pair, pp_data in pool_data['primer_pairs'].items():
+                    if primer_pair not in pool_stats[pool_name]['primer_pairs']:
+                        pool_stats[pool_name]['primer_pairs'][primer_pair] = {
+                            'total': 0,
+                            'matched': 0,
+                            'partial': 0,
+                            'ambiguous': 0,
+                            'unknown': 0
+                        }
+                    pp_stats = pool_stats[pool_name]['primer_pairs'][primer_pair]
+                    pp_stats['total'] += pp_data['total']
+                    pp_stats['matched'] += pp_data['matched']
+                    pp_stats['partial'] += pp_data['partial']
+                    pp_stats['ambiguous'] += pp_data['ambiguous']
+                    pp_stats['unknown'] += pp_data['unknown']
+            
             for write_op in write_ops:
                 output_write_operation(write_op, output_manager, args)
 
@@ -2177,7 +2294,7 @@ def specimux(args):
 
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
-    output_diagnostics(args, classifications, elapsed)
+    output_diagnostics(args, classifications, elapsed, pool_stats)
     
     # Clean up empty directories after all processing is complete
     if args.output_to_files:
@@ -2218,7 +2335,7 @@ def cleanup_empty_directories(output_dir: str):
         if len(removed_dirs) > 10:
             logging.debug(f"  ... and {len(removed_dirs) - 10} more")
 
-def output_diagnostics(args, classifications, elapsed_time=None):
+def output_diagnostics(args, classifications, elapsed_time=None, pool_stats=None):
     # Sort the classifications by their counts in descending order
     sorted_classifications = sorted(
         classifications.items(),
@@ -2271,6 +2388,59 @@ def output_diagnostics(args, classifications, elapsed_time=None):
         log_file.write("Detailed Classification Statistics:\n")
         for line in stats_lines[1:]:  # Skip the header line
             log_file.write(f"  {line}\n")
+        
+        # Add hierarchical pool and primer-pair statistics if available
+        if pool_stats:
+            log_file.write("\n\nPool and Primer-Pair Breakdown:\n")
+            log_file.write("================================\n\n")
+            
+            # Sort pools alphabetically, but put "unknown" pool last
+            sorted_pools = sorted(pool_stats.keys(), key=lambda x: (x == "unknown", x))
+            
+            for pool_name in sorted_pools:
+                pool_data = pool_stats[pool_name]
+                pool_total = pool_data['total']
+                if pool_total == 0:
+                    continue
+                    
+                pool_matched = pool_data['matched']
+                pool_match_rate = pool_matched / pool_total if pool_total > 0 else 0
+                pool_pct_of_total = pool_total / total if total > 0 else 0
+                
+                log_file.write(f"Pool: {pool_name} ({pool_pct_of_total:.2%} of total)\n")
+                log_file.write(f"  Total: {pool_total:,} sequences\n")
+                log_file.write(f"  Matched: {pool_matched:,} ({pool_match_rate:.2%} of pool)\n")
+                log_file.write(f"  Partial: {pool_data['partial']:,} ({pool_data['partial']/pool_total:.2%} of pool)\n")
+                log_file.write(f"  Ambiguous: {pool_data['ambiguous']:,} ({pool_data['ambiguous']/pool_total:.2%} of pool)\n")
+                log_file.write(f"  Unknown: {pool_data['unknown']:,} ({pool_data['unknown']/pool_total:.2%} of pool)\n")
+                
+                # Sort primer pairs alphabetically
+                sorted_primer_pairs = sorted(pool_data['primer_pairs'].keys())
+                
+                if sorted_primer_pairs:
+                    log_file.write(f"\n  Primer-Pair Breakdown:\n")
+                    for primer_pair in sorted_primer_pairs:
+                        pp_data = pool_data['primer_pairs'][primer_pair]
+                        pp_total = pp_data['total']
+                        if pp_total == 0:
+                            continue
+                        
+                        pp_matched = pp_data['matched']
+                        pp_match_rate = pp_matched / pp_total if pp_total > 0 else 0
+                        
+                        log_file.write(f"    {primer_pair}:\n")
+                        log_file.write(f"      Total: {pp_total:,}\n")
+                        log_file.write(f"      Matched: {pp_matched:,} ({pp_match_rate:.2%} of primer pair)\n")
+                        
+                        # Only show other categories if they have counts
+                        if pp_data['partial'] > 0:
+                            log_file.write(f"      Partial: {pp_data['partial']:,} ({pp_data['partial']/pp_total:.2%} of primer pair)\n")
+                        if pp_data['ambiguous'] > 0:
+                            log_file.write(f"      Ambiguous: {pp_data['ambiguous']:,} ({pp_data['ambiguous']/pp_total:.2%} of primer pair)\n")
+                        if pp_data['unknown'] > 0:
+                            log_file.write(f"      Unknown: {pp_data['unknown']:,} ({pp_data['unknown']/pp_total:.2%} of primer pair)\n")
+                
+                log_file.write("\n")
             
     logging.info(f"Summary statistics written to {log_file_path}")
 
