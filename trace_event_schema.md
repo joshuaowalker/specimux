@@ -25,6 +25,12 @@ timestamp | worker_id | event_seq | sequence_id | event_type | ...event-specific
 - `sequence_id`: String, globally unique sequence identifier (see below)
 - `event_type`: String, event type identifier (see Event Types)
 
+### Candidate Match Tracking
+
+Some events track individual primer pair match attempts (candidate matches) against a sequence. These events include an additional `candidate_match_id` field to enable aggregation by match location rather than just by sequence:
+
+- `candidate_match_id`: String, unique identifier for a specific primer pair match attempt within a sequence (format: "{sequence_id}_match_{counter}", e.g., "seq123#00042#worker_1_match_0")
+
 ### Sequence ID Format
 The `sequence_id` is constructed to be both globally unique and consistent across runs:
 ```
@@ -61,10 +67,11 @@ timestamp | worker_id | event_seq | sequence_id | ORIENTATION_DETECTED | orienta
 - `confidence`: Float, confidence score (e.g., ratio of scores)
 
 ### PRIMER_MATCHED
-**Purpose**: Log successful primer match (any configuration)
+**Purpose**: Log successful primer match (any configuration) for a specific candidate match
 ```
-timestamp | worker_id | event_seq | sequence_id | PRIMER_MATCHED | match_type | forward_primer | reverse_primer | forward_distance | reverse_distance | pool | orientation_used
+timestamp | worker_id | event_seq | sequence_id | PRIMER_MATCHED | candidate_match_id | match_type | forward_primer | reverse_primer | forward_distance | reverse_distance | pool | orientation_used
 ```
+- `candidate_match_id`: String, unique identifier for this primer pair match attempt
 - `match_type`: Enum: `both`, `forward_only`, `reverse_only`
 - `forward_primer`: String, forward primer name (or "none")
 - `reverse_primer`: String, reverse primer name (or "none")
@@ -74,10 +81,11 @@ timestamp | worker_id | event_seq | sequence_id | PRIMER_MATCHED | match_type | 
 - `orientation_used`: Enum: `as_is`, `reverse_complement`
 
 ### BARCODE_MATCHED
-**Purpose**: Log barcode match result for a primer pair
+**Purpose**: Log barcode match result for a specific candidate match
 ```
-timestamp | worker_id | event_seq | sequence_id | BARCODE_MATCHED | match_type | forward_barcode | reverse_barcode | forward_distance | reverse_distance | forward_primer | reverse_primer
+timestamp | worker_id | event_seq | sequence_id | BARCODE_MATCHED | candidate_match_id | match_type | forward_barcode | reverse_barcode | forward_distance | reverse_distance | forward_primer | reverse_primer
 ```
+- `candidate_match_id`: String, unique identifier for this primer pair match attempt
 - `match_type`: Enum: `both`, `forward_only`, `reverse_only`, `none`
 - `forward_barcode`: String, forward barcode name (or "none")
 - `reverse_barcode`: String, reverse barcode name (or "none")
@@ -87,10 +95,11 @@ timestamp | worker_id | event_seq | sequence_id | BARCODE_MATCHED | match_type |
 - `reverse_primer`: String, adjacent reverse primer
 
 ### MATCH_SCORED
-**Purpose**: Log match scoring for selection
+**Purpose**: Log match scoring for a specific candidate match
 ```
-timestamp | worker_id | event_seq | sequence_id | MATCH_SCORED | forward_primer | reverse_primer | forward_barcode | reverse_barcode | total_edit_distance | barcode_presence | score
+timestamp | worker_id | event_seq | sequence_id | MATCH_SCORED | candidate_match_id | forward_primer | reverse_primer | forward_barcode | reverse_barcode | total_edit_distance | barcode_presence | score
 ```
+- `candidate_match_id`: String, unique identifier for this primer pair match attempt
 - `forward_primer`: String, forward primer name
 - `reverse_primer`: String, reverse primer name
 - `forward_barcode`: String, forward barcode (or "none")
@@ -206,9 +215,9 @@ timestamp | worker_id | event_seq | sequence_id | BARCODE_SEARCH | barcode_name 
 ```
 2025-01-10T10:15:23.456	worker_1	1	seq123#00042#worker_1	SEQUENCE_RECEIVED	1523	seq123
 2025-01-10T10:15:23.457	worker_1	2	seq123#00042#worker_1	ORIENTATION_DETECTED	forward	2	0	1.0
-2025-01-10T10:15:23.458	worker_1	3	seq123#00042#worker_1	PRIMER_MATCHED	both	ITS1F	ITS4	2	1	ITS	as_is
-2025-01-10T10:15:23.459	worker_1	4	seq123#00042#worker_1	BARCODE_MATCHED	both	BC01	BC15	1	0	ITS1F	ITS4
-2025-01-10T10:15:23.460	worker_1	5	seq123#00042#worker_1	MATCH_SCORED	ITS1F	ITS4	BC01	BC15	4	both	0.25
+2025-01-10T10:15:23.458	worker_1	3	seq123#00042#worker_1	PRIMER_MATCHED	seq123#00042#worker_1_match_0	both	ITS1F	ITS4	2	1	ITS	as_is
+2025-01-10T10:15:23.459	worker_1	4	seq123#00042#worker_1	BARCODE_MATCHED	seq123#00042#worker_1_match_0	both	BC01	BC15	1	0	ITS1F	ITS4
+2025-01-10T10:15:23.460	worker_1	5	seq123#00042#worker_1	MATCH_SCORED	seq123#00042#worker_1_match_0	ITS1F	ITS4	BC01	BC15	4	both	0.25
 2025-01-10T10:15:23.461	worker_1	6	seq123#00042#worker_1	MATCH_SELECTED	unique	ITS1F	ITS4	BC01	BC15	ITS	true
 2025-01-10T10:15:23.462	worker_1	7	seq123#00042#worker_1	SPECIMEN_RESOLVED	Sample_123	full_match	ITS	ITS1F	ITS4	BC01	BC15
 2025-01-10T10:15:23.463	worker_1	8	seq123#00042#worker_1	SEQUENCE_OUTPUT	full	Sample_123	ITS	ITS1F-ITS4	full/ITS/ITS1F-ITS4/Sample_123.fastq
@@ -218,9 +227,9 @@ timestamp | worker_id | event_seq | sequence_id | BARCODE_SEARCH | barcode_name 
 ```
 2025-01-10T10:15:24.100	worker_2	42	seq456#00100#worker_2	SEQUENCE_RECEIVED	1420	seq456
 2025-01-10T10:15:24.101	worker_2	43	seq456#00100#worker_2	ORIENTATION_DETECTED	forward	1	1	0.5
-2025-01-10T10:15:24.102	worker_2	44	seq456#00100#worker_2	PRIMER_MATCHED	both	RPB2-5F	RPB2-7R	1	2	RPB2	as_is
-2025-01-10T10:15:24.103	worker_2	45	seq456#00100#worker_2	BARCODE_MATCHED	forward_only	BC05	none	0	-1	RPB2-5F	RPB2-7R
-2025-01-10T10:15:24.104	worker_2	46	seq456#00100#worker_2	MATCH_SCORED	RPB2-5F	RPB2-7R	BC05	none	3	forward_only	0.5
+2025-01-10T10:15:24.102	worker_2	44	seq456#00100#worker_2	PRIMER_MATCHED	seq456#00100#worker_2_match_0	both	RPB2-5F	RPB2-7R	1	2	RPB2	as_is
+2025-01-10T10:15:24.103	worker_2	45	seq456#00100#worker_2	BARCODE_MATCHED	seq456#00100#worker_2_match_0	forward_only	BC05	none	0	-1	RPB2-5F	RPB2-7R
+2025-01-10T10:15:24.104	worker_2	46	seq456#00100#worker_2	MATCH_SCORED	seq456#00100#worker_2_match_0	RPB2-5F	RPB2-7R	BC05	none	3	forward_only	0.5
 2025-01-10T10:15:24.105	worker_2	47	seq456#00100#worker_2	MATCH_SELECTED	unique	RPB2-5F	RPB2-7R	BC05	none	RPB2	true
 2025-01-10T10:15:24.106	worker_2	48	seq456#00100#worker_2	SPECIMEN_RESOLVED	FWD_ONLY_BC05	partial_forward	RPB2	RPB2-5F	RPB2-7R	BC05	none
 2025-01-10T10:15:24.107	worker_2	49	seq456#00100#worker_2	SEQUENCE_OUTPUT	partial	FWD_ONLY_BC05	RPB2	RPB2-5F-RPB2-7R	partial/RPB2/RPB2-5F-RPB2-7R/FWD_ONLY_BC05.fastq

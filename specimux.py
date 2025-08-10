@@ -312,7 +312,7 @@ class MatchResult:
         self._edlib_match['locations'] = [(loc[0] + s, loc[1] + s) for loc in self._edlib_match['locations']]  # adjust relative match to absolute
 
 class SequenceMatch:
-    def __init__(self, sequence, barcode_length):
+    def __init__(self, sequence, barcode_length, candidate_match_id: Optional[str] = None):
         self.sequence_length = len(sequence)
         self.sequence = sequence
         self.p1_match: Optional[MatchResult] = None
@@ -324,6 +324,7 @@ class SequenceMatch:
         self._pool: Optional[str] = None  # New: track the pool
         self.ambiguity_threshold = 1.0
         self._barcode_length = barcode_length
+        self.candidate_match_id = candidate_match_id  # New: track candidate match ID
 
     def set_pool(self, pool: str):
         """Set the primer pool for this match"""
@@ -1011,29 +1012,29 @@ class TraceLogger:
         self._log_event(sequence_id, 'ORIENTATION_DETECTED', orientation, 
                        forward_score, reverse_score, f"{confidence:.3f}")
     
-    def log_primer_matched(self, sequence_id: str, match_type: str, 
+    def log_primer_matched(self, sequence_id: str, candidate_match_id: str, match_type: str, 
                           forward_primer: str, reverse_primer: str,
                           forward_distance: int, reverse_distance: int, 
                           pool: str, orientation_used: str):
-        """Log successful primer match."""
-        self._log_event(sequence_id, 'PRIMER_MATCHED', match_type,
+        """Log successful primer match for a specific candidate match."""
+        self._log_event(sequence_id, 'PRIMER_MATCHED', candidate_match_id, match_type,
                        forward_primer, reverse_primer, forward_distance, reverse_distance,
                        pool, orientation_used)
     
-    def log_barcode_matched(self, sequence_id: str, match_type: str,
+    def log_barcode_matched(self, sequence_id: str, candidate_match_id: str, match_type: str,
                            forward_barcode: str, reverse_barcode: str,
                            forward_distance: int, reverse_distance: int,
                            forward_primer: str, reverse_primer: str):
-        """Log barcode match result."""
-        self._log_event(sequence_id, 'BARCODE_MATCHED', match_type,
+        """Log barcode match result for a specific candidate match."""
+        self._log_event(sequence_id, 'BARCODE_MATCHED', candidate_match_id, match_type,
                        forward_barcode, reverse_barcode, forward_distance, reverse_distance,
                        forward_primer, reverse_primer)
     
-    def log_match_scored(self, sequence_id: str, forward_primer: str, reverse_primer: str,
+    def log_match_scored(self, sequence_id: str, candidate_match_id: str, forward_primer: str, reverse_primer: str,
                         forward_barcode: str, reverse_barcode: str,
                         total_edit_distance: int, barcode_presence: str, score: float):
-        """Log match scoring."""
-        self._log_event(sequence_id, 'MATCH_SCORED', forward_primer, reverse_primer,
+        """Log match scoring for a specific candidate match."""
+        self._log_event(sequence_id, 'MATCH_SCORED', candidate_match_id, forward_primer, reverse_primer,
                        forward_barcode, reverse_barcode, total_edit_distance,
                        barcode_presence, f"{score:.3f}")
     
@@ -1817,7 +1818,7 @@ def choose_best_match(matches: List[SequenceMatch],
             else:
                 barcode_presence = 'none'
                 
-            trace_logger.log_match_scored(sequence_id, p1_name, p2_name, b1_name, b2_name,
+            trace_logger.log_match_scored(sequence_id, m.candidate_match_id, p1_name, p2_name, b1_name, b2_name,
                                         total_distance, barcode_presence, float(score))
         
         scored_matches.append((score, m))
@@ -2045,11 +2046,13 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
         orientation = Orientation.UNKNOWN
 
     matches = []
+    match_counter = 0
 
     for fwd_primer in specimens.get_primers(Primer.FWD):
         for rev_primer in specimens.get_paired_primers(fwd_primer.primer):
             if orientation in [Orientation.FORWARD, Orientation.UNKNOWN]:
-                match = SequenceMatch(seq, specimens.b_length())
+                candidate_match_id = f"{sequence_id}_match_{match_counter}"
+                match = SequenceMatch(seq, specimens.b_length(), candidate_match_id)
                 match_one_end(prefilter, match, parameters, rs, True, fwd_primer,
                               Primer.FWD, Barcode.B1, trace_logger, sequence_id)
                 match_one_end(prefilter, match, parameters, s, False, rev_primer,
@@ -2068,13 +2071,33 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                     p1_dist = match.p1_match.distance() if match.p1_match else -1
                     p2_dist = match.p2_match.distance() if match.p2_match else -1
                     orientation_used = 'as_is' if orientation in [Orientation.FORWARD, Orientation.UNKNOWN] else 'reverse_complement'
-                    trace_logger.log_primer_matched(sequence_id, match_type, p1_name, p2_name,
+                    trace_logger.log_primer_matched(sequence_id, candidate_match_id, match_type, p1_name, p2_name,
                                                    p1_dist, p2_dist, pool or 'unknown', orientation_used)
                     
+                    # Log barcode match result for this candidate match
+                    b1_name = match.best_b1()[0] if match.has_b1_match() else 'none'
+                    b2_name = match.best_b2()[0] if match.has_b2_match() else 'none'
+                    b1_dist = match.b1_distance() if match.has_b1_match() else -1
+                    b2_dist = match.b2_distance() if match.has_b2_match() else -1
+                    
+                    if match.has_b1_match() and match.has_b2_match():
+                        barcode_match_type = 'both'
+                    elif match.has_b1_match():
+                        barcode_match_type = 'forward_only'
+                    elif match.has_b2_match():
+                        barcode_match_type = 'reverse_only'
+                    else:
+                        barcode_match_type = 'none'
+                    
+                    trace_logger.log_barcode_matched(sequence_id, candidate_match_id, barcode_match_type,
+                                                   b1_name, b2_name, b1_dist, b2_dist, p1_name, p2_name)
+                    
                 matches.append(match)
+                match_counter += 1
 
             if orientation in [Orientation.REVERSE, Orientation.UNKNOWN]:
-                match = SequenceMatch(rseq, specimens.b_length())
+                candidate_match_id = f"{sequence_id}_match_{match_counter}"
+                match = SequenceMatch(rseq, specimens.b_length(), candidate_match_id)
                 match_one_end(prefilter, match, parameters, s, True, fwd_primer,
                               Primer.FWD, Barcode.B1, trace_logger, sequence_id)
                 match_one_end(prefilter, match, parameters, rs, False, rev_primer,
@@ -2093,10 +2116,29 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                     p1_dist = match.p1_match.distance() if match.p1_match else -1
                     p2_dist = match.p2_match.distance() if match.p2_match else -1
                     orientation_used = 'reverse_complement'
-                    trace_logger.log_primer_matched(sequence_id, match_type, p1_name, p2_name,
+                    trace_logger.log_primer_matched(sequence_id, candidate_match_id, match_type, p1_name, p2_name,
                                                    p1_dist, p2_dist, pool or 'unknown', orientation_used)
                     
+                    # Log barcode match result for this candidate match
+                    b1_name = match.best_b1()[0] if match.has_b1_match() else 'none'
+                    b2_name = match.best_b2()[0] if match.has_b2_match() else 'none'
+                    b1_dist = match.b1_distance() if match.has_b1_match() else -1
+                    b2_dist = match.b2_distance() if match.has_b2_match() else -1
+                    
+                    if match.has_b1_match() and match.has_b2_match():
+                        barcode_match_type = 'both'
+                    elif match.has_b1_match():
+                        barcode_match_type = 'forward_only'
+                    elif match.has_b2_match():
+                        barcode_match_type = 'reverse_only'
+                    else:
+                        barcode_match_type = 'none'
+                    
+                    trace_logger.log_barcode_matched(sequence_id, candidate_match_id, barcode_match_type,
+                                                   b1_name, b2_name, b1_dist, b2_dist, p1_name, p2_name)
+                    
                 matches.append(match)
+                match_counter += 1
     
     # TODO: Consider whether primer pairs that match almost exactly the same extent 
     # should be considered distinct matches or not. This affects ambiguity detection
@@ -2183,22 +2225,7 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
                     best_barcode_distance = bd
                     best_barcode_name = bc
         
-        # Log barcode match result for this primer
-        if trace_logger:
-            barcode_type = 'forward' if which_barcode == Barcode.B1 else 'reverse'
-            if best_barcode_name:
-                match_type = f"{barcode_type}_only"
-                trace_logger.log_barcode_matched(sequence_id, match_type, 
-                                               best_barcode_name if which_barcode == Barcode.B1 else 'none',
-                                               best_barcode_name if which_barcode == Barcode.B2 else 'none',
-                                               best_barcode_distance if which_barcode == Barcode.B1 else -1,
-                                               best_barcode_distance if which_barcode == Barcode.B2 else -1,
-                                               primer_info.name if which_primer == Primer.FWD else 'none',
-                                               primer_info.name if which_primer == Primer.REV else 'none')
-            else:
-                trace_logger.log_barcode_matched(sequence_id, 'none', 'none', 'none', -1, -1,
-                                               primer_info.name if which_primer == Primer.FWD else 'none', 
-                                               primer_info.name if which_primer == Primer.REV else 'none')
+        # Note: BARCODE_MATCHED logging moved to match_sequence to log complete barcode result per candidate match
     else:
         # Log failed primer search  
         if trace_logger:

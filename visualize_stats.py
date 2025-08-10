@@ -147,6 +147,39 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
                         'reason': row[5],
                         'details': row[6] if len(row) > 6 else ''
                     })
+                elif event_dict['event_type'] == 'PRIMER_MATCHED' and len(row) >= 13:
+                    event_dict.update({
+                        'candidate_match_id': row[5],
+                        'match_type': row[6],
+                        'forward_primer': row[7],
+                        'reverse_primer': row[8],
+                        'forward_distance': row[9],
+                        'reverse_distance': row[10],
+                        'pool': row[11],
+                        'orientation_used': row[12]
+                    })
+                elif event_dict['event_type'] == 'BARCODE_MATCHED' and len(row) >= 13:
+                    event_dict.update({
+                        'candidate_match_id': row[5],
+                        'match_type': row[6],
+                        'forward_barcode': row[7],
+                        'reverse_barcode': row[8],
+                        'forward_distance': row[9],
+                        'reverse_distance': row[10],
+                        'forward_primer': row[11],
+                        'reverse_primer': row[12]
+                    })
+                elif event_dict['event_type'] == 'MATCH_SCORED' and len(row) >= 14:
+                    event_dict.update({
+                        'candidate_match_id': row[5],
+                        'forward_primer': row[6],
+                        'reverse_primer': row[7],
+                        'forward_barcode': row[8],
+                        'reverse_barcode': row[9],
+                        'total_edit_distance': row[10],
+                        'barcode_presence': row[11],
+                        'score': row[12]
+                    })
                 
                 sequence_id = event_dict['sequence_id']
                 sequence_events[sequence_id].append(event_dict)
@@ -207,10 +240,10 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
                 final_primer_pair = 'none-none'  # Use 'none' not 'unknown'
                 final_match_type = 'ambiguous'  # No primers = ambiguous outcome
         
-        # Fix primer naming: convert 'unknown' to 'none' in primer names
+        # Fix primer naming: convert 'none' to 'unknown' to match original stats format
         if final_primer_pair != 'none-none':
-            # Replace 'unknown' with 'none' in primer pair names
-            final_primer_pair = final_primer_pair.replace('unknown', 'none')
+            # Replace 'none' with 'unknown' in primer pair names to match legacy format
+            final_primer_pair = final_primer_pair.replace('none', 'unknown')
         
         # Count match attempts - use ambiguity info to estimate total locations
         ambiguity_candidate_count = 1  # Default to 1 if no ambiguity
@@ -222,25 +255,67 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
                     ambiguity_candidate_count = 1
                 break
         
-        stats[('match_attempts',)] += ambiguity_candidate_count
+        # Count actual candidate matches from PRIMER_MATCHED events
+        candidate_matches = []
+        for event in events:
+            if event['event_type'] == 'PRIMER_MATCHED':
+                candidate_matches.append(event)
         
-        # Count primer pair matches (this represents match attempts/locations)  
-        # Use candidate count to approximate the multiple locations
-        if final_primer_pair != 'none-none':
-            stats[('primer_pair_match', final_pool, final_primer_pair)] += ambiguity_candidate_count
-        
-        # Determine barcode combination
-        if forward_barcode != 'none' and reverse_barcode != 'none':
-            barcode_combo = 'both_barcodes'
-        elif forward_barcode != 'none':
-            barcode_combo = 'forward_only'
-        elif reverse_barcode != 'none':
-            barcode_combo = 'reverse_only'
+        # Count match attempts and primer pair matches based on actual candidate matches
+        if candidate_matches:
+            stats[('match_attempts',)] += len(candidate_matches)
+            
+            # Count primer pair matches by actual candidate matches (locations)
+            for match_event in candidate_matches:
+                match_pool = match_event.get('pool', 'unknown')
+                forward_primer = match_event.get('forward_primer', 'none')
+                reverse_primer = match_event.get('reverse_primer', 'none')
+                match_primer_pair = f"{forward_primer}-{reverse_primer}"
+                stats[('primer_pair_match', match_pool, match_primer_pair)] += 1
         else:
-            barcode_combo = 'no_barcodes'
+            # No primer matches found - count as unknown-unknown (1 attempt per sequence, not amplified)
+            stats[('match_attempts',)] += 1
+            stats[('primer_pair_match', 'unknown', 'unknown-unknown')] += 1
         
-        # Count barcode combinations (using candidate count for locations)
-        stats[('barcode_combination', final_pool, final_primer_pair, barcode_combo)] += ambiguity_candidate_count
+        # Count barcode combinations by actual candidate matches using BARCODE_MATCHED events
+        if candidate_matches:
+            # Use BARCODE_MATCHED events for accurate barcode statistics per candidate match
+            # Now there's one BARCODE_MATCHED event per candidate_match_id with complete barcode info
+            candidate_barcode_events = {}  # candidate_match_id -> barcode event
+            for event in events:
+                if event['event_type'] == 'BARCODE_MATCHED':
+                    candidate_id = event.get('candidate_match_id')
+                    if candidate_id:
+                        candidate_barcode_events[candidate_id] = event
+            
+            # Count barcode combinations for each candidate match
+            for match_event in candidate_matches:
+                match_pool = match_event.get('pool', 'unknown')
+                forward_primer = match_event.get('forward_primer', 'unknown')
+                reverse_primer = match_event.get('reverse_primer', 'unknown')
+                match_primer_pair = f"{forward_primer}-{reverse_primer}"
+                
+                # Find corresponding barcode event for this candidate match
+                candidate_id = match_event.get('candidate_match_id')
+                barcode_event = candidate_barcode_events.get(candidate_id, {})
+                
+                # Get barcode combination from the BARCODE_MATCHED event's match_type field
+                barcode_match_type = barcode_event.get('match_type', 'none')
+                
+                # Convert to the barcode_combination format
+                if barcode_match_type == 'both':
+                    barcode_combo = 'both_barcodes'
+                elif barcode_match_type == 'forward_only':
+                    barcode_combo = 'forward_only'
+                elif barcode_match_type == 'reverse_only':
+                    barcode_combo = 'reverse_only'
+                else:
+                    barcode_combo = 'no_barcodes'
+                
+                stats[('barcode_combination', match_pool, match_primer_pair, barcode_combo)] += 1
+        else:
+            # No primer matches found - count as no_barcodes for unknown-unknown (1 per sequence, not amplified)
+            stats[('barcode_combination', 'unknown', 'unknown-unknown', 'no_barcodes')] += 1
         
         # Determine ambiguity type from AMBIGUITY_DETECTED events
         ambiguity_type = 'none'
