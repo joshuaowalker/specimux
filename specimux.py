@@ -951,15 +951,29 @@ class TraceLogger:
     def close(self):
         """Flush buffer and close file."""
         if self.enabled and self.file_handle:
-            self._flush_buffer()
-            self.file_handle.close()
+            try:
+                # Always flush any remaining events in buffer
+                if self.buffer:
+                    self._flush_buffer()
+                self.file_handle.flush()
+                self.file_handle.close()
+                self.file_handle = None
+                logging.debug(f"Trace logger {self.worker_id} closed successfully")
+            except Exception as e:
+                logging.error(f"Error closing trace logger {self.worker_id}: {e}")
     
     def _flush_buffer(self):
         """Write buffered events to file."""
-        if self.buffer and self.file_handle:
-            self.writer.writerows(self.buffer)
-            self.file_handle.flush()
-            self.buffer = []
+        if self.file_handle and self.buffer:
+            try:
+                buffer_size = len(self.buffer)
+                self.writer.writerows(self.buffer)
+                self.file_handle.flush()
+                self.buffer = []
+                if buffer_size > 0:
+                    logging.debug(f"Trace logger {self.worker_id} flushed {buffer_size} events")
+            except Exception as e:
+                logging.error(f"Error flushing trace logger {self.worker_id}: {e}")
     
     def _log_event(self, sequence_id: str, event_type: str, *fields):
         """Log a trace event."""
@@ -1774,6 +1788,38 @@ def choose_best_match(matches: List[SequenceMatch],
             score = 2
         elif m.p1_match or m.p2_match:
             score = 1
+        
+        # Log match scoring
+        if trace_logger:
+            p1_name = m.get_p1().name if m.get_p1() else 'none'
+            p2_name = m.get_p2().name if m.get_p2() else 'none'
+            b1_name = m.best_b1()[0] if m.best_b1() else 'none'
+            b2_name = m.best_b2()[0] if m.best_b2() else 'none'
+            
+            # Calculate total edit distance
+            total_distance = 0
+            if m.p1_match:
+                total_distance += m.p1_match.distance()
+            if m.p2_match:
+                total_distance += m.p2_match.distance()
+            if m.has_b1_match():
+                total_distance += m.b1_distance()
+            if m.has_b2_match():
+                total_distance += m.b2_distance()
+                
+            # Determine barcode presence
+            if m.has_b1_match() and m.has_b2_match():
+                barcode_presence = 'both'
+            elif m.has_b1_match():
+                barcode_presence = 'forward_only'
+            elif m.has_b2_match():
+                barcode_presence = 'reverse_only'
+            else:
+                barcode_presence = 'none'
+                
+            trace_logger.log_match_scored(sequence_id, p1_name, p2_name, b1_name, b2_name,
+                                        total_distance, barcode_presence, float(score))
+        
         scored_matches.append((score, m))
     
     # Sort by score (descending)
@@ -2005,25 +2051,51 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
             if orientation in [Orientation.FORWARD, Orientation.UNKNOWN]:
                 match = SequenceMatch(seq, specimens.b_length())
                 match_one_end(prefilter, match, parameters, rs, True, fwd_primer,
-                              Primer.FWD, Barcode.B1)
+                              Primer.FWD, Barcode.B1, trace_logger, sequence_id)
                 match_one_end(prefilter, match, parameters, s, False, rev_primer,
-                              Primer.REV, Barcode.B2)
+                              Primer.REV, Barcode.B2, trace_logger, sequence_id)
                 # Set initial pool based on primers
                 pool = get_pool_from_primers(match.get_p1(), match.get_p2())
                 if pool:
                     match.set_pool(pool)
+                
+                # Log primer match result if we found primers
+                if trace_logger and (match.p1_match or match.p2_match):
+                    match_type = 'both' if match.p1_match and match.p2_match else \
+                                 'forward_only' if match.p1_match else 'reverse_only'
+                    p1_name = match.get_p1().name if match.get_p1() else 'none'
+                    p2_name = match.get_p2().name if match.get_p2() else 'none'
+                    p1_dist = match.p1_match.distance() if match.p1_match else -1
+                    p2_dist = match.p2_match.distance() if match.p2_match else -1
+                    orientation_used = 'as_is' if orientation in [Orientation.FORWARD, Orientation.UNKNOWN] else 'reverse_complement'
+                    trace_logger.log_primer_matched(sequence_id, match_type, p1_name, p2_name,
+                                                   p1_dist, p2_dist, pool or 'unknown', orientation_used)
+                    
                 matches.append(match)
 
             if orientation in [Orientation.REVERSE, Orientation.UNKNOWN]:
                 match = SequenceMatch(rseq, specimens.b_length())
                 match_one_end(prefilter, match, parameters, s, True, fwd_primer,
-                              Primer.FWD, Barcode.B1)
+                              Primer.FWD, Barcode.B1, trace_logger, sequence_id)
                 match_one_end(prefilter, match, parameters, rs, False, rev_primer,
-                              Primer.REV, Barcode.B2)
+                              Primer.REV, Barcode.B2, trace_logger, sequence_id)
                 # Set initial pool based on primers
                 pool = get_pool_from_primers(match.get_p1(), match.get_p2())
                 if pool:
                     match.set_pool(pool)
+                
+                # Log primer match result if we found primers 
+                if trace_logger and (match.p1_match or match.p2_match):
+                    match_type = 'both' if match.p1_match and match.p2_match else \
+                                 'forward_only' if match.p1_match else 'reverse_only'
+                    p1_name = match.get_p1().name if match.get_p1() else 'none'
+                    p2_name = match.get_p2().name if match.get_p2() else 'none'
+                    p1_dist = match.p1_match.distance() if match.p1_match else -1
+                    p2_dist = match.p2_match.distance() if match.p2_match else -1
+                    orientation_used = 'reverse_complement'
+                    trace_logger.log_primer_matched(sequence_id, match_type, p1_name, p2_name,
+                                                   p1_dist, p2_dist, pool or 'unknown', orientation_used)
+                    
                 matches.append(match)
     
     # TODO: Consider whether primer pairs that match almost exactly the same extent 
@@ -2033,21 +2105,41 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
 
 def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters: MatchParameters, sequence: str,
                   reversed_sequence: bool, primer_info: PrimerInfo,
-                  which_primer: Primer, which_barcode: Barcode) -> None:
+                  which_primer: Primer, which_barcode: Barcode,
+                  trace_logger: Optional[TraceLogger] = None,
+                  sequence_id: Optional[str] = None) -> None:
     """Match primers and barcodes at one end of the sequence."""
 
     primer = primer_info.primer
     primer_rc = primer_info.primer_rc
+    search_start = len(sequence) - parameters.search_len
+    search_end = len(sequence)
+    
+    # Log primer search attempt
+    if trace_logger:
+        primer_direction = 'forward' if which_primer == Primer.FWD else 'reverse'
+        trace_logger.log_primer_search(sequence_id, primer_info.name, primer_direction,
+                                      search_start, search_end, False, -1, -1)
 
     primer_match = align_seq(primer_rc, sequence, parameters.max_dist_primers[primer],
-                             len(sequence) - parameters.search_len, len(sequence))
+                             search_start, search_end)
 
     # If we found matching primers, look for corresponding barcodes
     if primer_match.matched():
         match.set_primer_match(primer_match, primer_info, reversed_sequence, which_primer)
+        
+        # Log successful primer match
+        if trace_logger:
+            primer_direction = 'forward' if which_primer == Primer.FWD else 'reverse'
+            match_pos = primer_match.location()[0] if primer_match.location() else -1
+            trace_logger.log_primer_search(sequence_id, primer_info.name, primer_direction,
+                                          search_start, search_end, True, primer_match.distance(), match_pos)
 
         # Get relevant barcodes for this primer pair
         barcodes = primer_info.barcodes
+        best_barcode_match = None
+        best_barcode_distance = None
+        best_barcode_name = None
 
         for b in barcodes:
             b_rc = reverse_complement(b)
@@ -2055,19 +2147,64 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
             bm = None
             bc = None
             for l in primer_match.locations():
-                target_seq = sequence[l[1] + 1:]
+                barcode_search_start = l[1] + 1
+                barcode_search_end = len(sequence)
+                target_seq = sequence[barcode_search_start:]
+                
+                # Log barcode search attempt 
+                if trace_logger:
+                    barcode_type = 'forward' if which_barcode == Barcode.B1 else 'reverse'
+                    trace_logger.log_barcode_search(sequence_id, b, barcode_type, primer_info.name,
+                                                   barcode_search_start, barcode_search_end, False, -1, -1)
+                
                 if not prefilter.match(b_rc, target_seq):
                     continue
 
                 barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
-                                          l[1] + 1, len(sequence), AlignMode.PREFIX)
+                                          barcode_search_start, barcode_search_end, AlignMode.PREFIX)
                 if barcode_match.matched():
+                    # Log successful barcode search
+                    if trace_logger:
+                        barcode_type = 'forward' if which_barcode == Barcode.B1 else 'reverse'
+                        match_pos = barcode_match.location()[0] if barcode_match.location() else -1
+                        trace_logger.log_barcode_search(sequence_id, b, barcode_type, primer_info.name,
+                                                       barcode_search_start, barcode_search_end, True, 
+                                                       barcode_match.distance(), match_pos)
+                    
                     if bd is None or barcode_match.distance() < bd:
                         bm = barcode_match
                         bd = barcode_match.distance()
                         bc = b
+                        
             if bm:
                 match.add_barcode_match(bm, bc, reversed_sequence, which_barcode)
+                if best_barcode_distance is None or bd < best_barcode_distance:
+                    best_barcode_match = bm
+                    best_barcode_distance = bd
+                    best_barcode_name = bc
+        
+        # Log barcode match result for this primer
+        if trace_logger:
+            barcode_type = 'forward' if which_barcode == Barcode.B1 else 'reverse'
+            if best_barcode_name:
+                match_type = f"{barcode_type}_only"
+                trace_logger.log_barcode_matched(sequence_id, match_type, 
+                                               best_barcode_name if which_barcode == Barcode.B1 else 'none',
+                                               best_barcode_name if which_barcode == Barcode.B2 else 'none',
+                                               best_barcode_distance if which_barcode == Barcode.B1 else -1,
+                                               best_barcode_distance if which_barcode == Barcode.B2 else -1,
+                                               primer_info.name if which_primer == Primer.FWD else 'none',
+                                               primer_info.name if which_primer == Primer.REV else 'none')
+            else:
+                trace_logger.log_barcode_matched(sequence_id, 'none', 'none', 'none', -1, -1,
+                                               primer_info.name if which_primer == Primer.FWD else 'none', 
+                                               primer_info.name if which_primer == Primer.REV else 'none')
+    else:
+        # Log failed primer search  
+        if trace_logger:
+            primer_direction = 'forward' if which_primer == Primer.FWD else 'reverse'
+            trace_logger.log_primer_search(sequence_id, primer_info.name, primer_direction,
+                                          search_start, search_end, False, -1, -1)
 
 def output_write_operation(write_op: WriteOperation,
                            output_manager: OutputManager,
@@ -2231,10 +2368,30 @@ def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespac
                 start_timestamp=start_timestamp
             )
             _trace_logger.__enter__()
+        
+        # Note: TraceLogger buffers are flushed after each work batch, similar to OutputManager
 
     except Exception as e:
         logging.error(f"Failed to initialize worker: {e}")
         raise
+
+def cleanup_worker():
+    """Clean up worker resources on error."""
+    global _output_manager, _trace_logger
+    
+    if _output_manager is not None:
+        try:
+            logging.debug("Worker cleaning up output manager")
+            _output_manager.__exit__(None, None, None)
+        except Exception as e:
+            logging.error(f"Error cleaning up worker output manager: {e}")
+    
+    if _trace_logger is not None:
+        try:
+            logging.debug("Worker cleaning up trace logger")
+            _trace_logger.close()
+        except Exception as e:
+            logging.error(f"Error cleaning up worker trace logger: {e}")
 
 def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
     """Process a batch of sequences and write results directly"""
@@ -2254,6 +2411,10 @@ def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
             except Exception as e:
                 logging.error(f"Error writing output: {e}")
                 raise
+        
+        # Flush trace logger buffer after each batch (same pattern as OutputManager)
+        if _trace_logger is not None:
+            _trace_logger._flush_buffer()
 
         # Return unified_stats for aggregation in main process
         return unified_stats
@@ -2261,12 +2422,7 @@ def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
     except Exception as e:
         logging.error(traceback.format_exc())
         # On error, try to clean up immediately rather than waiting for atexit
-        if _output_manager is not None:
-            try:
-                logging.debug("Worker cleaning up output manager")
-                _output_manager.__exit__(None, None, None)
-            except Exception as e:
-                logging.error(f"Error cleaning up worker output manager: {e}")
+        cleanup_worker()
         raise WorkerException(e)
 
 def barcodes_for_bloom_prefilter(specimens):
