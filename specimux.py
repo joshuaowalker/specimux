@@ -102,23 +102,51 @@ class AmbiguityStrategy:
     ALL = "all"
     DIAGNOSTIC = "diagnostic"
 
-class MatchCode:
-    SHORT_SEQ = "1A: Sequence Too Short"
-    LONG_SEQ = "1B: Sequence Too Long"
-    NO_PRIMERS = "2C: No Primer Matches"
-    NO_FWD_PRIMER = "2A: No Forward Primer Matches"
-    NO_REV_PRIMER = "2B: No Reverse Primer Matches"
-    NO_BARCODES = "3E: No Barcode Matches"
-    NO_FWD_BARCODE = "3A: No Forward Barcode Matches"
-    FWD_BARCODE_TRUNCATED = "3B: No Forward Barcode Matches (May be truncated)"
-    NO_REV_BARCODE = "3C: No Reverse Barcode Matches"
-    REV_BARCODE_TRUNCATED = "3D: No Reverse Barcode Matches (May be truncated)"
-    MULTIPLE_PRIMER_PAIRS_MATCHED = "4: Multiple Primer/Orientation Full Matches"
-    AMBIGUOUS_BARCODES = "5C: Multiple Matches for Both Barcodes"
-    AMBIGUOUS_FWD_BARCODE = "5A: Multiple Matches for Forward Barcode"
-    AMBIGUOUS_REV_BARCODE = "5B: Multiple Matches for Reverse Barcode"
-    UNKNOWN_COMBINATION = "5D: No Specimen for Barcodes"
-    MATCHED = " 6: Matched"
+
+class StatsKeys:
+    """Constants for unified statistics keys to avoid hardcoded strings."""
+    
+    # Top-level categories
+    SEQUENCE_PROCESSED = ('sequence_processed',)
+    ORIENTATION = 'orientation'
+    OUTCOME = 'outcome'
+    BARCODE_COMBINATION = 'barcode_combination'
+    AMBIGUITY_TYPE = 'ambiguity_type'
+    PRIMER_PAIR_MATCH = 'primer_pair_match'
+    SELECTION_OUTCOME = 'selection_outcome'
+    AMBIGUITY_STRATEGY_APPLIED = 'ambiguity_strategy_applied'
+    AMBIGUOUS_DISCARDED = ('ambiguous_discarded',)
+    RETAINED_MATCHES = ('retained_matches',)
+    
+    # Outcome types
+    MATCHED = 'matched'
+    PARTIAL = 'partial'
+    AMBIGUOUS = 'ambiguous'
+    UNKNOWN = 'unknown'
+    
+    # Orientation types
+    FORWARD = 'forward'
+    REVERSE = 'reverse'
+    ORIENTATION_UNKNOWN = 'unknown'
+    
+    # Barcode combinations
+    BOTH_BARCODES = 'both_barcodes'
+    FORWARD_ONLY = 'forward_only'
+    REVERSE_ONLY = 'reverse_only'
+    NO_BARCODES = 'no_barcodes'
+    
+    # Selection outcomes
+    UNIQUE = 'unique'
+    NONE = 'none'
+    
+    # Ambiguity types
+    NO_AMBIGUITY = 'none'
+    CROSS_POOL = 'cross_pool'
+    SAME_POOL_DIFFERENT_PRIMERS = 'same_pool_different_primers'
+    SAME_PRIMERS_DIFFERENT_BARCODES = 'same_primers_different_barcodes'
+    IDENTICAL_MATCHES = 'identical_matches'
+    NO_MATCHES = 'no_matches'
+
 
 class Barcode(Enum):
     B1 = 1
@@ -624,7 +652,7 @@ class MatchSelection:
     equivalent_matches: List['SequenceMatch']  # All matches with the best score
     best_score: int                           # Score of the equivalent matches
     is_ambiguous: bool                       # True if multiple equivalent matches exist
-    ambiguity_type: str                      # Type of ambiguity for better classification
+    ambiguity_type: str                      # Type of ambiguity for statistics tracking
     
     def get_first_match(self) -> 'SequenceMatch':
         """Get the first match for backward compatibility. This selection is arbitrary."""
@@ -1331,7 +1359,7 @@ def process_sequences(seq_records: List[SeqRecord],
 
     for seq in seq_records:
         # Track in unified stats
-        stats[('sequence_processed',)] += 1
+        stats[StatsKeys.SEQUENCE_PROCESSED] += 1
         
         sample_id = SampleId.UNKNOWN
         pool = None
@@ -1341,10 +1369,8 @@ def process_sequences(seq_records: List[SeqRecord],
 
         if args.min_length != -1 and len(seq) < args.min_length:
             stats[('filtered', 'too_short')] += 1
-            classification = MatchCode.SHORT_SEQ
         elif args.max_length != -1 and len(seq) > args.max_length:
             stats[('filtered', 'too_long')] += 1
-            classification = MatchCode.LONG_SEQ
         else:
             rseq = seq.reverse_complement()
             rseq.id = seq.id
@@ -1356,15 +1382,15 @@ def process_sequences(seq_records: List[SeqRecord],
                                                   specimens.get_primers(Primer.FWD),
                                                   specimens.get_primers(Primer.REV))
                 if orientation == Orientation.FORWARD:
-                    stats[('orientation', 'forward')] += 1
+                    stats[(StatsKeys.ORIENTATION, StatsKeys.FORWARD)] += 1
                 elif orientation == Orientation.REVERSE:
-                    stats[('orientation', 'reverse')] += 1
+                    stats[(StatsKeys.ORIENTATION, StatsKeys.REVERSE)] += 1
                 else:
                     # Orientation could not be determined clearly
-                    stats[('orientation', 'unknown')] += 1
+                    stats[(StatsKeys.ORIENTATION, StatsKeys.ORIENTATION_UNKNOWN)] += 1
             else:
                 # When not pre-orienting, sequences are processed as-is (forward)
-                stats[('orientation', 'forward')] += 1
+                stats[(StatsKeys.ORIENTATION, StatsKeys.FORWARD)] += 1
 
             matches = match_sequence(prefilter, parameters, seq, rseq, specimens)
             stats[('match_attempts',)] += len(matches)
@@ -1379,22 +1405,22 @@ def process_sequences(seq_records: List[SeqRecord],
                 p2_name = m.get_p2().name if m.get_p2() else 'unknown'
                 primer_key = f"{p1_name}-{p2_name}"
                 pool_name = m.get_pool() or 'unknown'
-                stats[('primer_pair_match', pool_name, primer_key)] += 1
+                stats[(StatsKeys.PRIMER_PAIR_MATCH, pool_name, primer_key)] += 1
                 
                 # Track barcode match combinations for this primer pair
                 has_b1 = m.has_b1_match()
                 has_b2 = m.has_b2_match()
                 
                 if has_b1 and has_b2:
-                    barcode_combo = 'both_barcodes'
+                    barcode_combo = StatsKeys.BOTH_BARCODES
                 elif has_b1:
-                    barcode_combo = 'forward_only'
+                    barcode_combo = StatsKeys.FORWARD_ONLY
                 elif has_b2:
-                    barcode_combo = 'reverse_only'
+                    barcode_combo = StatsKeys.REVERSE_ONLY
                 else:
-                    barcode_combo = 'no_barcodes'
+                    barcode_combo = StatsKeys.NO_BARCODES
                     
-                stats[('barcode_combination', pool_name, primer_key, barcode_combo)] += 1
+                stats[(StatsKeys.BARCODE_COMBINATION, pool_name, primer_key, barcode_combo)] += 1
             
             # Track all matches including partial primer matches
             all_matches_with_primers = [m for m in matches if m.p1_match or m.p2_match]
@@ -1413,15 +1439,15 @@ def process_sequences(seq_records: List[SeqRecord],
                 has_b2 = m.has_b2_match()
                 
                 if has_b1 and has_b2:
-                    barcode_combo = 'both_barcodes'
+                    barcode_combo = StatsKeys.BOTH_BARCODES
                 elif has_b1:
-                    barcode_combo = 'forward_only'
+                    barcode_combo = StatsKeys.FORWARD_ONLY
                 elif has_b2:
-                    barcode_combo = 'reverse_only'
+                    barcode_combo = StatsKeys.REVERSE_ONLY
                 else:
-                    barcode_combo = 'no_barcodes'
+                    barcode_combo = StatsKeys.NO_BARCODES
                     
-                stats[('barcode_combination', pool_name, primer_key, barcode_combo)] += 1
+                stats[(StatsKeys.BARCODE_COMBINATION, pool_name, primer_key, barcode_combo)] += 1
             
             # Track primer failures if no primers found at all
             if not all_matches_with_primers:
@@ -1432,43 +1458,39 @@ def process_sequences(seq_records: List[SeqRecord],
                 match_result = choose_best_match(matches)
                 
                 # Track selection outcomes in unified stats
-                stats[('ambiguity_type', match_result.ambiguity_type)] += 1
+                stats[(StatsKeys.AMBIGUITY_TYPE, match_result.ambiguity_type)] += 1
                 if match_result.is_ambiguous:
-                    stats[('selection_outcome', 'ambiguous')] += 1
+                    stats[(StatsKeys.SELECTION_OUTCOME, StatsKeys.AMBIGUOUS)] += 1
                     # Track ambiguity strategy application
-                    stats[('ambiguity_strategy_applied', args.ambiguity_strategy)] += 1
+                    stats[(StatsKeys.AMBIGUITY_STRATEGY_APPLIED, args.ambiguity_strategy)] += 1
                 else:
-                    stats[('selection_outcome', 'unique')] += 1
+                    stats[(StatsKeys.SELECTION_OUTCOME, StatsKeys.UNIQUE)] += 1
                 
                 # Apply ambiguity strategy
                 if match_result.is_ambiguous and args.ambiguity_strategy == AmbiguityStrategy.STRICT:
                     # Skip this sequence entirely for strict strategy
-                    stats[('ambiguous_discarded',)] += 1
+                    stats[StatsKeys.AMBIGUOUS_DISCARDED] += 1
                     continue
                 
                 # Use first equivalent match for processing (first strategy or non-ambiguous)
                 match = match_result.get_first_match()
                 
                 if match_result.is_ambiguous:
-                    classification = MatchCode.MULTIPLE_PRIMER_PAIRS_MATCHED
                     sample_id = SampleId.AMBIGUOUS
                 else:
                     sample_id, pool = match_sample(match, sample_id, specimens)
-                    classification = classify_match(match, sample_id, specimens)
                     if pool:
                         match.set_pool(pool)  # Set the pool in the match object for output
 
                 sample_id = group_sample(match, sample_id)
             else:
                 # No matches found
-                stats[('ambiguity_type', 'no_matches')] += 1
-                stats[('selection_outcome', 'none')] += 1
-                classification = MatchCode.NO_PRIMERS_FOUND
-                sample_id = SampleId.NO_PRIMERS
+                stats[(StatsKeys.AMBIGUITY_TYPE, StatsKeys.NO_MATCHES)] += 1
+                stats[(StatsKeys.SELECTION_OUTCOME, StatsKeys.NONE)] += 1
+                sample_id = SampleId.UNKNOWN
 
-        stats[('classification', classification)] += 1
         if args.debug:
-            logging.debug(f"{classification}")
+            logging.debug(f"Sample ID: {sample_id}")
 
         # Create write operations (use match_result if available, otherwise basic match)
         if match_result is not None:
@@ -1478,7 +1500,7 @@ def process_sequences(seq_records: List[SeqRecord],
             new_ops = [create_write_operation(sample_id, args, seq, match)]
         
         # Track retained matches in unified stats
-        stats[('retained_matches',)] += len(new_ops)
+        stats[StatsKeys.RETAINED_MATCHES] += len(new_ops)
         
         write_ops.extend(new_ops)
         
@@ -1487,65 +1509,23 @@ def process_sequences(seq_records: List[SeqRecord],
         pool_name = primary_op.primer_pool
         primer_pair = f"{primary_op.p1_name}-{primary_op.p2_name}"
         
-        if classification == MatchCode.MATCHED:
-            match_type = 'matched'
+        if sample_id not in [SampleId.AMBIGUOUS, SampleId.UNKNOWN] and not sample_id.startswith(SampleId.PREFIX_FWD_MATCH) and not sample_id.startswith(SampleId.PREFIX_REV_MATCH):
+            match_type = StatsKeys.MATCHED
         elif sample_id == SampleId.AMBIGUOUS:
-            match_type = 'ambiguous'
+            match_type = StatsKeys.AMBIGUOUS
         elif sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or sample_id.startswith(SampleId.PREFIX_REV_MATCH):
-            match_type = 'partial'
+            match_type = StatsKeys.PARTIAL
         else:
-            match_type = 'unknown'
+            match_type = StatsKeys.UNKNOWN
         
-        stats[('outcome', pool_name, primer_pair, match_type)] += 1
+        stats[(StatsKeys.OUTCOME, pool_name, primer_pair, match_type)] += 1
 
     return write_ops, stats
 
 
-def classify_match(match: SequenceMatch, sample_id: str, specimens: Specimens) -> str:
-    if sample_id == SampleId.UNKNOWN:
-        if not match.p1_match and not match.p2_match:
-            classification = MatchCode.NO_PRIMERS
-        elif not match.has_b2_match() and match.has_b1_match():
-            if match.p2_match:
-                if (match.sequence_length - match.p2_match.location()[1]) < (specimens.b_length()):
-                    classification = MatchCode.REV_BARCODE_TRUNCATED
-                else:
-                    classification = MatchCode.NO_REV_BARCODE
-            else:
-                classification = MatchCode.NO_REV_PRIMER
-        elif not match.has_b1_match() and match.has_b2_match():
-            if match.p1_match:
-                if (match.p1_match.location()[0] - 1) < (specimens.b_length()):
-                    classification = MatchCode.FWD_BARCODE_TRUNCATED
-                else:
-                    classification = MatchCode.NO_FWD_BARCODE
-            else:
-                classification = MatchCode.NO_FWD_PRIMER
-        elif not match.p2_match:
-            classification = MatchCode.NO_REV_PRIMER
-        elif not match.p1_match:
-            classification = MatchCode.NO_FWD_PRIMER
-        elif not match.has_b1_match() and not match.has_b2_match():
-            classification = MatchCode.NO_BARCODES
-        else:
-            classification = MatchCode.UNKNOWN_COMBINATION
-    elif sample_id == SampleId.AMBIGUOUS:
-        if len(match.best_b1()) > 1 and len(match.best_b2()) > 1:
-            classification = MatchCode.AMBIGUOUS_BARCODES
-        elif len(match.best_b1()) > 1:
-            classification = MatchCode.AMBIGUOUS_FWD_BARCODE
-        elif len(match.best_b2()) > 1:
-            classification = MatchCode.AMBIGUOUS_REV_BARCODE
-        else:
-            raise RuntimeError(f"Unexpected ambiguous sample state: "
-                               f"b1_matches={len(match.best_b1())}, "
-                               f"b2_matches={len(match.best_b2())}")
-    else:
-        classification = MatchCode.MATCHED
-    return str(classification)
 
 def choose_best_match(matches: List[SequenceMatch]) -> MatchSelection:
-    """Select all equivalent best matches with improved ambiguity classification"""
+    """Select all equivalent best matches and analyze ambiguity type"""
     if not matches:
         raise ValueError("No matches provided to choose_best_match")
 
@@ -1576,17 +1556,17 @@ def choose_best_match(matches: List[SequenceMatch]) -> MatchSelection:
     is_ambiguous = len(equivalent_matches) > 1
     
     if not is_ambiguous:
-        ambiguity_type = "none"
+        ambiguity_type = StatsKeys.NO_AMBIGUITY
         # Set pool on the single match
         equivalent_matches[0].set_pool(equivalent_matches[0].get_pool())
     else:
-        # Analyze the type of ambiguity for better classification
+        # Analyze the type of ambiguity for unified statistics tracking
         pools = [m.get_pool() for m in equivalent_matches]
         unique_pools = set(pools)
         
         if len(unique_pools) > 1:
             # Matches across different pools - potential contamination
-            ambiguity_type = "cross_pool"
+            ambiguity_type = StatsKeys.CROSS_POOL
             # Set pool to "unknown" for cross-pool matches
             for match in equivalent_matches:
                 match.set_pool("unknown")
@@ -1600,16 +1580,16 @@ def choose_best_match(matches: List[SequenceMatch]) -> MatchSelection:
                           for m in equivalent_matches}
             
             if len(primer_pairs) > 1:
-                ambiguity_type = "same_pool_different_primers"
+                ambiguity_type = StatsKeys.SAME_POOL_DIFFERENT_PRIMERS
             else:
                 # Same primer pairs - check barcodes
                 barcode_combos = {(tuple(m.best_b1()), tuple(m.best_b2())) 
                                 for m in equivalent_matches}
                 if len(barcode_combos) > 1:
-                    ambiguity_type = "same_primers_different_barcodes"
+                    ambiguity_type = StatsKeys.SAME_PRIMERS_DIFFERENT_BARCODES
                 else:
                     # This shouldn't happen - identical matches
-                    ambiguity_type = "identical_matches"
+                    ambiguity_type = StatsKeys.IDENTICAL_MATCHES
             
             # Set consistent pool for same-pool matches
             for match in equivalent_matches:
@@ -2202,14 +2182,12 @@ def specimux_mp(args):
 
                 # Update progress - count sequences processed in this batch
                 batch_size = sum(v for k, v in batch_unified_stats.items() 
-                               if k == ('sequence_processed',))
+                               if k == StatsKeys.SEQUENCE_PROCESSED)
                 pbar.update(batch_size)
 
-                # Update progress description using unified stats
-                total_processed = unified_stats.get(('sequence_processed',), 0)
-                matched = sum(v for k, v in unified_stats.items() 
-                            if k[0] == 'classification' and k[1] == MatchCode.MATCHED)
-                match_rate = matched / total_processed if total_processed > 0 else 0
+                # Update progress description using unified stats with efficient aggregates
+                aggregates = compute_aggregate_stats(unified_stats)
+                match_rate = aggregates['match_rate']
                 pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
 
             pbar.close()
@@ -2396,10 +2374,8 @@ def specimux(args):
             pbar.update(batch_size)
 
             # Update progress bar description with match rate from unified stats
-            total_processed = unified_stats.get(('sequence_processed',), 0)
-            matched = sum(v for k, v in unified_stats.items() 
-                        if k[0] == 'classification' and k[1] == MatchCode.MATCHED)
-            match_rate = matched / total_processed if total_processed > 0 else 0
+            aggregates = compute_aggregate_stats(unified_stats)
+            match_rate = aggregates['match_rate']
             pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
 
         pbar.close()
@@ -2447,6 +2423,125 @@ def cleanup_empty_directories(output_dir: str):
         if len(removed_dirs) > 10:
             logging.debug(f"  ... and {len(removed_dirs) - 10} more")
 
+
+def compute_aggregate_stats(unified_stats):
+    """Compute commonly used aggregate statistics from unified stats.
+    
+    Args:
+        unified_stats: Counter with unified statistics
+        
+    Returns:
+        Dict containing pre-computed aggregate statistics for efficient access
+    """
+    aggregates = {}
+    
+    # Total sequences
+    aggregates['total_sequences'] = unified_stats.get(StatsKeys.SEQUENCE_PROCESSED, 0)
+    
+    # Outcome totals - efficiently compute all at once
+    outcome_totals = {
+        StatsKeys.MATCHED: 0,
+        StatsKeys.PARTIAL: 0,
+        StatsKeys.AMBIGUOUS: 0,
+        StatsKeys.UNKNOWN: 0
+    }
+    
+    for key, count in unified_stats.items():
+        if len(key) >= 4 and key[0] == StatsKeys.OUTCOME:
+            outcome_type = key[3]
+            if outcome_type in outcome_totals:
+                outcome_totals[outcome_type] += count
+    
+    # Store individual outcome totals
+    for outcome, total in outcome_totals.items():
+        aggregates[f'total_{outcome}'] = total
+    
+    # Orientation totals
+    orientation_totals = {
+        StatsKeys.FORWARD: 0,
+        StatsKeys.REVERSE: 0,
+        StatsKeys.ORIENTATION_UNKNOWN: 0
+    }
+    
+    for key, count in unified_stats.items():
+        if len(key) >= 2 and key[0] == StatsKeys.ORIENTATION:
+            orientation_type = key[1]
+            if orientation_type in orientation_totals:
+                orientation_totals[orientation_type] += count
+    
+    # Store orientation totals
+    for orientation, total in orientation_totals.items():
+        aggregates[f'orientation_{orientation}'] = total
+    
+    # Selection outcome totals
+    selection_totals = {
+        StatsKeys.UNIQUE: 0,
+        StatsKeys.AMBIGUOUS: 0,
+        StatsKeys.NONE: 0
+    }
+    
+    for key, count in unified_stats.items():
+        if len(key) >= 2 and key[0] == StatsKeys.SELECTION_OUTCOME:
+            selection_type = key[1]
+            if selection_type in selection_totals:
+                selection_totals[selection_type] += count
+    
+    # Store selection totals
+    for selection, total in selection_totals.items():
+        aggregates[f'selection_{selection}'] = total
+    
+    # Barcode combination totals
+    barcode_totals = {
+        StatsKeys.BOTH_BARCODES: 0,
+        StatsKeys.FORWARD_ONLY: 0,
+        StatsKeys.REVERSE_ONLY: 0,
+        StatsKeys.NO_BARCODES: 0
+    }
+    
+    for key, count in unified_stats.items():
+        if len(key) >= 4 and key[0] == StatsKeys.BARCODE_COMBINATION:
+            barcode_type = key[3]
+            if barcode_type in barcode_totals:
+                barcode_totals[barcode_type] += count
+    
+    # Store barcode totals
+    for barcode_combo, total in barcode_totals.items():
+        aggregates[f'barcode_{barcode_combo}'] = total
+    
+    # Compute commonly used derived statistics
+    total_sequences = aggregates['total_sequences']
+    total_matched = aggregates['total_matched']
+    
+    if total_sequences > 0:
+        aggregates['match_rate'] = total_matched / total_sequences
+        aggregates['partial_rate'] = aggregates['total_partial'] / total_sequences
+        aggregates['ambiguous_rate'] = aggregates['total_ambiguous'] / total_sequences
+        aggregates['unknown_rate'] = aggregates['total_unknown'] / total_sequences
+    else:
+        aggregates['match_rate'] = 0.0
+        aggregates['partial_rate'] = 0.0
+        aggregates['ambiguous_rate'] = 0.0
+        aggregates['unknown_rate'] = 0.0
+    
+    # Primer pair match total
+    aggregates['total_primer_pair_matches'] = sum(
+        count for key, count in unified_stats.items() 
+        if len(key) >= 3 and key[0] == StatsKeys.PRIMER_PAIR_MATCH
+    )
+    
+    # Amplification factor
+    if total_sequences > 0:
+        aggregates['amplification_factor'] = aggregates['total_primer_pair_matches'] / total_sequences
+    else:
+        aggregates['amplification_factor'] = 0.0
+    
+    # Other special counters
+    aggregates['retained_matches'] = unified_stats.get(StatsKeys.RETAINED_MATCHES, 0)
+    aggregates['ambiguous_discarded'] = unified_stats.get(StatsKeys.AMBIGUOUS_DISCARDED, 0)
+    
+    return aggregates
+
+
 def output_diagnostics(args, unified_stats, elapsed_time=None):
     """Generate diagnostic output from unified stats.
     
@@ -2456,41 +2551,21 @@ def output_diagnostics(args, unified_stats, elapsed_time=None):
         elapsed_time: Processing time in seconds
     """
     
-    # Extract classifications from unified stats
-    classifications = Counter()
-    for key, count in unified_stats.items():
-        if key[0] == 'classification':
-            classifications[key[1]] += count
+    # Compute all aggregate statistics once for efficiency
+    aggregates = compute_aggregate_stats(unified_stats)
+    total = aggregates['total_sequences']
+    matched_count = aggregates['total_matched']
+    match_rate = aggregates['match_rate']
     
-    # Sort the classifications by their counts in descending order
-    sorted_classifications = sorted(
-        classifications.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    # Find the length of the longest classification name for padding
-    max_name_length = max(len(name) for name, _ in sorted_classifications) if sorted_classifications else 1
-    # Determine the width needed for the count column
-    max_count_length = len(str(max(count for _, count in sorted_classifications))) if sorted_classifications else 1
-
-    total = unified_stats.get(('sequence_processed',), 0)
-    
-    # Generate the classification statistics
-    stats_lines = ["Classification Statistics:"]
-    for classification, count in sorted_classifications:
-        stats_line = f"{classification:<{max_name_length}} : {count:>{max_count_length}} ({count / total:2.2%})"
-        stats_lines.append(stats_line)
-        
-    # Log to console if diagnostics flag is set
+    # Log simple summary to console if diagnostics flag is set
     if args.diagnostics:
-        for line in stats_lines:
-            logging.info(line)
+        logging.info("Processing Summary:")
+        logging.info(f"  Total Sequences: {total:,}")
+        logging.info(f"  Successfully Matched: {matched_count:,} ({match_rate:.2%})")
+        logging.info("  For detailed analysis, see visualization output")
     
     # Write to log.txt regardless of diagnostics flag
     log_file_path = os.path.join(args.output_dir, "log.txt")
-    matched_count = classifications.get(MatchCode.MATCHED, 0)
-    match_rate = matched_count / total if total > 0 else 0
     
     with open(log_file_path, 'w') as log_file:
         log_file.write(f"Specimux Run Summary\n")
@@ -2511,16 +2586,15 @@ def output_diagnostics(args, unified_stats, elapsed_time=None):
             log_file.write(f"  Processing Time: {elapsed_time:.2f} seconds\n")
             log_file.write(f"  Processing Rate: {seqs_per_sec:.2f} sequences/second\n\n")
         
-        log_file.write("Detailed Classification Statistics:\n")
-        for line in stats_lines[1:]:  # Skip the header line
-            log_file.write(f"  {line}\n")
+        log_file.write("Note: For detailed processing statistics and breakdowns,\n")
+        log_file.write("      see the visualization output (stats.json and final_diagram.html)\n")
         
-        # Add selection/amplification statistics from unified stats
-        total_sequences = unified_stats.get(('sequence_processed',), 0)
+        # Add selection/amplification statistics from aggregates
+        total_sequences = aggregates['total_sequences']
         if total_sequences > 0:
-            primer_pair_matches = sum(v for k, v in unified_stats.items() if k[0] == 'primer_pair_match')
-            retained_matches = unified_stats.get(('retained_matches',), 0)
-            amplification_factor = primer_pair_matches / total_sequences if total_sequences > 0 else 0.0
+            primer_pair_matches = aggregates['total_primer_pair_matches']
+            retained_matches = aggregates['retained_matches']
+            amplification_factor = aggregates['amplification_factor']
             discarded_alternatives = primer_pair_matches - retained_matches
             
             log_file.write("\n\nSequence Processing Flow:\n")
@@ -2534,7 +2608,7 @@ def output_diagnostics(args, unified_stats, elapsed_time=None):
             # Extract ambiguity types
             ambiguity_types = Counter()
             for key, count in unified_stats.items():
-                if key[0] == 'ambiguity_type':
+                if key[0] == StatsKeys.AMBIGUITY_TYPE:
                     ambiguity_types[key[1]] += count
             
             if ambiguity_types:
@@ -2545,7 +2619,7 @@ def output_diagnostics(args, unified_stats, elapsed_time=None):
             # Extract selection outcomes
             selection_outcomes = Counter()
             for key, count in unified_stats.items():
-                if key[0] == 'selection_outcome':
+                if key[0] == StatsKeys.SELECTION_OUTCOME:
                     selection_outcomes[key[1]] += count
             
             if selection_outcomes:
@@ -2556,21 +2630,21 @@ def output_diagnostics(args, unified_stats, elapsed_time=None):
         # Extract and display pool statistics from unified stats
         pool_stats = {}
         for key, count in unified_stats.items():
-            if key[0] == 'outcome':  # ('outcome', pool, primer_pair, match_type)
+            if key[0] == StatsKeys.OUTCOME:  # ('outcome', pool, primer_pair, match_type)
                 pool_name = key[1]
                 primer_pair = key[2]
                 match_type = key[3]
                 
                 if pool_name not in pool_stats:
                     pool_stats[pool_name] = {
-                        'total': 0, 'matched': 0, 'partial': 0, 
-                        'ambiguous': 0, 'unknown': 0, 'primer_pairs': {}
+                        'total': 0, StatsKeys.MATCHED: 0, StatsKeys.PARTIAL: 0, 
+                        StatsKeys.AMBIGUOUS: 0, StatsKeys.UNKNOWN: 0, 'primer_pairs': {}
                     }
                 
                 if primer_pair not in pool_stats[pool_name]['primer_pairs']:
                     pool_stats[pool_name]['primer_pairs'][primer_pair] = {
-                        'total': 0, 'matched': 0, 'partial': 0,
-                        'ambiguous': 0, 'unknown': 0
+                        'total': 0, StatsKeys.MATCHED: 0, StatsKeys.PARTIAL: 0,
+                        StatsKeys.AMBIGUOUS: 0, StatsKeys.UNKNOWN: 0
                     }
                 
                 pool_stats[pool_name]['total'] += count
@@ -2591,16 +2665,16 @@ def output_diagnostics(args, unified_stats, elapsed_time=None):
                 if pool_total == 0:
                     continue
                     
-                pool_matched = pool_data['matched']
+                pool_matched = pool_data[StatsKeys.MATCHED]
                 pool_match_rate = pool_matched / pool_total if pool_total > 0 else 0
                 pool_pct_of_total = pool_total / total if total > 0 else 0
                 
                 log_file.write(f"Pool: {pool_name} ({pool_pct_of_total:.2%} of total)\n")
                 log_file.write(f"  Total: {pool_total:,} sequences\n")
                 log_file.write(f"  Matched: {pool_matched:,} ({pool_match_rate:.2%} of pool)\n")
-                log_file.write(f"  Partial: {pool_data['partial']:,} ({pool_data['partial']/pool_total:.2%} of pool)\n")
-                log_file.write(f"  Ambiguous: {pool_data['ambiguous']:,} ({pool_data['ambiguous']/pool_total:.2%} of pool)\n")
-                log_file.write(f"  Unknown: {pool_data['unknown']:,} ({pool_data['unknown']/pool_total:.2%} of pool)\n")
+                log_file.write(f"  Partial: {pool_data[StatsKeys.PARTIAL]:,} ({pool_data[StatsKeys.PARTIAL]/pool_total:.2%} of pool)\n")
+                log_file.write(f"  Ambiguous: {pool_data[StatsKeys.AMBIGUOUS]:,} ({pool_data[StatsKeys.AMBIGUOUS]/pool_total:.2%} of pool)\n")
+                log_file.write(f"  Unknown: {pool_data[StatsKeys.UNKNOWN]:,} ({pool_data[StatsKeys.UNKNOWN]/pool_total:.2%} of pool)\n")
                 
                 # Sort primer pairs alphabetically
                 sorted_primer_pairs = sorted(pool_data['primer_pairs'].keys())
@@ -2613,7 +2687,7 @@ def output_diagnostics(args, unified_stats, elapsed_time=None):
                         if pp_total == 0:
                             continue
                         
-                        pp_matched = pp_data['matched']
+                        pp_matched = pp_data[StatsKeys.MATCHED]
                         pp_match_rate = pp_matched / pp_total if pp_total > 0 else 0
                         
                         log_file.write(f"    {primer_pair}:\n")
@@ -2621,12 +2695,12 @@ def output_diagnostics(args, unified_stats, elapsed_time=None):
                         log_file.write(f"      Matched: {pp_matched:,} ({pp_match_rate:.2%} of primer pair)\n")
                         
                         # Only show other categories if they have counts
-                        if pp_data['partial'] > 0:
-                            log_file.write(f"      Partial: {pp_data['partial']:,} ({pp_data['partial']/pp_total:.2%} of primer pair)\n")
-                        if pp_data['ambiguous'] > 0:
-                            log_file.write(f"      Ambiguous: {pp_data['ambiguous']:,} ({pp_data['ambiguous']/pp_total:.2%} of primer pair)\n")
-                        if pp_data['unknown'] > 0:
-                            log_file.write(f"      Unknown: {pp_data['unknown']:,} ({pp_data['unknown']/pp_total:.2%} of primer pair)\n")
+                        if pp_data[StatsKeys.PARTIAL] > 0:
+                            log_file.write(f"      Partial: {pp_data[StatsKeys.PARTIAL]:,} ({pp_data[StatsKeys.PARTIAL]/pp_total:.2%} of primer pair)\n")
+                        if pp_data[StatsKeys.AMBIGUOUS] > 0:
+                            log_file.write(f"      Ambiguous: {pp_data[StatsKeys.AMBIGUOUS]:,} ({pp_data[StatsKeys.AMBIGUOUS]/pp_total:.2%} of primer pair)\n")
+                        if pp_data[StatsKeys.UNKNOWN] > 0:
+                            log_file.write(f"      Unknown: {pp_data[StatsKeys.UNKNOWN]:,} ({pp_data[StatsKeys.UNKNOWN]/pp_total:.2%} of primer pair)\n")
                 
                 log_file.write("\n")
     
