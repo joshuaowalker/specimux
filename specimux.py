@@ -36,10 +36,12 @@ from collections import Counter
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from functools import partial
 from multiprocessing import Pool
 from operator import itemgetter
+from pathlib import Path
 from typing import List, Tuple, Dict
 from typing import NamedTuple
 from typing import Optional, Set
@@ -645,6 +647,7 @@ class WorkItem(NamedTuple):
     seq_number: int
     seq_records: List  # This now contains actual sequence records, not an iterator
     parameters: MatchParameters
+    start_idx: int     # Starting index for sequence ID generation
 
 @dataclass
 class MatchSelection:
@@ -898,6 +901,183 @@ class OutputManager:
 
 class WorkerException(Exception):
     pass
+
+
+class TraceLogger:
+    """Manages trace event logging for sequence processing pipeline."""
+    
+    def __init__(self, enabled: bool, verbosity: int, output_dir: str, worker_id: str, 
+                 start_timestamp: str, buffer_size: int = 1000):
+        """Initialize trace logger.
+        
+        Args:
+            enabled: Whether trace logging is enabled
+            verbosity: Verbosity level (1-3)
+            output_dir: Directory for trace files
+            worker_id: Unique worker identifier
+            start_timestamp: Timestamp for file naming
+            buffer_size: Number of events to buffer before writing
+        """
+        self.enabled = enabled
+        self.verbosity = verbosity
+        self.worker_id = worker_id
+        self.event_counter = 0
+        self.buffer = []
+        self.buffer_size = buffer_size
+        self.file_handle = None
+        self.sequence_record_counter = 0
+        
+        if self.enabled:
+            # Create trace directory
+            trace_dir = Path(output_dir) / "trace"
+            trace_dir.mkdir(exist_ok=True)
+            
+            # Create trace file
+            filename = f"specimux_trace_{start_timestamp}_{worker_id}.tsv"
+            self.filepath = trace_dir / filename
+            self.file_handle = open(self.filepath, 'w', newline='')
+            self.writer = csv.writer(self.file_handle, delimiter='\t')
+            
+            # Write header
+            header = ['timestamp', 'worker_id', 'event_seq', 'sequence_id', 'event_type']
+            self.writer.writerow(header)
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+    
+    def close(self):
+        """Flush buffer and close file."""
+        if self.enabled and self.file_handle:
+            self._flush_buffer()
+            self.file_handle.close()
+    
+    def _flush_buffer(self):
+        """Write buffered events to file."""
+        if self.buffer and self.file_handle:
+            self.writer.writerows(self.buffer)
+            self.file_handle.flush()
+            self.buffer = []
+    
+    def _log_event(self, sequence_id: str, event_type: str, *fields):
+        """Log a trace event."""
+        if not self.enabled:
+            return
+        
+        self.event_counter += 1
+        timestamp = datetime.now().isoformat()
+        row = [timestamp, self.worker_id, self.event_counter, sequence_id, event_type] + list(fields)
+        self.buffer.append(row)
+        
+        if len(self.buffer) >= self.buffer_size:
+            self._flush_buffer()
+    
+    def get_sequence_id(self, seq_record, record_num: Optional[int] = None) -> str:
+        """Create unique sequence ID."""
+        if record_num is None:
+            self.sequence_record_counter += 1
+            record_num = self.sequence_record_counter
+        return f"{seq_record.id}#{record_num:08d}#{self.worker_id}"
+    
+    # Standard events (verbosity level 1)
+    
+    def log_sequence_received(self, sequence_id: str, sequence_length: int, sequence_name: str):
+        """Log when a sequence enters the pipeline."""
+        self._log_event(sequence_id, 'SEQUENCE_RECEIVED', sequence_length, sequence_name)
+    
+    def log_sequence_filtered(self, sequence_id: str, sequence_length: int, filter_reason: str):
+        """Log when a sequence is filtered out."""
+        self._log_event(sequence_id, 'SEQUENCE_FILTERED', sequence_length, filter_reason)
+    
+    def log_orientation_detected(self, sequence_id: str, orientation: str, 
+                                 forward_score: int, reverse_score: int, confidence: float):
+        """Log orientation detection result."""
+        self._log_event(sequence_id, 'ORIENTATION_DETECTED', orientation, 
+                       forward_score, reverse_score, f"{confidence:.3f}")
+    
+    def log_primer_matched(self, sequence_id: str, match_type: str, 
+                          forward_primer: str, reverse_primer: str,
+                          forward_distance: int, reverse_distance: int, 
+                          pool: str, orientation_used: str):
+        """Log successful primer match."""
+        self._log_event(sequence_id, 'PRIMER_MATCHED', match_type,
+                       forward_primer, reverse_primer, forward_distance, reverse_distance,
+                       pool, orientation_used)
+    
+    def log_barcode_matched(self, sequence_id: str, match_type: str,
+                           forward_barcode: str, reverse_barcode: str,
+                           forward_distance: int, reverse_distance: int,
+                           forward_primer: str, reverse_primer: str):
+        """Log barcode match result."""
+        self._log_event(sequence_id, 'BARCODE_MATCHED', match_type,
+                       forward_barcode, reverse_barcode, forward_distance, reverse_distance,
+                       forward_primer, reverse_primer)
+    
+    def log_match_scored(self, sequence_id: str, forward_primer: str, reverse_primer: str,
+                        forward_barcode: str, reverse_barcode: str,
+                        total_edit_distance: int, barcode_presence: str, score: float):
+        """Log match scoring."""
+        self._log_event(sequence_id, 'MATCH_SCORED', forward_primer, reverse_primer,
+                       forward_barcode, reverse_barcode, total_edit_distance,
+                       barcode_presence, f"{score:.3f}")
+    
+    def log_ambiguity_detected(self, sequence_id: str, ambiguity_type: str,
+                               match_count: int, pools_involved: List[str], 
+                               specimen_candidates: List[str]):
+        """Log ambiguity detection."""
+        pools_str = ','.join(pools_involved) if pools_involved else 'none'
+        specimens_str = ','.join(specimen_candidates) if specimen_candidates else 'none'
+        self._log_event(sequence_id, 'AMBIGUITY_DETECTED', ambiguity_type,
+                       match_count, pools_str, specimens_str)
+    
+    def log_match_selected(self, sequence_id: str, selection_strategy: str,
+                          forward_primer: str, reverse_primer: str,
+                          forward_barcode: str, reverse_barcode: str,
+                          pool: str, is_unique: bool):
+        """Log match selection decision."""
+        self._log_event(sequence_id, 'MATCH_SELECTED', selection_strategy,
+                       forward_primer, reverse_primer, forward_barcode, reverse_barcode,
+                       pool, str(is_unique).lower())
+    
+    def log_specimen_resolved(self, sequence_id: str, specimen_id: str, resolution_type: str,
+                             pool: str, forward_primer: str, reverse_primer: str,
+                             forward_barcode: str, reverse_barcode: str):
+        """Log specimen resolution."""
+        self._log_event(sequence_id, 'SPECIMEN_RESOLVED', specimen_id, resolution_type,
+                       pool, forward_primer, reverse_primer, forward_barcode, reverse_barcode)
+    
+    def log_sequence_output(self, sequence_id: str, output_type: str, specimen_id: str,
+                           pool: str, primer_pair: str, file_path: str):
+        """Log output decision."""
+        self._log_event(sequence_id, 'SEQUENCE_OUTPUT', output_type, specimen_id,
+                       pool, primer_pair, file_path)
+    
+    def log_no_match_found(self, sequence_id: str, stage_failed: str, reason: str):
+        """Log when no matches found."""
+        self._log_event(sequence_id, 'NO_MATCH_FOUND', stage_failed, reason)
+    
+    # Detailed events (verbosity level 2+)
+    
+    def log_primer_search(self, sequence_id: str, primer_name: str, primer_direction: str,
+                         search_start: int, search_end: int, found: bool,
+                         edit_distance: int, match_position: int):
+        """Log primer search attempt (level 2+)."""
+        if self.verbosity >= 2 and (self.verbosity >= 3 or found):
+            self._log_event(sequence_id, 'PRIMER_SEARCH', primer_name, primer_direction,
+                           search_start, search_end, str(found).lower(),
+                           edit_distance, match_position)
+    
+    def log_barcode_search(self, sequence_id: str, barcode_name: str, barcode_type: str,
+                          primer_adjacent: str, search_start: int, search_end: int,
+                          found: bool, edit_distance: int, match_position: int):
+        """Log barcode search attempt (level 3 only)."""
+        if self.verbosity >= 3:
+            self._log_event(sequence_id, 'BARCODE_SEARCH', barcode_name, barcode_type,
+                           primer_adjacent, search_start, search_end, str(found).lower(),
+                           edit_distance, match_position)
+
 
 class BarcodePrefilter(Protocol):
     """Protocol defining the interface for barcode prefilters"""
@@ -1346,7 +1526,9 @@ def process_sequences(seq_records: List[SeqRecord],
                       parameters: MatchParameters,
                       specimens: Specimens,
                       args: argparse.Namespace,
-                      prefilter: BarcodePrefilter) -> Tuple[List[WriteOperation], Counter]:
+                      prefilter: BarcodePrefilter,
+                      trace_logger: Optional[TraceLogger] = None,
+                      record_offset: int = 0) -> Tuple[List[WriteOperation], Counter]:
     """Process sequences and track pipeline events.
     
     Returns:
@@ -1357,9 +1539,15 @@ def process_sequences(seq_records: List[SeqRecord],
     stats = Counter()
     write_ops = []
 
-    for seq in seq_records:
+    for idx, seq in enumerate(seq_records):
         # Track in unified stats
         stats[StatsKeys.SEQUENCE_PROCESSED] += 1
+        
+        # Generate unique sequence ID for tracing
+        sequence_id = None
+        if trace_logger:
+            sequence_id = trace_logger.get_sequence_id(seq, record_offset + idx)
+            trace_logger.log_sequence_received(sequence_id, len(seq), seq.id)
         
         sample_id = SampleId.UNKNOWN
         pool = None
@@ -1369,8 +1557,12 @@ def process_sequences(seq_records: List[SeqRecord],
 
         if args.min_length != -1 and len(seq) < args.min_length:
             stats[('filtered', 'too_short')] += 1
+            if trace_logger:
+                trace_logger.log_sequence_filtered(sequence_id, len(seq), 'too_short')
         elif args.max_length != -1 and len(seq) > args.max_length:
             stats[('filtered', 'too_long')] += 1
+            if trace_logger:
+                trace_logger.log_sequence_filtered(sequence_id, len(seq), 'too_long')
         else:
             rseq = seq.reverse_complement()
             rseq.id = seq.id
@@ -1378,21 +1570,35 @@ def process_sequences(seq_records: List[SeqRecord],
 
             # Track orientation decision
             if parameters.preorient:
-                orientation = determine_orientation(parameters, str(seq.seq), str(rseq.seq),
-                                                  specimens.get_primers(Primer.FWD),
-                                                  specimens.get_primers(Primer.REV))
+                orientation, fwd_score, rev_score = determine_orientation_with_scores(
+                    parameters, str(seq.seq), str(rseq.seq),
+                    specimens.get_primers(Primer.FWD),
+                    specimens.get_primers(Primer.REV))
+                
                 if orientation == Orientation.FORWARD:
                     stats[(StatsKeys.ORIENTATION, StatsKeys.FORWARD)] += 1
+                    orientation_str = 'forward'
                 elif orientation == Orientation.REVERSE:
                     stats[(StatsKeys.ORIENTATION, StatsKeys.REVERSE)] += 1
+                    orientation_str = 'reverse'
                 else:
                     # Orientation could not be determined clearly
                     stats[(StatsKeys.ORIENTATION, StatsKeys.ORIENTATION_UNKNOWN)] += 1
+                    orientation_str = 'unknown'
+                
+                if trace_logger:
+                    confidence = 0.0
+                    if fwd_score + rev_score > 0:
+                        confidence = abs(fwd_score - rev_score) / (fwd_score + rev_score)
+                    trace_logger.log_orientation_detected(sequence_id, orientation_str, 
+                                                         fwd_score, rev_score, confidence)
             else:
                 # When not pre-orienting, sequences are processed as-is (forward)
                 stats[(StatsKeys.ORIENTATION, StatsKeys.FORWARD)] += 1
+                if trace_logger:
+                    trace_logger.log_orientation_detected(sequence_id, 'forward', 0, 0, 0.0)
 
-            matches = match_sequence(prefilter, parameters, seq, rseq, specimens)
+            matches = match_sequence(prefilter, parameters, seq, rseq, specimens, trace_logger, sequence_id)
             stats[('match_attempts',)] += len(matches)
             
             # Track primer pair matches (where amplification occurs)
@@ -1455,7 +1661,7 @@ def process_sequences(seq_records: List[SeqRecord],
             
             # Handle match selection
             if matches:
-                match_result = choose_best_match(matches)
+                match_result = choose_best_match(matches, trace_logger, sequence_id)
                 
                 # Track selection outcomes in unified stats
                 stats[(StatsKeys.AMBIGUITY_TYPE, match_result.ambiguity_type)] += 1
@@ -1475,10 +1681,21 @@ def process_sequences(seq_records: List[SeqRecord],
                 # Use first equivalent match for processing (first strategy or non-ambiguous)
                 match = match_result.get_first_match()
                 
+                # Log match selection
+                if trace_logger:
+                    p1_name = match.get_p1().name if match.get_p1() else 'none'
+                    p2_name = match.get_p2().name if match.get_p2() else 'none'
+                    b1_name = match.best_b1()[0] if match.best_b1() else 'none'
+                    b2_name = match.best_b2()[0] if match.best_b2() else 'none'
+                    pool_name = match.get_pool() or 'unknown'
+                    trace_logger.log_match_selected(sequence_id, args.ambiguity_strategy,
+                                                   p1_name, p2_name, b1_name, b2_name,
+                                                   pool_name, not match_result.is_ambiguous)
+                
                 if match_result.is_ambiguous:
                     sample_id = SampleId.AMBIGUOUS
                 else:
-                    sample_id, pool = match_sample(match, sample_id, specimens)
+                    sample_id, pool = match_sample(match, sample_id, specimens, trace_logger, sequence_id)
                     if pool:
                         match.set_pool(pool)  # Set the pool in the match object for output
 
@@ -1488,6 +1705,8 @@ def process_sequences(seq_records: List[SeqRecord],
                 stats[(StatsKeys.AMBIGUITY_TYPE, StatsKeys.NO_MATCHES)] += 1
                 stats[(StatsKeys.SELECTION_OUTCOME, StatsKeys.NONE)] += 1
                 sample_id = SampleId.UNKNOWN
+                if trace_logger:
+                    trace_logger.log_no_match_found(sequence_id, 'primer_search', 'No primer matches found')
 
         if args.debug:
             logging.debug(f"Sample ID: {sample_id}")
@@ -1511,20 +1730,32 @@ def process_sequences(seq_records: List[SeqRecord],
         
         if sample_id not in [SampleId.AMBIGUOUS, SampleId.UNKNOWN] and not sample_id.startswith(SampleId.PREFIX_FWD_MATCH) and not sample_id.startswith(SampleId.PREFIX_REV_MATCH):
             match_type = StatsKeys.MATCHED
+            output_type = 'full'
         elif sample_id == SampleId.AMBIGUOUS:
             match_type = StatsKeys.AMBIGUOUS
+            output_type = 'ambiguous'
         elif sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or sample_id.startswith(SampleId.PREFIX_REV_MATCH):
             match_type = StatsKeys.PARTIAL
+            output_type = 'partial'
         else:
             match_type = StatsKeys.UNKNOWN
+            output_type = 'unknown'
         
         stats[(StatsKeys.OUTCOME, pool_name, primer_pair, match_type)] += 1
+        
+        # Log sequence output
+        if trace_logger:
+            file_path = f"{output_type}/{pool_name}/{primer_pair}/{sample_id}.fastq"
+            trace_logger.log_sequence_output(sequence_id, output_type, sample_id, 
+                                            pool_name, primer_pair, file_path)
 
     return write_ops, stats
 
 
 
-def choose_best_match(matches: List[SequenceMatch]) -> MatchSelection:
+def choose_best_match(matches: List[SequenceMatch], 
+                     trace_logger: Optional[TraceLogger] = None,
+                     sequence_id: Optional[str] = None) -> MatchSelection:
     """Select all equivalent best matches and analyze ambiguity type"""
     if not matches:
         raise ValueError("No matches provided to choose_best_match")
@@ -1595,6 +1826,20 @@ def choose_best_match(matches: List[SequenceMatch]) -> MatchSelection:
             for match in equivalent_matches:
                 match.set_pool(pool)
     
+    # Log ambiguity if detected
+    if trace_logger and is_ambiguous:
+        pools_involved = list(set(m.get_pool() or 'unknown' for m in equivalent_matches))
+        specimen_candidates = []
+        for m in equivalent_matches:
+            if m.p1_match and m.p2_match and m.has_b1_match() and m.has_b2_match():
+                # Try to get specimen IDs for this match
+                b1_list = m.best_b1()
+                b2_list = m.best_b2()
+                # This is a simplification - would need specimens object to get actual IDs
+                specimen_candidates.append(f"{b1_list[0] if b1_list else 'none'}_{b2_list[0] if b2_list else 'none'}")
+        trace_logger.log_ambiguity_detected(sequence_id, ambiguity_type, 
+                                           len(equivalent_matches), pools_involved, specimen_candidates)
+    
     return MatchSelection(
         equivalent_matches=equivalent_matches,
         best_score=best_score,
@@ -1604,7 +1849,9 @@ def choose_best_match(matches: List[SequenceMatch]) -> MatchSelection:
 
 
 
-def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> Tuple[str, Optional[str]]:
+def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens,
+                trace_logger: Optional[TraceLogger] = None,
+                sequence_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
     """Returns tuple of (sample_id, pool_name)"""
     # Start with previously determined pool from primers
     pool = match.get_pool()
@@ -1614,6 +1861,7 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> 
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
         if len(ids) > 1:
             sample_id = SampleId.AMBIGUOUS
+            resolution_type = 'ambiguous'
             # For ambiguous matches, use most common pool from matching specimens
             pools = Counter()
             for id in ids:
@@ -1621,12 +1869,31 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens) -> 
             pool = pools.most_common(1)[0][0]
         elif len(ids) == 1:
             sample_id = ids[0]
+            resolution_type = 'full_match'
             # For unique matches, use specimen's pool
             pool = specimens.get_specimen_pool(ids[0])
         else:
             logging.warning(
                 f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, "
                 f"{match.get_p1()}, {match.get_p2()})")
+            resolution_type = 'unknown'
+    else:
+        # Partial match - determine type
+        if match.has_b1_match() and not match.has_b2_match():
+            resolution_type = 'partial_forward'
+        elif match.has_b2_match() and not match.has_b1_match():
+            resolution_type = 'partial_reverse'
+        else:
+            resolution_type = 'unknown'
+    
+    # Log specimen resolution
+    if trace_logger:
+        p1_name = match.get_p1().name if match.get_p1() else 'none'
+        p2_name = match.get_p2().name if match.get_p2() else 'none'
+        b1_name = match.best_b1()[0] if match.best_b1() else 'none'
+        b2_name = match.best_b2()[0] if match.best_b2() else 'none'
+        trace_logger.log_specimen_resolved(sequence_id, sample_id, resolution_type,
+                                          pool or 'unknown', p1_name, p2_name, b1_name, b2_name)
 
     return sample_id, pool
 
@@ -1646,10 +1913,11 @@ class Orientation(Enum):
     UNKNOWN = 3
 
 
-def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
-                          fwd_primers: List[PrimerInfo], rev_primers: List[PrimerInfo]) -> Orientation:
-    """Determine sequence orientation by checking primer matches.
-    Returns FORWARD/REVERSE only when highly confident, otherwise UNKNOWN."""
+def determine_orientation_with_scores(parameters: MatchParameters, seq: str, rseq: str,
+                                     fwd_primers: List[PrimerInfo], 
+                                     rev_primers: List[PrimerInfo]) -> Tuple[Orientation, int, int]:
+    """Determine sequence orientation by checking primer matches, returning scores.
+    Returns (orientation, forward_score, reverse_score)."""
 
     forward_matches = 0
     reverse_matches = 0
@@ -1673,14 +1941,23 @@ def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
         if rev_p2.matched():
             reverse_matches += 1
 
-    # Only return an orientation if we have clear evidence in one direction
-    # and no evidence in the other
+    # Determine orientation
     if forward_matches > 0 and reverse_matches == 0:
-        return Orientation.FORWARD
+        orientation = Orientation.FORWARD
     elif reverse_matches > 0 and forward_matches == 0:
-        return Orientation.REVERSE
+        orientation = Orientation.REVERSE
     else:
-        return Orientation.UNKNOWN
+        orientation = Orientation.UNKNOWN
+    
+    return orientation, forward_matches, reverse_matches
+
+
+def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
+                          fwd_primers: List[PrimerInfo], rev_primers: List[PrimerInfo]) -> Orientation:
+    """Determine sequence orientation by checking primer matches.
+    Returns FORWARD/REVERSE only when highly confident, otherwise UNKNOWN."""
+    orientation, _, _ = determine_orientation_with_scores(parameters, seq, rseq, fwd_primers, rev_primers)
+    return orientation
 
 def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) -> Optional[str]:
     """
@@ -1706,7 +1983,9 @@ def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) ->
 
 
 def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq: SeqRecord,
-                   rseq: SeqRecord, specimens: Specimens) -> List[SequenceMatch]:
+                   rseq: SeqRecord, specimens: Specimens, 
+                   trace_logger: Optional[TraceLogger] = None,
+                   sequence_id: Optional[str] = None) -> List[SequenceMatch]:
     """Match sequence against primers and barcodes"""
     # extract string versions for performance - roughly 18% improvement
     s = str(seq.seq)
@@ -1884,7 +2163,8 @@ def parse_args(argv):
     parser.add_argument("--color", action="store_true", help="Highlight barcode matches in blue, primer matches in green")
     parser.add_argument("--trim", choices=[TrimMode.NONE, TrimMode.TAILS, TrimMode.BARCODES, TrimMode.PRIMERS], default=TrimMode.BARCODES, help="trimming to apply")
     parser.add_argument("--ambiguity-strategy", choices=[AmbiguityStrategy.FIRST, AmbiguityStrategy.STRICT, AmbiguityStrategy.ALL, AmbiguityStrategy.DIAGNOSTIC], default=AmbiguityStrategy.FIRST, help="How to handle ambiguous matches: 'first' uses first equivalent match (default), 'strict' discards ambiguous matches, 'all' outputs all matches (future), 'diagnostic' writes to separate file (future)")
-    parser.add_argument("-d", "--diagnostics", action="store_true", help="Output extra diagnostics")
+    parser.add_argument("-d", "--diagnostics", nargs='?', const=1, type=int, choices=[1, 2, 3], 
+                        help="Enable diagnostic trace logging: 1=standard (default), 2=detailed, 3=verbose")
     parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging")
 
     parser.add_argument("--disable-prefilter", action="store_true", help="Disable barcode prefiltering (bloom filter optimization)")
@@ -1918,10 +2198,11 @@ def process_num_seqs(args, parser):
 # Global variables for worker processes
 _barcode_prefilter = PassthroughPrefilter()
 _output_manager = None
+_trace_logger = None
 
-def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespace):
+def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespace, start_timestamp: str = None):
     """Initialize worker process with shared resources"""
-    global _output_manager, _barcode_prefilter
+    global _output_manager, _barcode_prefilter, _trace_logger
     try:
         l = logging.DEBUG if args.debug else logging.INFO
         logging.basicConfig(level=l, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -1937,16 +2218,31 @@ def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespac
                                             args.isfastq, max_open_files=50, buffer_size=100)
             _output_manager.__enter__()
 
+        # Create trace logger for this worker if diagnostics enabled
+        if args.diagnostics:
+            worker_id = f"worker_{multiprocessing.current_process().name.split('-')[-1]}"
+            if start_timestamp is None:
+                start_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            _trace_logger = TraceLogger(
+                enabled=True, 
+                verbosity=args.diagnostics,
+                output_dir=args.output_dir,
+                worker_id=worker_id,
+                start_timestamp=start_timestamp
+            )
+            _trace_logger.__enter__()
+
     except Exception as e:
         logging.error(f"Failed to initialize worker: {e}")
         raise
 
 def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
     """Process a batch of sequences and write results directly"""
-    global _output_manager, _barcode_prefilter
+    global _output_manager, _barcode_prefilter, _trace_logger
     try:
         write_ops, unified_stats = process_sequences(
-            work_item.seq_records, work_item.parameters, specimens, args, _barcode_prefilter)
+            work_item.seq_records, work_item.parameters, specimens, args, _barcode_prefilter,
+            _trace_logger, work_item.start_idx)
 
         # Write sequences directly from worker
         if args.output_to_files and _output_manager is not None:
@@ -2164,19 +2460,28 @@ def specimux_mp(args):
     num_processes = args.threads if args.threads > 0 else multiprocessing.cpu_count()
     logging.info(f"Will run {num_processes} worker processes")
 
+    # Create shared timestamp for consistent trace file naming
+    start_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     with Pool(processes=num_processes,
               initializer=init_worker,
-              initargs=(specimens, parameters.max_dist_index, args)) as pool:
+              initargs=(specimens, parameters.max_dist_index, args, start_timestamp)) as pool:
 
         worker_func = partial(worker, specimens=specimens, args=args)
 
         try:
             pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
-            for batch_unified_stats in pool.imap_unordered(
-                    worker_func,
-                    (WorkItem(i, batch, parameters)
-                     for i, batch in enumerate(iter_batches(seq_records, sequence_block_size,
-                                                            last_seq_to_output, all_seqs)))):
+            
+            # Create work items with cumulative sequence indexing for trace IDs
+            def create_work_items():
+                cumulative_idx = 0
+                for i, batch in enumerate(iter_batches(seq_records, sequence_block_size,
+                                                       last_seq_to_output, all_seqs)):
+                    work_item = WorkItem(i, batch, parameters, cumulative_idx)
+                    cumulative_idx += len(batch)
+                    yield work_item
+            
+            for batch_unified_stats in pool.imap_unordered(worker_func, create_work_items()):
                 # Only aggregate unified statistics - derive legacy later
                 unified_stats += batch_unified_stats
 
@@ -2362,9 +2667,25 @@ def specimux(args):
             if not seq_batch:
                 break
 
+            # Create trace logger for single-threaded mode if needed
+            trace_logger = None
+            if args.diagnostics:
+                trace_logger = TraceLogger(
+                    enabled=True,
+                    verbosity=args.diagnostics,
+                    output_dir=args.output_dir,
+                    worker_id="main",
+                    start_timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
+                )
+                trace_logger.__enter__()
+
             write_ops, batch_unified_stats = process_sequences(
-                seq_batch, parameters, specimens, args, prefilter)
+                seq_batch, parameters, specimens, args, prefilter, trace_logger, num_seqs)
             unified_stats += batch_unified_stats  # Only aggregate unified statistics
+            
+            # Close trace logger after processing batch
+            if trace_logger:
+                trace_logger.__exit__(None, None, None)
             
             for write_op in write_ops:
                 output_write_operation(write_op, output_manager, args)
