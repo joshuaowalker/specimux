@@ -31,7 +31,6 @@ import os
 import sys
 import timeit
 import traceback
-from _operator import itemgetter
 from collections import Counter
 from collections import defaultdict
 from contextlib import contextmanager
@@ -100,20 +99,6 @@ class MultipleMatchStrategy:
     """Strategy for handling multiple equivalent matches"""
     RETAIN = "retain"  # Default: output all equivalent matches
     DOWNGRADE_FULL = "downgrade-full"  # Downgrade full matches to partial if multiple exist
-
-
-    
-    # Selection outcomes
-    UNIQUE = 'unique'
-    NONE = 'none'
-    
-    # Ambiguity types
-    NO_AMBIGUITY = 'none'
-    CROSS_POOL = 'cross_pool'
-    SAME_POOL_DIFFERENT_PRIMERS = 'same_pool_different_primers'
-    SAME_PRIMERS_DIFFERENT_BARCODES = 'same_primers_different_barcodes'
-    IDENTICAL_MATCHES = 'identical_matches'
-    NO_MATCHES = 'no_matches'
 
 
 class Barcode(Enum):
@@ -288,7 +273,7 @@ class SequenceMatch:
         self._p1: Optional[PrimerInfo] = None
         self._p2: Optional[PrimerInfo] = None
         self._pool: Optional[str] = None  # New: track the pool
-        self.ambiguity_threshold = 1.0
+        self.match_tolerance = 1.0
         self._barcode_length = barcode_length
         self.candidate_match_id = candidate_match_id  # New: track candidate match ID
 
@@ -323,13 +308,13 @@ class SequenceMatch:
         if not self._b1_matches:
             return []
         best_distance = self.b1_distance()
-        return [b for b, _, d in self._b1_matches if abs(d - best_distance) < self.ambiguity_threshold]
+        return [b for b, _, d in self._b1_matches if abs(d - best_distance) < self.match_tolerance]
 
     def best_b2(self) -> List[str]:
         if not self._b2_matches:
             return []
         best_distance = self.b2_distance()
-        return [b for b, _, d in self._b2_matches if abs(d - best_distance) < self.ambiguity_threshold]
+        return [b for b, _, d in self._b2_matches if abs(d - best_distance) < self.match_tolerance]
 
     def set_primer_match(self, match: MatchResult, primer: PrimerInfo, reverse: bool, which: Primer):
         m = match
@@ -2040,7 +2025,7 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                 match_counter += 1
     
     # TODO: Consider whether primer pairs that match almost exactly the same extent 
-    # should be considered distinct matches or not. This affects ambiguity detection
+    # should be considered distinct matches or not. This affects multiple match detection
     # for cases where multiple primer pairs cover nearly identical sequence regions.
     return matches
 
@@ -2649,7 +2634,7 @@ def create_output_files(args, specimens):
         os.makedirs(args.output_dir, exist_ok=True)
 
         # Create match-type directories at the top level
-        match_types = ["full", "partial", "ambiguous", "unknown"]
+        match_types = ["full", "partial", "unknown"]
         for match_type in match_types:
             os.makedirs(os.path.join(args.output_dir, match_type), exist_ok=True)
         

@@ -142,15 +142,15 @@ timestamp | worker_id | event_seq | sequence_id | MATCH_DISCARDED | candidate_ma
 - `forward_barcode`: String, forward barcode (or "none")
 - `reverse_barcode`: String, reverse barcode (or "none")
 - `score`: Float, the match score
-- `discard_reason`: String, reason for discarding (e.g., "lower_score", "ambiguous_strict")
+- `discard_reason`: String, reason for discarding (e.g., "lower_score", "downgraded_multiple_full")
 
 ### SPECIMEN_RESOLVED
 **Purpose**: Log specimen identification result
 ```
 timestamp | worker_id | event_seq | sequence_id | SPECIMEN_RESOLVED | specimen_id | resolution_type | pool | forward_primer | reverse_primer | forward_barcode | reverse_barcode
 ```
-- `specimen_id`: String, resolved specimen ID (or "UNKNOWN", "AMBIGUOUS", "FWD_ONLY_XXX", "REV_ONLY_XXX")
-- `resolution_type`: Enum: `full_match`, `partial_forward`, `partial_reverse`, `ambiguous`, `unknown`
+- `specimen_id`: String, resolved specimen ID (or "UNKNOWN", "FWD_ONLY_XXX", "REV_ONLY_XXX")
+- `resolution_type`: Enum: `full_match`, `partial_forward`, `partial_reverse`, `unknown`
 - `pool`: String, pool name (or "unknown")
 - `forward_primer`: String, forward primer used
 - `reverse_primer`: String, reverse primer used
@@ -162,7 +162,7 @@ timestamp | worker_id | event_seq | sequence_id | SPECIMEN_RESOLVED | specimen_i
 ```
 timestamp | worker_id | event_seq | sequence_id | SEQUENCE_OUTPUT | output_type | specimen_id | pool | primer_pair | file_path
 ```
-- `output_type`: Enum: `full`, `partial`, `ambiguous`, `unknown`
+- `output_type`: Enum: `full`, `partial`, `unknown`
 - `specimen_id`: String, final specimen ID
 - `pool`: String, pool name
 - `primer_pair`: String, primer pair (format: "FWD-REV")
@@ -283,9 +283,9 @@ WHERE event_type = 'SPECIMEN_RESOLVED'
 GROUP BY pool;
 ```
 
-### Finding Ambiguous Sequences
+### Finding Multiple Match Sequences
 ```sql
-SELECT sequence_id, ambiguity_type, specimen_candidates
+SELECT sequence_id, match_type, specimen_candidates
 FROM events  
 WHERE event_type = 'MULTIPLE_MATCHES_DETECTED'
 ORDER BY match_count DESC;

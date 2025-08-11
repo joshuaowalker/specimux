@@ -50,6 +50,18 @@ specimen2   ITS           GTACGTAC   ITS1F       CATGCATG   ITS4
 python specimux.py primers.fasta specimens.txt sequences.fastq -F -d
 ```
 
+### Multiple Match Resolution
+
+When multiple equivalent matches are found, you can control how they're handled:
+
+```bash
+# Default: Output all equivalent matches to their respective specimen files
+python specimux.py primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches retain
+
+# Contamination flagging: Downgrade multiple full matches to partial output  
+python specimux.py primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches downgrade-full
+```
+
 For a full list of options:
 ```bash
 python specimux.py -h
@@ -143,10 +155,8 @@ output_dir/
       unknown-ITS4/                # Reverse primer only detected
         sample_barcode_rev_TGCATGCA.fastq
   
-  ambiguous/                       # Multiple specimens matched
-    ITS/
-      ITS1F-ITS4/
-        sample_ambiguous.fastq
+  # Note: ambiguous/ directory removed in v0.5+
+  # Multiple equivalent matches now output to their respective specimen files
   
   unknown/                         # No barcodes matched
     ITS/
@@ -218,7 +228,7 @@ Specimux uses a "middle-out" strategy to identify primers and barcodes:
    - Full matches (both primers + barcodes) score highest
    - Partial matches scored progressively lower
    - Pool consistency considered in scoring
-   - Ambiguity reported when multiple high-scoring matches exist
+   - Multiple equivalent matches handled with configurable strategies
 
 All sequences are automatically normalized to forward orientation after matching, ensuring consistent output regardless of input orientation.
 
@@ -305,28 +315,32 @@ At the end of each run, Specimux creates a log.txt file in the output directory 
 
 This log is generated regardless of whether the -d/--diagnostics flag is used and provides a permanent record of each processing run.
 
-### Classification Statistics (-d)
+### Trace Logging System (-d)
 
-Shows sequence assignment outcomes:
+The diagnostic mode now provides comprehensive trace logging for detailed pipeline analysis:
 
-1. Length Checks
-   - "Sequence Too Short/Long"
+**Verbosity Levels:**
+- `-d` or `-d1`: Standard events (match results, decisions, outputs)
+- `-d2`: Detailed events including successful search attempts  
+- `-d3`: Verbose events including all search attempts (successful and failed)
 
-2. Primer Matching
-   - "No Primer Matches"
-   - "No Forward/Reverse Primer Matches"
+**Trace Files:**
+- Created in `output_dir/trace/` directory
+- One TSV file per worker process: `specimux_trace_TIMESTAMP_WORKER.tsv`
+- Contains timestamped events tracking each sequence through the pipeline
 
-3. Barcode Matching
-   - "No Forward/Reverse Barcode Matches"
-   - "No Barcode Matches (May be truncated)"
+**Key Events Logged:**
+- Sequence received/filtered/output decisions
+- Primer/barcode search attempts and matches
+- Multiple match detection and resolution
+- Specimen identification and pool assignment
+- Match scoring and selection logic
 
-4. Ambiguity Checks
-   - "Multiple Primer/Orientation Full Matches"
-   - "Multiple Matches for Forward/Reverse Barcode"
-   - "No Specimen for Barcodes"
+This system enables detailed analysis of processing efficiency, match patterns, and troubleshooting of specific sequences.
 
-5. Success
-   - "Matched"
+**For complete trace event documentation, see [trace_event_schema.md](trace_event_schema.md).**
+
+**Note:** A trace visualization system is currently in development to provide graphical analysis of the trace data, including sequence flow diagrams and match pattern analysis.
 
 ### Debug Output (-D)
 
@@ -384,7 +398,7 @@ The diagram shows sequence processing through these stages:
 1. **Total Sequences**: Starting point showing all input sequences
 2. **First Primer Detection**: Sequences grouped by detected forward primer
 3. **Primer Pair Formation**: Complete primer pair identification
-4. **Outcome Classification**: Matched, Partial, Ambiguous, or Unknown outcomes
+4. **Outcome Classification**: Matched, Partial, or Unknown outcomes
 5. **Pool Assignment**: Final assignment to primer pools
 
 This visualization helps identify:
