@@ -86,7 +86,6 @@ class AlignMode:
     PREFIX = 'SHW'
 
 class SampleId:
-    AMBIGUOUS = "ambiguous"
     UNKNOWN = "unknown"
     PREFIX_FWD_MATCH = "barcode_fwd_"
     PREFIX_REV_MATCH = "barcode_rev_"
@@ -97,11 +96,10 @@ class TrimMode:
     TAILS = "tails"
     NONE = "none"
 
-class AmbiguityStrategy:
-    FIRST = "first"
-    STRICT = "strict"
-    ALL = "all"
-    DIAGNOSTIC = "diagnostic"
+class MultipleMatchStrategy:
+    """Strategy for handling multiple equivalent matches"""
+    RETAIN = "retain"  # Default: output all equivalent matches
+    DOWNGRADE_FULL = "downgrade-full"  # Downgrade full matches to partial if multiple exist
 
 
     
@@ -623,14 +621,18 @@ class MatchSelection:
     """Result from choose_best_match containing all equivalent best matches"""
     equivalent_matches: List['SequenceMatch']  # All matches with the best score
     best_score: int                           # Score of the equivalent matches
-    is_ambiguous: bool                       # True if multiple equivalent matches exist
-    ambiguity_type: str                      # Type of ambiguity for statistics tracking
+    has_multiple: bool                       # True if multiple equivalent matches exist
+    match_type: str                          # Type of match configuration for trace logging
     
     def get_first_match(self) -> 'SequenceMatch':
         """Get the first match for backward compatibility. This selection is arbitrary."""
         if not self.equivalent_matches:
             raise ValueError("No matches available")
         return self.equivalent_matches[0]
+    
+    def get_all_matches(self) -> List['SequenceMatch']:
+        """Get all equivalent matches"""
+        return self.equivalent_matches
     
     def has_cross_pool_matches(self) -> bool:
         """Check if matches span multiple pools (potential contamination indicator)"""
@@ -812,9 +814,7 @@ class OutputManager:
         if sample_id == SampleId.UNKNOWN:
             # Complete unknown
             return os.path.join(self.output_dir, "unknown", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
-        elif sample_id == SampleId.AMBIGUOUS:
-            # Ambiguous match
-            return os.path.join(self.output_dir, "ambiguous", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
+        # No longer using SampleId.AMBIGUOUS - removed
         elif sample_id.startswith(SampleId.PREFIX_FWD_MATCH):
             # Forward barcode matched but reverse didn't
             return os.path.join(self.output_dir, "partial", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
@@ -852,7 +852,7 @@ class OutputManager:
         
         # If this is a full match, write it to the pool-level aggregation directory as well
         if not (write_op.sample_id == SampleId.UNKNOWN or 
-                write_op.sample_id == SampleId.AMBIGUOUS or
+                # Removed SampleId.AMBIGUOUS check
                 write_op.sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or
                 write_op.sample_id.startswith(SampleId.PREFIX_REV_MATCH)):
             
@@ -1006,13 +1006,13 @@ class TraceLogger:
                        forward_barcode, reverse_barcode, total_edit_distance,
                        barcode_presence, f"{score:.3f}")
     
-    def log_ambiguity_detected(self, sequence_id: str, ambiguity_type: str,
-                               match_count: int, pools_involved: List[str], 
-                               specimen_candidates: List[str]):
-        """Log ambiguity detection."""
+    def log_multiple_matches_detected(self, sequence_id: str, match_type: str,
+                                     match_count: int, pools_involved: List[str], 
+                                     specimen_candidates: List[str]):
+        """Log multiple equivalent matches detection."""
         pools_str = ','.join(pools_involved) if pools_involved else 'none'
         specimens_str = ','.join(specimen_candidates) if specimen_candidates else 'none'
-        self._log_event(sequence_id, 'AMBIGUITY_DETECTED', ambiguity_type,
+        self._log_event(sequence_id, 'MULTIPLE_MATCHES_DETECTED', match_type,
                        match_count, pools_str, specimens_str)
     
     def log_match_selected(self, sequence_id: str, selection_strategy: str,
@@ -1503,15 +1503,6 @@ def create_write_operation(sample_id, args, seq, match):
     )
 
 
-def create_write_operations(sample_id, args, seq, match_result: MatchSelection) -> List[WriteOperation]:
-    """Create write operations from equivalent matches"""
-    # For backward compatibility, use the first match (arbitrary selection)
-    # TODO: Add mining output strategies here when --ambiguity-strategy is implemented
-    # For now, only output first equivalent match to maintain current behavior
-    first_match = match_result.get_first_match()
-    ops = [create_write_operation(sample_id, args, seq, first_match)]
-    
-    return ops
 
 
 def process_sequences(seq_records: List[SeqRecord],
@@ -1543,9 +1534,9 @@ def process_sequences(seq_records: List[SeqRecord],
         
         sample_id = SampleId.UNKNOWN
         pool = None
+        has_full_match = False
 
         match = SequenceMatch(seq, specimens.b_length())
-        match_result = None
 
         if args.min_length != -1 and len(seq) < args.min_length:
             if trace_logger:
@@ -1585,107 +1576,81 @@ def process_sequences(seq_records: List[SeqRecord],
                     trace_logger.log_orientation_detected(sequence_id, 'forward', 0, 0, 0.0)
 
             matches = match_sequence(prefilter, parameters, seq, rseq, specimens, trace_logger, sequence_id)
-            
-            # Track primer pair matches (where amplification occurs)
-            # Only count matches where both primers were found
-            primer_pair_matches = [m for m in matches if m.p1_match and m.p2_match]
-            
-            # Track all matches including partial primer matches
-            all_matches_with_primers = [m for m in matches if m.p1_match or m.p2_match]
-            
-            # Handle match selection
+
+            # Handle match selection and processing
             if matches:
                 match_result = choose_best_match(matches, trace_logger, sequence_id)
                 
-                # Apply ambiguity strategy
-                if match_result.is_ambiguous and args.ambiguity_strategy == AmbiguityStrategy.STRICT:
-                    # Skip this sequence entirely for strict strategy
+                # Check if we should downgrade full matches to partial
+                should_downgrade = (match_result.has_multiple and match_result.best_score == 5 and 
+                                  args.resolve_multiple_matches == MultipleMatchStrategy.DOWNGRADE_FULL)
+                
+                if should_downgrade and trace_logger:
+                    # Log that full matches are being downgraded
+                    for m in match_result.equivalent_matches:
+                        p1_name = m.get_p1().name if m.get_p1() else 'none'
+                        p2_name = m.get_p2().name if m.get_p2() else 'none'
+                        b1_name = m.best_b1()[0] if m.best_b1() else 'none'
+                        b2_name = m.best_b2()[0] if m.best_b2() else 'none'
+                        trace_logger.log_match_discarded(sequence_id, m.candidate_match_id,
+                                                       p1_name, p2_name, b1_name, b2_name,
+                                                       float(match_result.best_score), 'downgraded_multiple_full')
+                
+                # Process all equivalent matches and create write operations directly
+                for match in match_result.get_all_matches():
+                    if should_downgrade:
+                        # Force to partial output by using a partial prefix with match info
+                        p1_name = match.get_p1().name if match.get_p1() else 'unknown'
+                        p2_name = match.get_p2().name if match.get_p2() else 'unknown'
+                        b1_name = match.best_b1()[0] if match.best_b1() else 'unknown'
+                        b2_name = match.best_b2()[0] if match.best_b2() else 'unknown'
+                        final_sample_id = f"{SampleId.PREFIX_FWD_MATCH}downgraded_{p1_name}_{p2_name}_{b1_name}_{b2_name}"
+                    else:
+                        # Normal processing - determine sample ID for this match
+                        match_sample_id, pool = match_sample(match, sample_id, specimens, trace_logger, sequence_id)
+                        if pool:
+                            match.set_pool(pool)
+                        final_sample_id = group_sample(match, match_sample_id)
                     
-                    # Log all equivalent matches as discarded due to strict strategy
+                    # Create and add write operation directly
+                    op = create_write_operation(final_sample_id, args, seq, match)
+                    write_ops.append(op)
+                    
+                    # Count successful matches and log sequence output for this operation
+                    if final_sample_id not in [SampleId.UNKNOWN] and not final_sample_id.startswith(SampleId.PREFIX_FWD_MATCH) and not final_sample_id.startswith(SampleId.PREFIX_REV_MATCH):
+                        op_output_type = 'full'
+                        has_full_match = True
+                    elif final_sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or final_sample_id.startswith(SampleId.PREFIX_REV_MATCH):
+                        op_output_type = 'partial'
+                    else:
+                        op_output_type = 'unknown'
+                    
+                    # Log sequence output
                     if trace_logger:
-                        for m in match_result.equivalent_matches:
-                            p1_name = m.get_p1().name if m.get_p1() else 'none'
-                            p2_name = m.get_p2().name if m.get_p2() else 'none'
-                            b1_name = m.best_b1()[0] if m.best_b1() else 'none'
-                            b2_name = m.best_b2()[0] if m.best_b2() else 'none'
-                            trace_logger.log_match_discarded(sequence_id, m.candidate_match_id,
-                                                           p1_name, p2_name, b1_name, b2_name,
-                                                           float(match_result.best_score), 'ambiguous_strict')
-                    continue
-                
-                # Use first equivalent match for processing (first strategy or non-ambiguous)
-                match = match_result.get_first_match()
-                
-                # Log match selection and discard other equivalent matches
-                if trace_logger:
-                    p1_name = match.get_p1().name if match.get_p1() else 'none'
-                    p2_name = match.get_p2().name if match.get_p2() else 'none'
-                    b1_name = match.best_b1()[0] if match.best_b1() else 'none'
-                    b2_name = match.best_b2()[0] if match.best_b2() else 'none'
-                    pool_name = match.get_pool() or 'none'
-                    trace_logger.log_match_selected(sequence_id, args.ambiguity_strategy,
-                                                   p1_name, p2_name, b1_name, b2_name,
-                                                   pool_name, not match_result.is_ambiguous)
-                    
-                    # Log other equivalent matches as discarded (when using first strategy with ambiguous matches)
-                    if match_result.is_ambiguous:
-                        for m in match_result.equivalent_matches:
-                            if m != match:  # Don't log the selected match as discarded
-                                p1_name_disc = m.get_p1().name if m.get_p1() else 'none'
-                                p2_name_disc = m.get_p2().name if m.get_p2() else 'none'
-                                b1_name_disc = m.best_b1()[0] if m.best_b1() else 'none'
-                                b2_name_disc = m.best_b2()[0] if m.best_b2() else 'none'
-                                trace_logger.log_match_discarded(sequence_id, m.candidate_match_id,
-                                                               p1_name_disc, p2_name_disc, b1_name_disc, b2_name_disc,
-                                                               float(match_result.best_score), 'ambiguous_not_first')
-                
-                if match_result.is_ambiguous:
-                    sample_id = SampleId.AMBIGUOUS
-                else:
-                    sample_id, pool = match_sample(match, sample_id, specimens, trace_logger, sequence_id)
-                    if pool:
-                        match.set_pool(pool)  # Set the pool in the match object for output
-
-                sample_id = group_sample(match, sample_id)
+                        pool_name = op.primer_pool
+                        primer_pair = f"{op.p1_name}-{op.p2_name}"
+                        file_path = f"{op_output_type}/{pool_name}/{primer_pair}/{op.sample_id}.fastq"
+                        trace_logger.log_sequence_output(sequence_id, op_output_type, op.sample_id, 
+                                                        pool_name, primer_pair, file_path)
             else:
                 # No matches found
-                sample_id = SampleId.UNKNOWN
+                final_sample_id = SampleId.UNKNOWN
                 if trace_logger:
                     trace_logger.log_no_match_found(sequence_id, 'primer_search', 'No primer matches found')
+                op = create_write_operation(final_sample_id, args, seq, match)
+                write_ops.append(op)
+                
+                # Log sequence output for no-match case
+                if trace_logger:
+                    pool_name = op.primer_pool
+                    primer_pair = f"{op.p1_name}-{op.p2_name}"
+                    file_path = f"unknown/{pool_name}/{primer_pair}/{op.sample_id}.fastq"
+                    trace_logger.log_sequence_output(sequence_id, 'unknown', op.sample_id, 
+                                                    pool_name, primer_pair, file_path)
 
-        if args.debug:
-            logging.debug(f"Sample ID: {sample_id}")
-
-        # Create write operations (use match_result if available, otherwise basic match)
-        if match_result is not None:
-            new_ops = create_write_operations(sample_id, args, match.sequence, match_result)
-        else:
-            # For non-matching or filtered sequences, create single operation with basic match
-            new_ops = [create_write_operation(sample_id, args, seq, match)]
-        
-        write_ops.extend(new_ops)
-        
-        # Track if this was a successful match for progress reporting
-        if sample_id not in [SampleId.AMBIGUOUS, SampleId.UNKNOWN] and not sample_id.startswith(SampleId.PREFIX_FWD_MATCH) and not sample_id.startswith(SampleId.PREFIX_REV_MATCH):
+        # Only count sequences with at least one full match as successful
+        if has_full_match:
             matched_count += 1
-            output_type = 'full'
-        elif sample_id == SampleId.AMBIGUOUS:
-            output_type = 'ambiguous'
-        elif sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or sample_id.startswith(SampleId.PREFIX_REV_MATCH):
-            output_type = 'partial'
-        else:
-            output_type = 'unknown'
-        
-        # Track final outcome for trace logging
-        primary_op = new_ops[0]
-        pool_name = primary_op.primer_pool
-        primer_pair = f"{primary_op.p1_name}-{primary_op.p2_name}"
-        
-        # Log sequence output
-        if trace_logger:
-            file_path = f"{output_type}/{pool_name}/{primer_pair}/{sample_id}.fastq"
-            trace_logger.log_sequence_output(sequence_id, output_type, sample_id, 
-                                            pool_name, primer_pair, file_path)
 
     return write_ops, total_count, matched_count
 
@@ -1694,7 +1659,7 @@ def process_sequences(seq_records: List[SeqRecord],
 def choose_best_match(matches: List[SequenceMatch], 
                      trace_logger: Optional[TraceLogger] = None,
                      sequence_id: Optional[str] = None) -> MatchSelection:
-    """Select all equivalent best matches and analyze ambiguity type"""
+    """Select all equivalent best matches based on match quality scoring"""
     if not matches:
         raise ValueError("No matches provided to choose_best_match")
 
@@ -1765,26 +1730,27 @@ def choose_best_match(matches: List[SequenceMatch],
                                                p1_name, p2_name, b1_name, b2_name,
                                                float(score), 'lower_score')
     
-    # Determine ambiguity type and pool assignment
-    is_ambiguous = len(equivalent_matches) > 1
+    # Determine match configuration for trace logging
+    has_multiple = len(equivalent_matches) > 1
     
-    if not is_ambiguous:
-        ambiguity_type = 'none'
+    # Classify the type of matches for trace logging
+    if not has_multiple:
+        match_type = 'single_match'
         # Set pool on the single match
         equivalent_matches[0].set_pool(equivalent_matches[0].get_pool())
     else:
-        # Analyze the type of ambiguity for unified statistics tracking
+        # Analyze match configuration for trace logging
         pools = [m.get_pool() for m in equivalent_matches]
         unique_pools = set(pools)
         
         if len(unique_pools) > 1:
-            # Matches across different pools - potential contamination
-            ambiguity_type = 'cross_pool'
+            # Matches across different pools
+            match_type = 'cross_pool'
             # Set pool to "unknown" for cross-pool matches
             for match in equivalent_matches:
                 match.set_pool("unknown")
         else:
-            # All matches in same pool - analyze further
+            # All matches in same pool
             pool = pools[0]
             
             # Check if matches have different primer pairs
@@ -1793,23 +1759,23 @@ def choose_best_match(matches: List[SequenceMatch],
                           for m in equivalent_matches}
             
             if len(primer_pairs) > 1:
-                ambiguity_type = 'same_pool_different_primers'
+                match_type = 'same_pool_different_primers'
             else:
                 # Same primer pairs - check barcodes
                 barcode_combos = {(tuple(m.best_b1()), tuple(m.best_b2())) 
                                 for m in equivalent_matches}
                 if len(barcode_combos) > 1:
-                    ambiguity_type = 'same_primers_different_barcodes'
+                    match_type = 'same_primers_different_barcodes'
                 else:
-                    # This shouldn't happen - identical matches
-                    ambiguity_type = 'identical_matches'
+                    # Identical matches - shouldn't happen but handle it
+                    match_type = 'identical_matches'
             
             # Set consistent pool for same-pool matches
             for match in equivalent_matches:
                 match.set_pool(pool)
     
-    # Log ambiguity if detected
-    if trace_logger and is_ambiguous:
+    # Log multiple matches if detected
+    if trace_logger and has_multiple:
         pools_involved = list(set(m.get_pool() or 'none' for m in equivalent_matches))
         specimen_candidates = []
         for m in equivalent_matches:
@@ -1819,14 +1785,14 @@ def choose_best_match(matches: List[SequenceMatch],
                 b2_list = m.best_b2()
                 # This is a simplification - would need specimens object to get actual IDs
                 specimen_candidates.append(f"{b1_list[0] if b1_list else 'none'}_{b2_list[0] if b2_list else 'none'}")
-        trace_logger.log_ambiguity_detected(sequence_id, ambiguity_type, 
-                                           len(equivalent_matches), pools_involved, specimen_candidates)
+        trace_logger.log_multiple_matches_detected(sequence_id, match_type, 
+                                                 len(equivalent_matches), pools_involved, specimen_candidates)
     
     return MatchSelection(
         equivalent_matches=equivalent_matches,
         best_score=best_score,
-        is_ambiguous=is_ambiguous,
-        ambiguity_type=ambiguity_type
+        has_multiple=has_multiple,
+        match_type=match_type
     )
 
 
@@ -1842,13 +1808,11 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens,
         ids = specimens.specimens_for_barcodes_and_primers(
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
         if len(ids) > 1:
-            sample_id = SampleId.AMBIGUOUS
-            resolution_type = 'ambiguous'
-            # For ambiguous matches, use most common pool from matching specimens
-            pools = Counter()
-            for id in ids:
-                pools[specimens.get_specimen_pool(id)] += 1
-            pool = pools.most_common(1)[0][0]
+            # Multiple specimen matches - use first match (this shouldn't happen in new flow)
+            sample_id = ids[0]  # Use first specimen ID
+            resolution_type = 'multiple_specimens'
+            # Use pool from first specimen
+            pool = specimens.get_specimen_pool(sample_id)
         elif len(ids) == 1:
             sample_id = ids[0]
             resolution_type = 'full_match'
@@ -1880,7 +1844,7 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens,
     return sample_id, pool
 
 def group_sample(match, sample_id):
-    if sample_id in [SampleId.UNKNOWN, SampleId.AMBIGUOUS]:
+    if sample_id in [SampleId.UNKNOWN]:
         b1s = match.best_b1()
         b2s = match.best_b2()
         if len(b2s) == 1:
@@ -2261,7 +2225,7 @@ def parse_args(argv):
     parser.add_argument("-O", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
     parser.add_argument("--color", action="store_true", help="Highlight barcode matches in blue, primer matches in green")
     parser.add_argument("--trim", choices=[TrimMode.NONE, TrimMode.TAILS, TrimMode.BARCODES, TrimMode.PRIMERS], default=TrimMode.BARCODES, help="trimming to apply")
-    parser.add_argument("--ambiguity-strategy", choices=[AmbiguityStrategy.FIRST, AmbiguityStrategy.STRICT, AmbiguityStrategy.ALL, AmbiguityStrategy.DIAGNOSTIC], default=AmbiguityStrategy.FIRST, help="How to handle ambiguous matches: 'first' uses first equivalent match (default), 'strict' discards ambiguous matches, 'all' outputs all matches (future), 'diagnostic' writes to separate file (future)")
+    parser.add_argument("--resolve-multiple-matches", choices=[MultipleMatchStrategy.RETAIN, MultipleMatchStrategy.DOWNGRADE_FULL], default=MultipleMatchStrategy.RETAIN, help="Strategy for handling multiple equivalent matches: 'retain' outputs all matches (default), 'downgrade-full' downgrades full matches to partial when multiple exist")
     parser.add_argument("-d", "--diagnostics", nargs='?', const=1, type=int, choices=[1, 2, 3], 
                         help="Enable diagnostic trace logging: 1=standard (default), 2=detailed, 3=verbose")
     parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging")
@@ -2950,8 +2914,8 @@ def setup_match_parameters(args, specimens):
     for p, pt in primer_thresholds.items():
         logging.info(f"Using Edit Distance Threshold {pt} for primer {p}")
 
-    # Log ambiguity strategy
-    logging.info(f"Using ambiguity strategy: {args.ambiguity_strategy}")
+    # Log multiple match strategy
+    logging.info(f"Using multiple match strategy: {args.resolve_multiple_matches}")
 
     if args.disable_preorient:
         logging.info("Sequence pre-orientation disabled, may run slower")
