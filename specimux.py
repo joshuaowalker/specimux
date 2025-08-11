@@ -1037,10 +1037,6 @@ class TraceLogger:
         self._log_event(sequence_id, 'SEQUENCE_OUTPUT', output_type, specimen_id,
                        pool, primer_pair, file_path)
     
-    def log_no_primers_matched(self, sequence_id: str, reason: str):
-        """Log when no primers match a sequence."""
-        self._log_event(sequence_id, 'NO_PRIMERS_MATCHED', reason)
-    
     def log_no_match_found(self, sequence_id: str, stage_failed: str, reason: str):
         """Log when no matches found."""
         self._log_event(sequence_id, 'NO_MATCH_FOUND', stage_failed, reason)
@@ -2078,10 +2074,6 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                     
                 matches.append(match)
                 match_counter += 1
-    
-    # Log if no primers matched
-    if trace_logger and not matches:
-        trace_logger.log_no_primers_matched(sequence_id, "no_primers_found_in_search_regions")
     
     # TODO: Consider whether primer pairs that match almost exactly the same extent 
     # should be considered distinct matches or not. This affects ambiguity detection

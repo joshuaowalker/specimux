@@ -168,13 +168,6 @@ timestamp | worker_id | event_seq | sequence_id | SEQUENCE_OUTPUT | output_type 
 - `primer_pair`: String, primer pair (format: "FWD-REV")
 - `file_path`: String, relative path where sequence will be written
 
-### NO_PRIMERS_MATCHED
-**Purpose**: Log when no primers match a sequence
-```
-timestamp | worker_id | event_seq | sequence_id | NO_PRIMERS_MATCHED | reason
-```
-- `reason`: String, description of why no primers matched (e.g., "sequence_too_short", "no_primers_found_in_search_regions")
-
 ### NO_MATCH_FOUND
 **Purpose**: Log when no viable matches found
 ```
