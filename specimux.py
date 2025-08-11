@@ -1069,9 +1069,22 @@ class TraceLogger:
         self._log_event(sequence_id, 'SEQUENCE_OUTPUT', output_type, specimen_id,
                        pool, primer_pair, file_path)
     
+    def log_no_primers_matched(self, sequence_id: str, reason: str):
+        """Log when no primers match a sequence."""
+        self._log_event(sequence_id, 'NO_PRIMERS_MATCHED', reason)
+    
     def log_no_match_found(self, sequence_id: str, stage_failed: str, reason: str):
         """Log when no matches found."""
         self._log_event(sequence_id, 'NO_MATCH_FOUND', stage_failed, reason)
+    
+    def log_match_discarded(self, sequence_id: str, candidate_match_id: str,
+                           forward_primer: str, reverse_primer: str,
+                           forward_barcode: str, reverse_barcode: str,
+                           score: float, discard_reason: str):
+        """Log when a candidate match is discarded."""
+        self._log_event(sequence_id, 'MATCH_DISCARDED', candidate_match_id,
+                       forward_primer, reverse_primer, forward_barcode, reverse_barcode,
+                       score, discard_reason)
     
     # Detailed events (verbosity level 2+)
     
@@ -1691,21 +1704,44 @@ def process_sequences(seq_records: List[SeqRecord],
                 if match_result.is_ambiguous and args.ambiguity_strategy == AmbiguityStrategy.STRICT:
                     # Skip this sequence entirely for strict strategy
                     stats[StatsKeys.AMBIGUOUS_DISCARDED] += 1
+                    
+                    # Log all equivalent matches as discarded due to strict strategy
+                    if trace_logger:
+                        for m in match_result.equivalent_matches:
+                            p1_name = m.get_p1().name if m.get_p1() else 'none'
+                            p2_name = m.get_p2().name if m.get_p2() else 'none'
+                            b1_name = m.best_b1()[0] if m.best_b1() else 'none'
+                            b2_name = m.best_b2()[0] if m.best_b2() else 'none'
+                            trace_logger.log_match_discarded(sequence_id, m.candidate_match_id,
+                                                           p1_name, p2_name, b1_name, b2_name,
+                                                           float(match_result.best_score), 'ambiguous_strict')
                     continue
                 
                 # Use first equivalent match for processing (first strategy or non-ambiguous)
                 match = match_result.get_first_match()
                 
-                # Log match selection
+                # Log match selection and discard other equivalent matches
                 if trace_logger:
                     p1_name = match.get_p1().name if match.get_p1() else 'none'
                     p2_name = match.get_p2().name if match.get_p2() else 'none'
                     b1_name = match.best_b1()[0] if match.best_b1() else 'none'
                     b2_name = match.best_b2()[0] if match.best_b2() else 'none'
-                    pool_name = match.get_pool() or 'unknown'
+                    pool_name = match.get_pool() or 'none'
                     trace_logger.log_match_selected(sequence_id, args.ambiguity_strategy,
                                                    p1_name, p2_name, b1_name, b2_name,
                                                    pool_name, not match_result.is_ambiguous)
+                    
+                    # Log other equivalent matches as discarded (when using first strategy with ambiguous matches)
+                    if match_result.is_ambiguous:
+                        for m in match_result.equivalent_matches:
+                            if m != match:  # Don't log the selected match as discarded
+                                p1_name_disc = m.get_p1().name if m.get_p1() else 'none'
+                                p2_name_disc = m.get_p2().name if m.get_p2() else 'none'
+                                b1_name_disc = m.best_b1()[0] if m.best_b1() else 'none'
+                                b2_name_disc = m.best_b2()[0] if m.best_b2() else 'none'
+                                trace_logger.log_match_discarded(sequence_id, m.candidate_match_id,
+                                                               p1_name_disc, p2_name_disc, b1_name_disc, b2_name_disc,
+                                                               float(match_result.best_score), 'ambiguous_not_first')
                 
                 if match_result.is_ambiguous:
                     sample_id = SampleId.AMBIGUOUS
@@ -1830,6 +1866,18 @@ def choose_best_match(matches: List[SequenceMatch],
     # Collect all matches with best score - these are all equivalent
     equivalent_matches = [m for score, m in scored_matches if score == best_score]
     
+    # Log discarded matches (those with lower scores)
+    if trace_logger:
+        for score, m in scored_matches:
+            if score < best_score:
+                p1_name = m.get_p1().name if m.get_p1() else 'none'
+                p2_name = m.get_p2().name if m.get_p2() else 'none'
+                b1_name = m.best_b1()[0] if m.best_b1() else 'none'
+                b2_name = m.best_b2()[0] if m.best_b2() else 'none'
+                trace_logger.log_match_discarded(sequence_id, m.candidate_match_id,
+                                               p1_name, p2_name, b1_name, b2_name,
+                                               float(score), 'lower_score')
+    
     # Determine ambiguity type and pool assignment
     is_ambiguous = len(equivalent_matches) > 1
     
@@ -1875,7 +1923,7 @@ def choose_best_match(matches: List[SequenceMatch],
     
     # Log ambiguity if detected
     if trace_logger and is_ambiguous:
-        pools_involved = list(set(m.get_pool() or 'unknown' for m in equivalent_matches))
+        pools_involved = list(set(m.get_pool() or 'none' for m in equivalent_matches))
         specimen_candidates = []
         for m in equivalent_matches:
             if m.p1_match and m.p2_match and m.has_b1_match() and m.has_b2_match():
@@ -1940,7 +1988,7 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens,
         b1_name = match.best_b1()[0] if match.best_b1() else 'none'
         b2_name = match.best_b2()[0] if match.best_b2() else 'none'
         trace_logger.log_specimen_resolved(sequence_id, sample_id, resolution_type,
-                                          pool or 'unknown', p1_name, p2_name, b1_name, b2_name)
+                                          pool or 'none', p1_name, p2_name, b1_name, b2_name)
 
     return sample_id, pool
 
@@ -2072,7 +2120,7 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                     p2_dist = match.p2_match.distance() if match.p2_match else -1
                     orientation_used = 'as_is' if orientation in [Orientation.FORWARD, Orientation.UNKNOWN] else 'reverse_complement'
                     trace_logger.log_primer_matched(sequence_id, candidate_match_id, match_type, p1_name, p2_name,
-                                                   p1_dist, p2_dist, pool or 'unknown', orientation_used)
+                                                   p1_dist, p2_dist, pool or 'none', orientation_used)
                     
                     # Log barcode match result for this candidate match
                     b1_name = match.best_b1()[0] if match.has_b1_match() else 'none'
@@ -2117,7 +2165,7 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                     p2_dist = match.p2_match.distance() if match.p2_match else -1
                     orientation_used = 'reverse_complement'
                     trace_logger.log_primer_matched(sequence_id, candidate_match_id, match_type, p1_name, p2_name,
-                                                   p1_dist, p2_dist, pool or 'unknown', orientation_used)
+                                                   p1_dist, p2_dist, pool or 'none', orientation_used)
                     
                     # Log barcode match result for this candidate match
                     b1_name = match.best_b1()[0] if match.has_b1_match() else 'none'
@@ -2139,6 +2187,10 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                     
                 matches.append(match)
                 match_counter += 1
+    
+    # Log if no primers matched
+    if trace_logger and not matches:
+        trace_logger.log_no_primers_matched(sequence_id, "no_primers_found_in_search_regions")
     
     # TODO: Consider whether primer pairs that match almost exactly the same extent 
     # should be considered distinct matches or not. This affects ambiguity detection

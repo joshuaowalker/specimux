@@ -180,6 +180,16 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
                         'barcode_presence': row[11],
                         'score': row[12]
                     })
+                elif event_dict['event_type'] == 'MATCH_DISCARDED' and len(row) >= 13:
+                    event_dict.update({
+                        'candidate_match_id': row[5],
+                        'forward_primer': row[6],
+                        'reverse_primer': row[7],
+                        'forward_barcode': row[8],
+                        'reverse_barcode': row[9],
+                        'score': row[10],
+                        'discard_reason': row[11]
+                    })
                 
                 sequence_id = event_dict['sequence_id']
                 sequence_events[sequence_id].append(event_dict)
@@ -192,7 +202,7 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
         stats[('sequence_processed',)] += 1
         
         # Find orientation event
-        orientation = 'unknown'
+        orientation = 'none'
         for event in events:
             if event['event_type'] == 'ORIENTATION_DETECTED':
                 orientation = event['orientation']
@@ -201,18 +211,18 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
         
         # Find final outcome - prioritize MATCH_SELECTED over SPECIMEN_RESOLVED
         final_outcome = None
-        final_pool = 'unknown'
-        final_primer_pair = 'unknown-unknown'
-        final_match_type = 'unknown'
+        final_pool = 'none'
+        final_primer_pair = 'none-none'
+        final_match_type = 'none'
         forward_barcode = 'none'
         reverse_barcode = 'none'
-        forward_primer = 'unknown'
-        reverse_primer = 'unknown'
+        forward_primer = 'none'
+        reverse_primer = 'none'
         
         # First get match info from MATCH_SELECTED (has the actual primers)
         for event in events:
             if event['event_type'] == 'MATCH_SELECTED':
-                final_pool = event.get('pool', 'unknown')
+                final_pool = event.get('pool', 'none')
                 forward_primer = event.get('forward_primer', 'none')
                 reverse_primer = event.get('reverse_primer', 'none')
                 forward_barcode = event.get('forward_barcode', 'none')
@@ -223,27 +233,23 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
         # Then get match type from SPECIMEN_RESOLVED
         for event in events:
             if event['event_type'] == 'SPECIMEN_RESOLVED':
-                final_match_type = event.get('match_type', 'unknown')
+                final_match_type = event.get('match_type', 'none')
                 # Don't override pool/primers from MATCH_SELECTED
                 break
         
-        # Handle sequences with no specimen resolution (no primers found)
-        if final_match_type == 'unknown':
-            no_match_found = False
-            for event in events:
-                if event['event_type'] == 'NO_MATCH_FOUND':
-                    no_match_found = True
-                    break
-            
-            if no_match_found:
-                stats[('primer_failure', 'no_primers')] += 1
-                final_primer_pair = 'none-none'  # Use 'none' not 'unknown'
-                final_match_type = 'ambiguous'  # No primers = ambiguous outcome
+        # Handle sequences with no primers matched (explicit event)
+        no_primers_matched = False
+        for event in events:
+            if event['event_type'] == 'NO_PRIMERS_MATCHED':
+                no_primers_matched = True
+                break
         
-        # Fix primer naming: convert 'none' to 'unknown' to match original stats format
-        if final_primer_pair != 'none-none':
-            # Replace 'none' with 'unknown' in primer pair names to match legacy format
-            final_primer_pair = final_primer_pair.replace('none', 'unknown')
+        if no_primers_matched:
+            stats[('primer_failure', 'no_primers')] += 1
+            final_primer_pair = 'none-none'  # Use 'none' consistently
+            final_match_type = 'none'  # Use 'none' instead of 'unknown'
+        
+        # Keep 'none' terminology consistently throughout
         
         # Count match attempts - use ambiguity info to estimate total locations
         ambiguity_candidate_count = 1  # Default to 1 if no ambiguity
@@ -267,15 +273,15 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
             
             # Count primer pair matches by actual candidate matches (locations)
             for match_event in candidate_matches:
-                match_pool = match_event.get('pool', 'unknown')
+                match_pool = match_event.get('pool', 'none')
                 forward_primer = match_event.get('forward_primer', 'none')
                 reverse_primer = match_event.get('reverse_primer', 'none')
                 match_primer_pair = f"{forward_primer}-{reverse_primer}"
                 stats[('primer_pair_match', match_pool, match_primer_pair)] += 1
         else:
-            # No primer matches found - count as unknown-unknown (1 attempt per sequence, not amplified)
+            # No primer matches found - count as none-none (1 attempt per sequence, not amplified)
             stats[('match_attempts',)] += 1
-            stats[('primer_pair_match', 'unknown', 'unknown-unknown')] += 1
+            stats[('primer_pair_match', 'none', 'none-none')] += 1
         
         # Count barcode combinations by actual candidate matches using BARCODE_MATCHED events
         if candidate_matches:
@@ -290,9 +296,9 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
             
             # Count barcode combinations for each candidate match
             for match_event in candidate_matches:
-                match_pool = match_event.get('pool', 'unknown')
-                forward_primer = match_event.get('forward_primer', 'unknown')
-                reverse_primer = match_event.get('reverse_primer', 'unknown')
+                match_pool = match_event.get('pool', 'none')
+                forward_primer = match_event.get('forward_primer', 'none')
+                reverse_primer = match_event.get('reverse_primer', 'none')
                 match_primer_pair = f"{forward_primer}-{reverse_primer}"
                 
                 # Find corresponding barcode event for this candidate match
@@ -313,9 +319,7 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
                     barcode_combo = 'no_barcodes'
                 
                 stats[('barcode_combination', match_pool, match_primer_pair, barcode_combo)] += 1
-        else:
-            # No primer matches found - count as no_barcodes for unknown-unknown (1 per sequence, not amplified)
-            stats[('barcode_combination', 'unknown', 'unknown-unknown', 'no_barcodes')] += 1
+        # Note: If no primer matches found, we don't add barcode combinations - the flow terminates at primer layer
         
         # Determine ambiguity type from AMBIGUITY_DETECTED events
         ambiguity_type = 'none'
@@ -335,23 +339,159 @@ def read_trace_files(trace_directory: str) -> Dict[Tuple, int]:
         # Count retained matches (all sequences are retained)
         stats[('retained_matches',)] += 1
         
-        # Map match_type to outcome categories
-        outcome_mapping = {
-            'full_match': 'matched',
-            'partial_forward': 'partial', 
-            'partial_reverse': 'partial',
-            'unknown': 'unknown'
-        }
+        # Count outcomes based on SPECIMEN_RESOLVED events (actual resolution)
+        # Count discarded candidates based on MATCH_DISCARDED events
         
-        if final_match_type in outcome_mapping:
-            outcome = outcome_mapping[final_match_type]
-        elif ambiguity_type != 'none':
-            outcome = 'ambiguous'
-        else:
-            outcome = 'unknown'
+        # First, find the SPECIMEN_RESOLVED event for the actual outcome
+        specimen_resolved_event = None
+        for event in events:
+            if event['event_type'] == 'SPECIMEN_RESOLVED':
+                specimen_resolved_event = event
+                break
         
-        # Count final outcomes
-        stats[('outcome', final_pool, final_primer_pair, outcome)] += 1
+        # Count the actual outcome from SPECIMEN_RESOLVED
+        if specimen_resolved_event:
+            resolution_type = specimen_resolved_event.get('match_type', 'unknown')
+            pool = specimen_resolved_event.get('pool', 'none')
+            forward_primer = specimen_resolved_event.get('forward_primer', 'none')
+            reverse_primer = specimen_resolved_event.get('reverse_primer', 'none')
+            primer_pair = f"{forward_primer}-{reverse_primer}"
+            
+            # Map resolution_type to outcome
+            outcome_mapping = {
+                'full_match': 'matched',
+                'partial_forward': 'partial',
+                'partial_reverse': 'partial',
+                'ambiguous': 'ambiguous',
+                'unknown': 'unknown'
+            }
+            outcome = outcome_mapping.get(resolution_type, 'unknown')
+            
+            # Count the successful outcome
+            stats[('outcome', pool, primer_pair, outcome)] += 1
+        
+        # Count discarded candidates from MATCH_DISCARDED events
+        # Build a map of candidate_match_id to pool from PRIMER_MATCHED events
+        candidate_pools = {}
+        for event in events:
+            if event['event_type'] == 'PRIMER_MATCHED':
+                candidate_id = event.get('candidate_match_id')
+                pool = event.get('pool', 'none')
+                if candidate_id:
+                    candidate_pools[candidate_id] = pool
+        
+        match_discarded_events = []
+        for event in events:
+            if event['event_type'] == 'MATCH_DISCARDED':
+                match_discarded_events.append(event)
+        
+        for discarded_event in match_discarded_events:
+            forward_primer = discarded_event.get('forward_primer', 'none')
+            reverse_primer = discarded_event.get('reverse_primer', 'none')
+            forward_barcode = discarded_event.get('forward_barcode', 'none')
+            reverse_barcode = discarded_event.get('reverse_barcode', 'none')
+            candidate_id = discarded_event.get('candidate_match_id')
+            
+            # Get pool from our map
+            pool = candidate_pools.get(candidate_id, 'none')
+            
+            # Determine what the outcome would have been
+            if forward_primer != 'none' and reverse_primer != 'none':
+                if forward_barcode != 'none' and reverse_barcode != 'none':
+                    outcome_type = 'matched'
+                elif forward_barcode != 'none' or reverse_barcode != 'none':
+                    outcome_type = 'partial'
+                else:
+                    outcome_type = 'no_barcodes'
+            elif forward_primer != 'none' or reverse_primer != 'none':
+                outcome_type = 'partial_primer'
+            else:
+                outcome_type = 'none'
+            
+            primer_pair = f"{forward_primer}-{reverse_primer}"
+            
+            stats[('outcome_discarded', pool, primer_pair, outcome_type)] += 1
+        
+        # Handle sequences with no matches at all (no SPECIMEN_RESOLVED)
+        if not specimen_resolved_event and not match_discarded_events:
+            # Check if there was a NO_PRIMERS_MATCHED event
+            no_primers = False
+            for event in events:
+                if event['event_type'] == 'NO_PRIMERS_MATCHED':
+                    no_primers = True
+                    break
+            
+            if no_primers:
+                # Already counted in primer layer as none-none
+                pass
+            else:
+                # Some other unknown case - count as unknown outcome
+                stats[('outcome', 'none', 'none-none', 'unknown')] += 1
+    
+    # Process discarded outcomes using exact candidate_match_id mapping
+    # Build comprehensive maps from candidate_match_id to event info
+    all_primer_events = {}   # candidate_match_id -> primer event (for pool info)
+    all_barcode_events = {}  # candidate_match_id -> barcode event  
+    all_discarded_events = []  # list of discarded events
+    
+    for sequence_id, events in sequence_events.items():
+        for event in events:
+            if event['event_type'] == 'PRIMER_MATCHED':
+                candidate_id = event.get('candidate_match_id')
+                if candidate_id:
+                    all_primer_events[candidate_id] = event
+            elif event['event_type'] == 'BARCODE_MATCHED':
+                candidate_id = event.get('candidate_match_id')
+                if candidate_id:
+                    all_barcode_events[candidate_id] = event
+            elif event['event_type'] == 'MATCH_DISCARDED':
+                all_discarded_events.append(event)
+    
+    # Map each discarded candidate to its barcode combination and create flow stats
+    for discarded_event in all_discarded_events:
+        candidate_id = discarded_event.get('candidate_match_id')
+        if candidate_id in all_barcode_events:
+            barcode_event = all_barcode_events[candidate_id]
+            primer_event = all_primer_events.get(candidate_id, {})
+            
+            barcode_match_type = barcode_event.get('match_type', 'none')
+            
+            # Convert to barcode combination format
+            if barcode_match_type == 'both':
+                barcode_combo = 'both_barcodes'
+            elif barcode_match_type == 'forward_only':
+                barcode_combo = 'forward_only'
+            elif barcode_match_type == 'reverse_only':
+                barcode_combo = 'reverse_only'
+            else:
+                barcode_combo = 'no_barcodes'
+            
+            # Get details from discarded event
+            forward_primer = discarded_event.get('forward_primer', 'none')
+            reverse_primer = discarded_event.get('reverse_primer', 'none')
+            forward_barcode = discarded_event.get('forward_barcode', 'none')
+            reverse_barcode = discarded_event.get('reverse_barcode', 'none')
+            
+            # Get pool from primer event
+            pool = primer_event.get('pool', 'none')
+            primer_pair = f"{forward_primer}-{reverse_primer}"
+            
+            # Determine discarded outcome type
+            if forward_primer != 'none' and reverse_primer != 'none':
+                if forward_barcode != 'none' and reverse_barcode != 'none':
+                    outcome_type = 'matched'
+                elif forward_barcode != 'none' or reverse_barcode != 'none':
+                    outcome_type = 'partial'
+                else:
+                    outcome_type = 'no_barcodes'
+            elif forward_primer != 'none' or reverse_primer != 'none':
+                outcome_type = 'partial_primer'
+            else:
+                outcome_type = 'none'
+            
+            # Add to both barcode flow stats and outcome discarded totals
+            stats[('barcode_to_outcome_discarded', barcode_combo, outcome_type)] += 1
+            stats[('outcome_discarded', pool, primer_pair, outcome_type)] += 1
     
     return dict(stats)
 
@@ -444,7 +584,8 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
         # Layer 2 - Orientation (updated: forward and reverse are both green - successful orientation)
         'orient_forward': '#4CAF50',
         'orient_reverse': '#4CAF50', 
-        'orient_unknown': '#FF9800',
+        'orient_none': '#FF9800',
+        'orient_unknown': '#FF9800',  # Fallback for legacy data
         
         # Layer 3 - Primer Pairs (updated colors)
         'primer_full': '#2E7D32',    # Both primers found - dark green
@@ -460,13 +601,17 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
         # Layer 5 - Outcomes
         'outcome_matched': '#1B5E20',
         'outcome_partial': '#FF9800',
+        'outcome_partial_primer': '#FFA726',  # Slightly different orange for partial primer
+        'outcome_no_barcodes': '#F57C00',  # Darker orange for no barcodes
         'outcome_ambiguous': '#9C27B0',
-        'outcome_unknown': '#B71C1C',
+        'outcome_none': '#B71C1C',
+        'outcome_unknown': '#B71C1C',  # Fallback for legacy data
         
         # Layer 6 - Pools
         'pool_ITS': '#1976D2',
         'pool_ITS2': '#00796B',
-        'pool_unknown': '#D32F2F'
+        'pool_none': '#D32F2F',
+        'pool_unknown': '#D32F2F'  # Fallback for legacy data
     }
     
     # Define layer x-coordinates
@@ -512,8 +657,8 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
         if key[0] == 'orientation':
             orientation_totals[key[1]] = count
     
-    # Create orientation nodes and links from input (ordered: forward, reverse, unknown)
-    orientation_order = ['forward', 'reverse', 'unknown']
+    # Create orientation nodes and links from input (ordered: forward, reverse, none/unknown)
+    orientation_order = ['forward', 'reverse', 'none', 'unknown']
     
     # Calculate proportional positions for orientation nodes
     orientation_values = []
@@ -531,7 +676,7 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
             nodes.append({
                 "id": node_id, 
                 "name": f"Orientation: {orientation.title()} ({count:,} seqs)",
-                "color": colors.get(color_key, colors['orient_unknown']),
+                "color": colors.get(color_key, colors.get('orient_none', colors['orient_unknown'])),
                 "x": layer_x['orientation'],
                 "y": orientation_y_positions[orientation]
             })
@@ -549,19 +694,18 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
                 primer_pair_totals[primer_pair] = 0
             primer_pair_totals[primer_pair] += count
     
-    # Add sequences with no primers detected
-    no_primers_count = unified_stats.get(('primer_failure', 'no_primers'), 0)
+    # Add sequences with no primers detected (tracked as none-none in primer_pair_match)
+    # This includes both cases where primers weren't found and sequences that didn't match
+    no_primers_count = unified_stats.get(('primer_pair_match', 'none', 'none-none'), 0)
     if no_primers_count > 0:
-        primer_pair_totals['no-primers'] = no_primers_count
+        primer_pair_totals['none-none'] = no_primers_count
     
-    # Helper function to determine primer pair color based on unknown primers
+    # Helper function to determine primer pair color based on none primers
     def get_primer_pair_color(primer_pair):
-        if primer_pair == 'no-primers':
-            return colors['primer_none']
-        elif 'unknown-unknown' in primer_pair:
+        if primer_pair in ['none-none', 'unknown-unknown', 'no-primers']:
             return colors['primer_none']  # Red - no valid primers
-        elif 'unknown' in primer_pair:
-            return colors['primer_partial']  # Orange - one primer unknown
+        elif 'none' in primer_pair or 'unknown' in primer_pair:
+            return colors['primer_partial']  # Orange - one primer none/unknown
         else:
             return colors['primer_full']  # Green - both primers valid
     
@@ -573,9 +717,9 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
     no_primers = []
     
     for primer_pair in primer_pair_totals.keys():
-        if primer_pair == 'no-primers' or 'unknown-unknown' in primer_pair:
+        if primer_pair in ['none-none', 'unknown-unknown', 'no-primers']:
             no_primers.append(primer_pair)
-        elif 'unknown' in primer_pair:
+        elif 'none' in primer_pair or 'unknown' in primer_pair:
             single_primer.append(primer_pair)
         else:
             both_primers.append(primer_pair)
@@ -591,8 +735,8 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
         node_id = f"primer_{primer_pair}"
         color = get_primer_pair_color(primer_pair)
         
-        if primer_pair == 'no-primers':
-            display_name = f"No Primers ({count:,} locs)"
+        if primer_pair in ['none-none', 'no-primers']:
+            display_name = f"No Primers ({count:,} seqs)"  # These are sequences, not locations
         else:
             display_name = f"{primer_pair} ({count:,} locs)"
         
@@ -635,9 +779,7 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
             if combo in barcode_totals:
                 barcode_totals[combo] += count
     
-    # Add no-primers to no_barcodes category
-    if no_primers_count > 0:
-        barcode_totals['no_barcodes'] += no_primers_count
+    # Note: no-primers case terminates at primer layer, doesn't flow to barcode layer
     
     # Create simplified barcode combination nodes (ordered: both, single (forward/reverse), neither)
     barcode_display_names = {
@@ -697,10 +839,7 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
                 primer_to_barcode_flows[flow_key] = 0
             primer_to_barcode_flows[flow_key] += count
     
-    # Add no-primers flow to no_barcodes
-    if no_primers_count > 0:
-        flow_key = ("primer_no-primers", "barcode_no_barcodes")
-        primer_to_barcode_flows[flow_key] = no_primers_count
+    # Note: no-primers terminates at primer layer, no flow to barcode layer
     
     # Add the aggregated flows as links
     for (primer_id, barcode_id), count in primer_to_barcode_flows.items():
@@ -709,44 +848,82 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
         if primer_exists and barcode_exists:
             links.append({"source": primer_id, "target": barcode_id, "value": count})
     
-    # Layer 5: Match Outcomes
+    # Note: Discarded outcomes flow from barcode layer, not directly from primer layer
+    
+    # Layer 5: Match Outcomes (now counting candidate matches, not sequences)
     outcome_totals = {}
+    outcome_discarded_totals = {}
+    
     for key, count in unified_stats.items():
         if key[0] == 'outcome':  # ('outcome', pool, primer_pair, match_type)
             match_type = key[3]
             if match_type not in outcome_totals:
                 outcome_totals[match_type] = 0
             outcome_totals[match_type] += count
+        elif key[0] == 'outcome_discarded':  # ('outcome_discarded', pool, primer_pair, match_type)
+            match_type = key[3]
+            if match_type not in outcome_discarded_totals:
+                outcome_discarded_totals[match_type] = 0
+            outcome_discarded_totals[match_type] += count
     
-    # Create outcome nodes (ordered: matched, partial, ambiguous, unknown)
-    outcome_order = ['matched', 'partial', 'ambiguous', 'unknown']
+    # Create outcome nodes (ordered: matched, partial, ambiguous, none/unknown, then discarded)
+    outcome_order = ['matched', 'partial', 'partial_primer', 'no_barcodes', 'ambiguous', 'none', 'unknown']
+    discarded_order = ['matched_discarded', 'partial_discarded', 'partial_primer_discarded', 
+                      'no_barcodes_discarded', 'none_discarded']
     
     # Calculate proportional positions for outcome nodes
     outcome_values = []
+    
+    # Add accepted outcomes
     for match_type in outcome_order:
         count = outcome_totals.get(match_type, 0)
         if count > 0:  # Only include nodes that have actual data
             outcome_values.append((match_type, count))
     
+    # Add discarded outcomes
+    for match_type in ['matched', 'partial', 'partial_primer', 'no_barcodes', 'none']:
+        count = outcome_discarded_totals.get(match_type, 0)
+        if count > 0:
+            outcome_values.append((f"{match_type}_discarded", count))
+    
     outcome_y_positions = calculate_proportional_positions(outcome_values)
     
-    for match_type in outcome_order:
-        count = outcome_totals.get(match_type, 0)
+    # Create nodes for both accepted and discarded outcomes
+    for outcome_key, count in outcome_values:
         if count > 0:  # Only create nodes that have actual data
-            node_id = f"outcome_{match_type}"
-            color_key = f"outcome_{match_type}"
+            is_discarded = '_discarded' in outcome_key
+            if is_discarded:
+                match_type = outcome_key.replace('_discarded', '')
+                node_id = f"outcome_{outcome_key}"
+                display_name = f"Discarded: {match_type.replace('_', ' ').title()}"
+                # Use darker/muted colors for discarded outcomes
+                color = colors.get(f'outcome_{match_type}', colors['outcome_none'])
+                # Darken the color for discarded (simple approach - prepend with darker hex)
+                if color.startswith('#'):
+                    # Simple darkening by reducing RGB values by ~40%
+                    r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+                    r, g, b = int(r * 0.6), int(g * 0.6), int(b * 0.6)
+                    color = f"#{r:02x}{g:02x}{b:02x}"
+            else:
+                match_type = outcome_key
+                node_id = f"outcome_{match_type}"
+                display_name = f"Outcome: {match_type.replace('_', ' ').title()}"
+                color_key = f"outcome_{match_type}"
+                color = colors.get(color_key, colors.get('outcome_none', colors['outcome_unknown']))
+            
             nodes.append({
                 "id": node_id, 
-                "name": f"Outcome: {match_type.title()} ({count:,} seqs)",
-                "color": colors.get(color_key, colors['outcome_unknown']),
+                "name": f"{display_name} ({count:,} candidates)",  # Changed from 'seqs' to 'candidates'
+                "color": color,
                 "x": layer_x['outcome'],
-                "y": outcome_y_positions[match_type]
+                "y": outcome_y_positions.get(outcome_key, 0.5)
             })
     
     # Create links from barcode combinations to outcomes
-    # With simplified barcode combinations, we need to map outcomes to the right barcode types
+    # Now handling both accepted and discarded outcomes
     barcode_to_outcome_flows = {}
     
+    # Process accepted outcomes
     for key, count in unified_stats.items():
         if key[0] == 'outcome':  # ('outcome', pool, primer_pair, match_type)
             pool = key[1]
@@ -767,10 +944,25 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
                             barcode_to_outcome_flows[flow_key] = 0
                         barcode_to_outcome_flows[flow_key] += bc_count
                 continue
-            else:  # unknown, ambiguous
+            elif match_type == 'no_barcodes':
                 barcode_type = 'no_barcodes'
+            elif match_type in ['partial_primer', 'none', 'ambiguous']:
+                barcode_type = 'no_barcodes'  # These typically have no barcodes
+            else:
+                barcode_type = 'no_barcodes'  # Default fallback
             
             flow_key = (f"barcode_{barcode_type}", f"outcome_{match_type}")
+            if flow_key not in barcode_to_outcome_flows:
+                barcode_to_outcome_flows[flow_key] = 0
+            barcode_to_outcome_flows[flow_key] += count
+    
+    # Add flows for discarded outcomes using the stats from read_trace_files
+    for key, count in unified_stats.items():
+        if key[0] == 'barcode_to_outcome_discarded':  # ('barcode_to_outcome_discarded', barcode_combo, outcome_type)
+            barcode_combo = key[1]
+            outcome_type = key[2]
+            
+            flow_key = (f"barcode_{barcode_combo}", f"outcome_{outcome_type}_discarded")
             if flow_key not in barcode_to_outcome_flows:
                 barcode_to_outcome_flows[flow_key] = 0
             barcode_to_outcome_flows[flow_key] += count
@@ -791,17 +983,17 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
                 pool_totals[pool] = 0
             pool_totals[pool] += count
     
-    # Create pool nodes (ordered with unknown last)
+    # Create pool nodes (ordered with none/unknown last)
     known_pools = []
-    unknown_pools = []
+    none_pools = []
     
     for pool in pool_totals.keys():
-        if pool == 'None' or pool.lower() == 'unknown':
-            unknown_pools.append(pool)
+        if pool == 'None' or pool.lower() in ['none', 'unknown']:
+            none_pools.append(pool)
         else:
             known_pools.append(pool)
     
-    pool_order = sorted(known_pools) + sorted(unknown_pools)
+    pool_order = sorted(known_pools) + sorted(none_pools)
     
     # Calculate proportional positions for pool nodes
     pool_values = [(pool, pool_totals[pool]) for pool in pool_order]
@@ -810,18 +1002,18 @@ def convert_raw_stats_to_flow(raw_stats: Dict[str, Any]) -> Dict[str, Any]:
     for pool in pool_order:
         count = pool_totals[pool]
         node_id = f"pool_{pool}"
-        pool_display = pool if pool != 'None' else 'unknown'
+        pool_display = pool if pool != 'None' else 'none'
         
         # Determine color based on pool type
         pool_key = f'pool_{pool_display}'
         if pool_key in colors:
             color = colors[pool_key]
         else:
-            color = colors['pool_unknown']
+            color = colors['pool_none']  # Default fallback
             
         nodes.append({
             "id": node_id, 
-            "name": f"Pool: {pool_display.upper() if pool_display != 'unknown' else 'Unknown'} ({count:,} seqs)",
+            "name": f"Pool: {pool_display.upper() if pool_display not in ['none', 'unknown'] else 'None'} ({count:,} seqs)",
             "color": color,
             "x": layer_x['pool'],
             "y": pool_y_positions[pool]

@@ -131,6 +131,19 @@ timestamp | worker_id | event_seq | sequence_id | MATCH_SELECTED | selection_str
 - `pool`: String, selected pool name
 - `is_unique`: Boolean, whether selection was unique
 
+### MATCH_DISCARDED
+**Purpose**: Log when a candidate match is discarded during selection
+```
+timestamp | worker_id | event_seq | sequence_id | MATCH_DISCARDED | candidate_match_id | forward_primer | reverse_primer | forward_barcode | reverse_barcode | score | discard_reason
+```
+- `candidate_match_id`: String, unique identifier for the discarded match
+- `forward_primer`: String, forward primer name (or "none")
+- `reverse_primer`: String, reverse primer name (or "none")
+- `forward_barcode`: String, forward barcode (or "none")
+- `reverse_barcode`: String, reverse barcode (or "none")
+- `score`: Float, the match score
+- `discard_reason`: String, reason for discarding (e.g., "lower_score", "ambiguous_strict")
+
 ### SPECIMEN_RESOLVED
 **Purpose**: Log specimen identification result
 ```
@@ -154,6 +167,13 @@ timestamp | worker_id | event_seq | sequence_id | SEQUENCE_OUTPUT | output_type 
 - `pool`: String, pool name
 - `primer_pair`: String, primer pair (format: "FWD-REV")
 - `file_path`: String, relative path where sequence will be written
+
+### NO_PRIMERS_MATCHED
+**Purpose**: Log when no primers match a sequence
+```
+timestamp | worker_id | event_seq | sequence_id | NO_PRIMERS_MATCHED | reason
+```
+- `reason`: String, description of why no primers matched (e.g., "sequence_too_short", "no_primers_found_in_search_regions")
 
 ### NO_MATCH_FOUND
 **Purpose**: Log when no viable matches found
@@ -199,7 +219,7 @@ timestamp | worker_id | event_seq | sequence_id | BARCODE_SEARCH | barcode_name 
 ### Special Values
 - Use `-1` for numeric fields when value is not applicable/not found
 - Use `none` for string fields when value is empty/not found
-- Use `unknown` for enum fields when value cannot be determined
+- Use `none` for enum fields when value cannot be determined
 
 ### Data Types
 - **Timestamps**: ISO 8601 format (YYYY-MM-DDTHH:MM:SS.mmm)
