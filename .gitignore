@@ -1,2 +1,6 @@
 .idea
 CLAUDE.md
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
