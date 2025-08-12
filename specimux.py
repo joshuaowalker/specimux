@@ -101,6 +101,43 @@ class MultipleMatchStrategy:
     DOWNGRADE_FULL = "downgrade-full"  # Downgrade full matches to partial if multiple exist
 
 
+class ResolutionType(Enum):
+    """Types of specimen resolution outcomes."""
+    FULL_MATCH = 1  # Both primers + both barcodes matched to a specimen
+    PARTIAL_FORWARD = 2  # Forward barcode only (generates FWD_ONLY_ sample ID)
+    PARTIAL_REVERSE = 3  # Reverse barcode only (generates REV_ONLY_ sample ID)
+    DOWNGRADED_MULTIPLE = 4  # Full match downgraded due to multiple equivalent matches
+    MULTIPLE_SPECIMENS = 5  # Multiple specimen matches (shouldn't happen in new flow)
+    UNKNOWN = 6  # No resolution possible
+
+    def to_string(self) -> str:
+        """Convert resolution type to lowercase string for trace logging."""
+        if self == ResolutionType.FULL_MATCH:
+            return 'full_match'
+        elif self == ResolutionType.PARTIAL_FORWARD:
+            return 'partial_forward'
+        elif self == ResolutionType.PARTIAL_REVERSE:
+            return 'partial_reverse'
+        elif self == ResolutionType.DOWNGRADED_MULTIPLE:
+            return 'downgraded_multiple_full'
+        elif self == ResolutionType.MULTIPLE_SPECIMENS:
+            return 'multiple_specimens'
+        else:
+            return 'unknown'
+
+    def is_full_match(self) -> bool:
+        """Check if this represents a successful full match."""
+        return self == ResolutionType.FULL_MATCH
+
+    def is_partial_match(self) -> bool:
+        """Check if this represents a partial match."""
+        return self in [ResolutionType.PARTIAL_FORWARD, ResolutionType.PARTIAL_REVERSE]
+
+    def is_unknown(self) -> bool:
+        """Check if this represents an unknown/failed resolution."""
+        return self == ResolutionType.UNKNOWN
+
+
 class Barcode(Enum):
     B1 = 1
     B2 = 2
@@ -612,6 +649,7 @@ class WriteOperation(NamedTuple):
     primer_pool: str
     p1_name: str
     p2_name: str
+    resolution_type: ResolutionType
 
 class WorkItem(NamedTuple):
     seq_number: int
@@ -776,7 +814,7 @@ class OutputManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         return self.file_manager.__exit__(exc_type, exc_val, exc_tb)
 
-    def _make_filename(self, sample_id: str, pool: str, p1: str, p2: str) -> str:
+    def _make_filename(self, sample_id: str, pool: str, p1: str, p2: str, resolution_type: ResolutionType) -> str:
         """Create a filename with match-type-first organization."""
         extension = '.fastq' if self.is_fastq else '.fasta'
 
@@ -790,24 +828,20 @@ class OutputManager:
         primer_dir = f"{p1}-{p2}"
 
         # Determine match type and construct path with match type first
-        if sample_id == SampleId.UNKNOWN:
-            # Complete unknown
+        if resolution_type.is_unknown():
+            # Unknown resolution
             return os.path.join(self.output_dir, "unknown", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
-        # No longer using SampleId.AMBIGUOUS - removed
-        elif sample_id.startswith(SampleId.PREFIX_FWD_MATCH):
-            # Forward barcode matched but reverse didn't
-            return os.path.join(self.output_dir, "partial", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
-        elif sample_id.startswith(SampleId.PREFIX_REV_MATCH):
-            # Reverse barcode matched but forward didn't
+        elif resolution_type.is_partial_match():
+            # Partial match (forward or reverse barcode only)
             return os.path.join(self.output_dir, "partial", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
         else:
-            # Full match
+            # Full match (including downgraded and multiple specimen matches)
             return os.path.join(self.output_dir, "full", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
 
     def write_sequence(self, write_op: WriteOperation):
         """Write a sequence to the appropriate output file."""
         filename = self._make_filename(write_op.sample_id, write_op.primer_pool,
-                                       write_op.p1_name, write_op.p2_name)
+                                       write_op.p1_name, write_op.p2_name, write_op.resolution_type)
 
         # Ensure directory exists
         os.makedirs(os.path.dirname(filename), exist_ok=True)
@@ -830,10 +864,7 @@ class OutputManager:
         self.file_manager.write(filename, output_content)
         
         # If this is a full match, write it to the pool-level aggregation directory as well
-        if not (write_op.sample_id == SampleId.UNKNOWN or 
-                # Removed SampleId.AMBIGUOUS check
-                write_op.sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or
-                write_op.sample_id.startswith(SampleId.PREFIX_REV_MATCH)):
+        if write_op.resolution_type.is_full_match():
             
             # Create additional path for pool-level aggregation in full directory
             extension = '.fastq' if self.is_fastq else '.fasta'
@@ -1495,7 +1526,7 @@ def get_quality_seq(seq):
         return [40]*len(seq)
 
 
-def create_write_operation(sample_id, args, seq, match):
+def create_write_operation(sample_id, args, seq, match, resolution_type):
     formatted_seq = seq.seq
     quality_scores = get_quality_seq(seq)
 
@@ -1536,7 +1567,8 @@ def create_write_operation(sample_id, args, seq, match):
         b2_location=match.get_barcode2_location(),
         primer_pool=primer_pool,
         p1_name=p1_name,
-        p2_name=p2_name
+        p2_name=p2_name,
+        resolution_type=resolution_type
     )
 
 
@@ -1569,11 +1601,7 @@ def process_sequences(seq_records: List[SeqRecord],
             sequence_id = trace_logger.get_sequence_id(seq, record_offset + idx)
             trace_logger.log_sequence_received(sequence_id, len(seq), seq.id)
         
-        sample_id = SampleId.UNKNOWN
-        pool = None
         has_full_match = False
-
-        match = SequenceMatch(seq, specimens.b_length())
 
         if args.min_length != -1 and len(seq) < args.min_length:
             if trace_logger:
@@ -1595,22 +1623,19 @@ def process_sequences(seq_records: List[SeqRecord],
                 # Process all equivalent matches and create write operations directly
                 equivalent_count = len(best_matches)
                 for match in best_matches:
-                    # Determine sample ID for this match (includes downgrade logic)
-                    match_sample_id, pool = match_sample(match, sample_id, specimens, trace_logger, sequence_id, 
-                                                       args, equivalent_count)
-                    if pool:
-                        match.set_pool(pool)
-                    final_sample_id = group_sample(match, match_sample_id)
+                    # Determine final sample ID for this match (includes specimen resolution and fallback logic)
+                    final_sample_id, resolution_type = match_sample(match, specimens, trace_logger, sequence_id, 
+                                                                   args, equivalent_count)
                     
                     # Create and add write operation directly
-                    op = create_write_operation(final_sample_id, args, seq, match)
+                    op = create_write_operation(final_sample_id, args, seq, match, resolution_type)
                     write_ops.append(op)
                     
                     # Count successful matches and log sequence output for this operation
-                    if final_sample_id not in [SampleId.UNKNOWN] and not final_sample_id.startswith(SampleId.PREFIX_FWD_MATCH) and not final_sample_id.startswith(SampleId.PREFIX_REV_MATCH):
+                    if resolution_type.is_full_match():
                         op_output_type = 'full'
                         has_full_match = True
-                    elif final_sample_id.startswith(SampleId.PREFIX_FWD_MATCH) or final_sample_id.startswith(SampleId.PREFIX_REV_MATCH):
+                    elif resolution_type.is_partial_match():
                         op_output_type = 'partial'
                     else:
                         op_output_type = 'unknown'
@@ -1623,11 +1648,11 @@ def process_sequences(seq_records: List[SeqRecord],
                         trace_logger.log_sequence_output(sequence_id, op_output_type, op.sample_id, 
                                                         pool_name, primer_pair, file_path)
             else:
-                # No matches found
-                final_sample_id = SampleId.UNKNOWN
+                # No matches found - create minimal match object for output
+                match = SequenceMatch(seq, specimens.b_length())
                 if trace_logger:
                     trace_logger.log_no_match_found(sequence_id, 'primer_search', 'No primer matches found')
-                op = create_write_operation(final_sample_id, args, seq, match)
+                op = create_write_operation(SampleId.UNKNOWN, args, seq, match, ResolutionType.UNKNOWN)
                 write_ops.append(op)
                 
                 # Log sequence output for no-match case
@@ -1693,13 +1718,18 @@ def choose_best_match(matches: List[SequenceMatch],
 
 
 
-def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens,
+def match_sample(match: SequenceMatch, specimens: Specimens,
                 trace_logger: Optional[TraceLogger] = None,
                 sequence_id: Optional[str] = None,
                 args: Optional[argparse.Namespace] = None,
-                equivalent_matches_count: int = 1) -> Tuple[str, Optional[str]]:
-    """Returns tuple of (sample_id, pool_name)"""
-    # Start with previously determined pool from primers
+                equivalent_matches_count: int = 1) -> Tuple[str, ResolutionType]:
+    """Determine final sample ID for this match, including specimen resolution and fallback logic.
+    
+    Returns:
+        Tuple of (sample_id, resolution_type)
+    """
+    sample_id = SampleId.UNKNOWN
+    # Start with pool already determined from primers in match_sequence
     pool = match.get_pool()
 
     # Check if we should downgrade full matches to partial
@@ -1714,7 +1744,7 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens,
         b1_name = match.best_b1()[0] if match.best_b1() else 'unknown'
         b2_name = match.best_b2()[0] if match.best_b2() else 'unknown'
         sample_id = f"{SampleId.PREFIX_FWD_MATCH}downgraded_{p1_name}_{p2_name}_{b1_name}_{b2_name}"
-        resolution_type = 'downgraded_multiple_full'
+        resolution_type = ResolutionType.DOWNGRADED_MULTIPLE
         
         # Log downgrade decision
         if trace_logger:
@@ -1725,44 +1755,44 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens,
         if len(ids) > 1:
             # Multiple specimen matches - use first match (this shouldn't happen in new flow)
             sample_id = ids[0]  # Use first specimen ID
-            resolution_type = 'multiple_specimens'
+            resolution_type = ResolutionType.MULTIPLE_SPECIMENS
             # Use pool from first specimen
             pool = specimens.get_specimen_pool(sample_id)
         elif len(ids) == 1:
             sample_id = ids[0]
-            resolution_type = 'full_match'
+            resolution_type = ResolutionType.FULL_MATCH
             # For unique matches, use specimen's pool
             pool = specimens.get_specimen_pool(ids[0])
         else:
             logging.warning(
                 f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, "
                 f"{match.get_p1()}, {match.get_p2()})")
-            resolution_type = 'unknown'
+            resolution_type = ResolutionType.UNKNOWN
     else:
-        # Partial match - determine type
-        if match.has_b1_match() and not match.has_b2_match():
-            resolution_type = 'partial_forward'
-        elif match.has_b2_match() and not match.has_b1_match():
-            resolution_type = 'partial_reverse'
+        # Partial match - determine type and generate appropriate sample ID
+        b1s = match.best_b1()
+        b2s = match.best_b2()
+        
+        if match.has_b1_match() and not match.has_b2_match() and len(b1s) == 1:
+            resolution_type = ResolutionType.PARTIAL_FORWARD
+            sample_id = SampleId.PREFIX_FWD_MATCH + b1s[0]
+        elif match.has_b2_match() and not match.has_b1_match() and len(b2s) == 1:
+            resolution_type = ResolutionType.PARTIAL_REVERSE
+            sample_id = SampleId.PREFIX_REV_MATCH + b2s[0]
         else:
-            resolution_type = 'unknown'
+            resolution_type = ResolutionType.UNKNOWN
+            # Keep sample_id as SampleId.UNKNOWN
     
     # Log specimen resolution
     if trace_logger:
         trace_logger.log_specimen_resolved(sequence_id, match, sample_id, 
-                                         resolution_type, pool or 'none')
+                                         resolution_type.to_string(), pool or 'none')
 
-    return sample_id, pool
 
-def group_sample(match, sample_id):
-    if sample_id in [SampleId.UNKNOWN]:
-        b1s = match.best_b1()
-        b2s = match.best_b2()
-        if len(b2s) == 1:
-            sample_id = SampleId.PREFIX_REV_MATCH + b2s[0]
-        elif len(b1s) == 1:
-            sample_id = SampleId.PREFIX_FWD_MATCH + b1s[0]
-    return sample_id
+    
+    return sample_id, resolution_type
+
+
 
 class Orientation(Enum):
     FORWARD = 1
@@ -1772,6 +1802,8 @@ class Orientation(Enum):
     def to_string(self) -> str:
         """Convert orientation to lowercase string for trace logging."""
         return self.name.lower()
+
+
 
 
 def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
@@ -1875,13 +1907,12 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                               Primer.FWD, Barcode.B1, trace_logger, sequence_id)
                 match_one_end(prefilter, match, parameters, s, False, rev_primer,
                               Primer.REV, Barcode.B2, trace_logger, sequence_id)
-                # Set initial pool based on primers
-                pool = get_pool_from_primers(match.get_p1(), match.get_p2())
-                if pool:
-                    match.set_pool(pool)
-                
                 # Only add matches where at least one primer was found
                 if match.p1_match or match.p2_match:
+                    # Determine and set pool for this match
+                    pool = get_pool_from_primers(match.get_p1(), match.get_p2())
+                    match.set_pool(pool)
+                    
                     # Log primer match result
                     if trace_logger:
                         trace_logger.log_primer_matched(sequence_id, match, pool or 'none', 'as_is')
@@ -1897,13 +1928,12 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                               Primer.FWD, Barcode.B1, trace_logger, sequence_id)
                 match_one_end(prefilter, match, parameters, rs, False, rev_primer,
                               Primer.REV, Barcode.B2, trace_logger, sequence_id)
-                # Set initial pool based on primers
-                pool = get_pool_from_primers(match.get_p1(), match.get_p2())
-                if pool:
-                    match.set_pool(pool)
-                
                 # Only add matches where at least one primer was found
                 if match.p1_match or match.p2_match:
+                    # Determine and set pool for this match
+                    pool = get_pool_from_primers(match.get_p1(), match.get_p2())
+                    match.set_pool(pool)
+                    
                     # Log primer match result
                     if trace_logger:
                         trace_logger.log_primer_matched(sequence_id, match, pool or 'none', 'reverse_complement')
