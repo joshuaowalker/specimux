@@ -1968,9 +1968,6 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
 
         # Get relevant barcodes for this primer pair
         barcodes = primer_info.barcodes
-        best_barcode_match = None
-        best_barcode_distance = None
-        best_barcode_name = None
 
         for b in barcodes:
             b_rc = reverse_complement(b)
@@ -2007,10 +2004,6 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
                         
             if bm:
                 match.add_barcode_match(bm, bc, reversed_sequence, which_barcode)
-                if best_barcode_distance is None or bd < best_barcode_distance:
-                    best_barcode_match = bm
-                    best_barcode_distance = bd
-                    best_barcode_name = bc
         
         # Note: BARCODE_MATCHED logging moved to match_sequence to log complete barcode result per candidate match
     else:
