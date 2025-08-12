@@ -108,16 +108,6 @@ timestamp | worker_id | event_seq | sequence_id | MATCH_SCORED | candidate_match
 - `barcode_presence`: Enum: `both`, `forward_only`, `reverse_only`, `none`
 - `score`: Float, calculated match score
 
-### MULTIPLE_MATCHES_DETECTED
-**Purpose**: Log when multiple equivalent matches are found
-```
-timestamp | worker_id | event_seq | sequence_id | MULTIPLE_MATCHES_DETECTED | match_type | match_count | pools_involved | specimen_candidates
-```
-- `match_type`: Enum: `cross_pool`, `same_pool_different_primers`, `same_primers_different_barcodes`, `identical_matches`
-- `match_count`: Integer, number of equivalent matches
-- `pools_involved`: String, comma-separated list of pool names
-- `specimen_candidates`: String, comma-separated list of specimen IDs
-
 ### MATCH_SELECTED
 **Purpose**: Log final match selection decision
 ```
@@ -281,14 +271,6 @@ SELECT pool,
 FROM events
 WHERE event_type = 'SPECIMEN_RESOLVED'
 GROUP BY pool;
-```
-
-### Finding Multiple Match Sequences
-```sql
-SELECT sequence_id, match_type, specimen_candidates
-FROM events  
-WHERE event_type = 'MULTIPLE_MATCHES_DETECTED'
-ORDER BY match_count DESC;
 ```
 
 ### Tracking Processing Time

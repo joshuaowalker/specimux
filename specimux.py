@@ -1049,14 +1049,7 @@ class TraceLogger:
                        b1_name, b2_name, total_distance,
                        barcode_presence, f"{score:.3f}")
     
-    def log_multiple_matches_detected(self, sequence_id: str, match_type: str,
-                                     match_count: int, pools_involved: List[str], 
-                                     specimen_candidates: List[str]):
-        """Log multiple equivalent matches detection."""
-        pools_str = ','.join(pools_involved) if pools_involved else 'none'
-        specimens_str = ','.join(specimen_candidates) if specimen_candidates else 'none'
-        self._log_event(sequence_id, 'MULTIPLE_MATCHES_DETECTED', match_type,
-                       match_count, pools_str, specimens_str)
+
     
     def log_match_selected(self, sequence_id: str, selection_strategy: str,
                           forward_primer: str, reverse_primer: str,
@@ -1694,63 +1687,7 @@ def choose_best_match(matches: List[SequenceMatch],
             if score < best_score:
                 trace_logger.log_match_discarded(sequence_id, m, float(score), 'lower_score')
     
-    # Determine match configuration for trace logging
-    has_multiple = len(equivalent_matches) > 1
-    
-    # Classify the type of matches for trace logging
-    if not has_multiple:
-        match_type = 'single_match'
-        # Set pool on the single match
-        equivalent_matches[0].set_pool(equivalent_matches[0].get_pool())
-    else:
-        # Analyze match configuration for trace logging
-        pools = [m.get_pool() for m in equivalent_matches]
-        unique_pools = set(pools)
-        
-        if len(unique_pools) > 1:
-            # Matches across different pools
-            match_type = 'cross_pool'
-            # Set pool to "unknown" for cross-pool matches
-            for match in equivalent_matches:
-                match.set_pool("unknown")
-        else:
-            # All matches in same pool
-            pool = pools[0]
-            
-            # Check if matches have different primer pairs
-            primer_pairs = {(m.get_p1().name if m.get_p1() else None,
-                           m.get_p2().name if m.get_p2() else None) 
-                          for m in equivalent_matches}
-            
-            if len(primer_pairs) > 1:
-                match_type = 'same_pool_different_primers'
-            else:
-                # Same primer pairs - check barcodes
-                barcode_combos = {(tuple(m.best_b1()), tuple(m.best_b2())) 
-                                for m in equivalent_matches}
-                if len(barcode_combos) > 1:
-                    match_type = 'same_primers_different_barcodes'
-                else:
-                    # Identical matches - shouldn't happen but handle it
-                    match_type = 'identical_matches'
-            
-            # Set consistent pool for same-pool matches
-            for match in equivalent_matches:
-                match.set_pool(pool)
-    
-    # Log multiple matches if detected
-    if trace_logger and has_multiple:
-        pools_involved = list(set(m.get_pool() or 'none' for m in equivalent_matches))
-        specimen_candidates = []
-        for m in equivalent_matches:
-            if m.p1_match and m.p2_match and m.has_b1_match() and m.has_b2_match():
-                # Try to get specimen IDs for this match
-                b1_list = m.best_b1()
-                b2_list = m.best_b2()
-                # This is a simplification - would need specimens object to get actual IDs
-                specimen_candidates.append(f"{b1_list[0] if b1_list else 'none'}_{b2_list[0] if b2_list else 'none'}")
-        trace_logger.log_multiple_matches_detected(sequence_id, match_type, 
-                                                 len(equivalent_matches), pools_involved, specimen_candidates)
+    # Note: Multiple matches are handled downstream in match_sample and logged via MATCH_SELECTED/MATCH_DISCARDED events
     
     return equivalent_matches
 
