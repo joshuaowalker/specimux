@@ -104,10 +104,28 @@ class MultipleMatchStrategy:
 class Barcode(Enum):
     B1 = 1
     B2 = 2
+    
+    def to_string(self) -> str:
+        """Convert barcode to lowercase string for trace logging."""
+        if self == Barcode.B1:
+            return 'forward'
+        elif self == Barcode.B2:
+            return 'reverse'
+        else:
+            return 'unknown'
 
 class Primer(Enum):
     FWD = 3
     REV = 4
+    
+    def to_string(self) -> str:
+        """Convert primer to lowercase string for trace logging."""
+        if self == Primer.FWD:
+            return 'forward'
+        elif self == Primer.REV:
+            return 'reverse'
+        else:
+            return 'unknown'
 
 
 class PrimerInfo:
@@ -602,30 +620,6 @@ class WorkItem(NamedTuple):
     start_idx: int     # Starting index for sequence ID generation
 
 @dataclass
-class MatchSelection:
-    """Result from choose_best_match containing all equivalent best matches"""
-    equivalent_matches: List['SequenceMatch']  # All matches with the best score
-    best_score: int                           # Score of the equivalent matches
-    has_multiple: bool                       # True if multiple equivalent matches exist
-    match_type: str                          # Type of match configuration for trace logging
-    
-    def get_first_match(self) -> 'SequenceMatch':
-        """Get the first match for backward compatibility. This selection is arbitrary."""
-        if not self.equivalent_matches:
-            raise ValueError("No matches available")
-        return self.equivalent_matches[0]
-    
-    def get_all_matches(self) -> List['SequenceMatch']:
-        """Get all equivalent matches"""
-        return self.equivalent_matches
-    
-    def has_cross_pool_matches(self) -> bool:
-        """Check if matches span multiple pools (potential contamination indicator)"""
-        if len(self.equivalent_matches) <= 1:
-            return False
-        pools = {match.get_pool() for match in self.equivalent_matches}
-        return len(pools) > 1
-
 
 class FileHandleCache(LRUCache):
     """Custom LRU cache that works with CachedFileManager to close file handles on eviction."""
@@ -965,30 +959,94 @@ class TraceLogger:
         self._log_event(sequence_id, 'ORIENTATION_DETECTED', orientation, 
                        forward_score, reverse_score, f"{confidence:.3f}")
     
-    def log_primer_matched(self, sequence_id: str, candidate_match_id: str, match_type: str, 
-                          forward_primer: str, reverse_primer: str,
-                          forward_distance: int, reverse_distance: int, 
+    def log_primer_matched(self, sequence_id: str, match: 'SequenceMatch',
                           pool: str, orientation_used: str):
         """Log successful primer match for a specific candidate match."""
+        (candidate_match_id, p1_name, p2_name, _, _, 
+         _, _, p1_dist, p2_dist, _, _) = self._extract_match_info(match)
+        
+        # Determine match type from SequenceMatch
+        if match.p1_match and match.p2_match:
+            match_type = 'both'
+        elif match.p1_match:
+            match_type = 'forward_only'
+        else:
+            match_type = 'reverse_only'
+        
         self._log_event(sequence_id, 'PRIMER_MATCHED', candidate_match_id, match_type,
-                       forward_primer, reverse_primer, forward_distance, reverse_distance,
+                       p1_name, p2_name, p1_dist, p2_dist,
                        pool, orientation_used)
     
-    def log_barcode_matched(self, sequence_id: str, candidate_match_id: str, match_type: str,
-                           forward_barcode: str, reverse_barcode: str,
-                           forward_distance: int, reverse_distance: int,
-                           forward_primer: str, reverse_primer: str):
+    def log_barcode_matched(self, sequence_id: str, match: 'SequenceMatch'):
         """Log barcode match result for a specific candidate match."""
-        self._log_event(sequence_id, 'BARCODE_MATCHED', candidate_match_id, match_type,
-                       forward_barcode, reverse_barcode, forward_distance, reverse_distance,
-                       forward_primer, reverse_primer)
+        (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
+         _, _, _, _, b1_dist, b2_dist) = self._extract_match_info(match)
+        
+        # Determine barcode match type from SequenceMatch
+        if match.has_b1_match() and match.has_b2_match():
+            barcode_match_type = 'both'
+        elif match.has_b1_match():
+            barcode_match_type = 'forward_only'
+        elif match.has_b2_match():
+            barcode_match_type = 'reverse_only'
+        else:
+            barcode_match_type = 'none'
+        
+        self._log_event(sequence_id, 'BARCODE_MATCHED', candidate_match_id, barcode_match_type,
+                       b1_name, b2_name, b1_dist, b2_dist,
+                       p1_name, p2_name)
     
-    def log_match_scored(self, sequence_id: str, candidate_match_id: str, forward_primer: str, reverse_primer: str,
-                        forward_barcode: str, reverse_barcode: str,
-                        total_edit_distance: int, barcode_presence: str, score: float):
+    def _extract_match_info(self, match: 'SequenceMatch') -> tuple:
+        """Extract common information from SequenceMatch for trace logging.
+        
+        Returns: (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
+                 barcode_presence, total_distance, p1_dist, p2_dist, b1_dist, b2_dist)
+        """
+        candidate_match_id = match.candidate_match_id or 'unknown'
+        p1_name = match.get_p1().name if match.get_p1() else 'none'
+        p2_name = match.get_p2().name if match.get_p2() else 'none'
+        b1_name = match.best_b1()[0] if match.best_b1() else 'none'
+        b2_name = match.best_b2()[0] if match.best_b2() else 'none'
+        
+        # Determine barcode presence
+        if match.has_b1_match() and match.has_b2_match():
+            barcode_presence = 'both'
+        elif match.has_b1_match():
+            barcode_presence = 'forward_only'
+        elif match.has_b2_match():
+            barcode_presence = 'reverse_only'
+        else:
+            barcode_presence = 'none'
+        
+        # Calculate distances
+        total_distance = 0
+        p1_dist = -1
+        p2_dist = -1
+        b1_dist = -1
+        b2_dist = -1
+        
+        if match.p1_match:
+            p1_dist = match.p1_match.distance()
+            total_distance += p1_dist
+        if match.p2_match:
+            p2_dist = match.p2_match.distance()
+            total_distance += p2_dist
+        if match.has_b1_match():
+            b1_dist = match.b1_distance()
+            total_distance += b1_dist
+        if match.has_b2_match():
+            b2_dist = match.b2_distance()
+            total_distance += b2_dist
+        
+        return (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
+                barcode_presence, total_distance, p1_dist, p2_dist, b1_dist, b2_dist)
+    
+    def log_match_scored(self, sequence_id: str, match: 'SequenceMatch', score: float):
         """Log match scoring for a specific candidate match."""
-        self._log_event(sequence_id, 'MATCH_SCORED', candidate_match_id, forward_primer, reverse_primer,
-                       forward_barcode, reverse_barcode, total_edit_distance,
+        (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
+         barcode_presence, total_distance, _, _, _, _) = self._extract_match_info(match)
+        self._log_event(sequence_id, 'MATCH_SCORED', candidate_match_id, p1_name, p2_name,
+                       b1_name, b2_name, total_distance,
                        barcode_presence, f"{score:.3f}")
     
     def log_multiple_matches_detected(self, sequence_id: str, match_type: str,
@@ -1009,12 +1067,13 @@ class TraceLogger:
                        forward_primer, reverse_primer, forward_barcode, reverse_barcode,
                        pool, str(is_unique).lower())
     
-    def log_specimen_resolved(self, sequence_id: str, specimen_id: str, resolution_type: str,
-                             pool: str, forward_primer: str, reverse_primer: str,
-                             forward_barcode: str, reverse_barcode: str):
+    def log_specimen_resolved(self, sequence_id: str, match: 'SequenceMatch',
+                             specimen_id: str, resolution_type: str, pool: str):
         """Log specimen resolution."""
+        (_, p1_name, p2_name, b1_name, b2_name, 
+         _, _, _, _, _, _) = self._extract_match_info(match)
         self._log_event(sequence_id, 'SPECIMEN_RESOLVED', specimen_id, resolution_type,
-                       pool, forward_primer, reverse_primer, forward_barcode, reverse_barcode)
+                       pool, p1_name, p2_name, b1_name, b2_name)
     
     def log_sequence_output(self, sequence_id: str, output_type: str, specimen_id: str,
                            pool: str, primer_pair: str, file_path: str):
@@ -1026,13 +1085,13 @@ class TraceLogger:
         """Log when no matches found."""
         self._log_event(sequence_id, 'NO_MATCH_FOUND', stage_failed, reason)
     
-    def log_match_discarded(self, sequence_id: str, candidate_match_id: str,
-                           forward_primer: str, reverse_primer: str,
-                           forward_barcode: str, reverse_barcode: str,
+    def log_match_discarded(self, sequence_id: str, match: 'SequenceMatch', 
                            score: float, discard_reason: str):
         """Log when a candidate match is discarded."""
+        (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
+         _, _, _, _, _, _) = self._extract_match_info(match)
         self._log_event(sequence_id, 'MATCH_DISCARDED', candidate_match_id,
-                       forward_primer, reverse_primer, forward_barcode, reverse_barcode,
+                       p1_name, p2_name, b1_name, b2_name,
                        score, discard_reason)
     
     # Detailed events (verbosity level 2+)
@@ -1534,68 +1593,21 @@ def process_sequences(seq_records: List[SeqRecord],
             rseq.id = seq.id
             rseq.description = seq.description
 
-            # Track orientation decision
-            if parameters.preorient:
-                orientation, fwd_score, rev_score = determine_orientation_with_scores(
-                    parameters, str(seq.seq), str(rseq.seq),
-                    specimens.get_primers(Primer.FWD),
-                    specimens.get_primers(Primer.REV))
-                
-                if orientation == Orientation.FORWARD:
-                    orientation_str = 'forward'
-                elif orientation == Orientation.REVERSE:
-                    orientation_str = 'reverse'
-                else:
-                    # Orientation could not be determined clearly
-                    orientation_str = 'unknown'
-                
-                if trace_logger:
-                    confidence = 0.0
-                    if fwd_score + rev_score > 0:
-                        confidence = abs(fwd_score - rev_score) / (fwd_score + rev_score)
-                    trace_logger.log_orientation_detected(sequence_id, orientation_str, 
-                                                         fwd_score, rev_score, confidence)
-            else:
-                # When not pre-orienting, sequences are processed as-is (forward)
-                if trace_logger:
-                    trace_logger.log_orientation_detected(sequence_id, 'forward', 0, 0, 0.0)
-
             matches = match_sequence(prefilter, parameters, seq, rseq, specimens, trace_logger, sequence_id)
 
             # Handle match selection and processing
             if matches:
-                match_result = choose_best_match(matches, trace_logger, sequence_id)
-                
-                # Check if we should downgrade full matches to partial
-                should_downgrade = (match_result.has_multiple and match_result.best_score == 5 and 
-                                  args.resolve_multiple_matches == MultipleMatchStrategy.DOWNGRADE_FULL)
-                
-                if should_downgrade and trace_logger:
-                    # Log that full matches are being downgraded
-                    for m in match_result.equivalent_matches:
-                        p1_name = m.get_p1().name if m.get_p1() else 'none'
-                        p2_name = m.get_p2().name if m.get_p2() else 'none'
-                        b1_name = m.best_b1()[0] if m.best_b1() else 'none'
-                        b2_name = m.best_b2()[0] if m.best_b2() else 'none'
-                        trace_logger.log_match_discarded(sequence_id, m.candidate_match_id,
-                                                       p1_name, p2_name, b1_name, b2_name,
-                                                       float(match_result.best_score), 'downgraded_multiple_full')
+                best_matches = choose_best_match(matches, trace_logger, sequence_id)
                 
                 # Process all equivalent matches and create write operations directly
-                for match in match_result.get_all_matches():
-                    if should_downgrade:
-                        # Force to partial output by using a partial prefix with match info
-                        p1_name = match.get_p1().name if match.get_p1() else 'unknown'
-                        p2_name = match.get_p2().name if match.get_p2() else 'unknown'
-                        b1_name = match.best_b1()[0] if match.best_b1() else 'unknown'
-                        b2_name = match.best_b2()[0] if match.best_b2() else 'unknown'
-                        final_sample_id = f"{SampleId.PREFIX_FWD_MATCH}downgraded_{p1_name}_{p2_name}_{b1_name}_{b2_name}"
-                    else:
-                        # Normal processing - determine sample ID for this match
-                        match_sample_id, pool = match_sample(match, sample_id, specimens, trace_logger, sequence_id)
-                        if pool:
-                            match.set_pool(pool)
-                        final_sample_id = group_sample(match, match_sample_id)
+                equivalent_count = len(best_matches)
+                for match in best_matches:
+                    # Determine sample ID for this match (includes downgrade logic)
+                    match_sample_id, pool = match_sample(match, sample_id, specimens, trace_logger, sequence_id, 
+                                                       args, equivalent_count)
+                    if pool:
+                        match.set_pool(pool)
+                    final_sample_id = group_sample(match, match_sample_id)
                     
                     # Create and add write operation directly
                     op = create_write_operation(final_sample_id, args, seq, match)
@@ -1643,7 +1655,7 @@ def process_sequences(seq_records: List[SeqRecord],
 
 def choose_best_match(matches: List[SequenceMatch], 
                      trace_logger: Optional[TraceLogger] = None,
-                     sequence_id: Optional[str] = None) -> MatchSelection:
+                     sequence_id: Optional[str] = None) -> List[SequenceMatch]:
     """Select all equivalent best matches based on match quality scoring"""
     if not matches:
         raise ValueError("No matches provided to choose_best_match")
@@ -1665,34 +1677,7 @@ def choose_best_match(matches: List[SequenceMatch],
         
         # Log match scoring
         if trace_logger:
-            p1_name = m.get_p1().name if m.get_p1() else 'none'
-            p2_name = m.get_p2().name if m.get_p2() else 'none'
-            b1_name = m.best_b1()[0] if m.best_b1() else 'none'
-            b2_name = m.best_b2()[0] if m.best_b2() else 'none'
-            
-            # Calculate total edit distance
-            total_distance = 0
-            if m.p1_match:
-                total_distance += m.p1_match.distance()
-            if m.p2_match:
-                total_distance += m.p2_match.distance()
-            if m.has_b1_match():
-                total_distance += m.b1_distance()
-            if m.has_b2_match():
-                total_distance += m.b2_distance()
-                
-            # Determine barcode presence
-            if m.has_b1_match() and m.has_b2_match():
-                barcode_presence = 'both'
-            elif m.has_b1_match():
-                barcode_presence = 'forward_only'
-            elif m.has_b2_match():
-                barcode_presence = 'reverse_only'
-            else:
-                barcode_presence = 'none'
-                
-            trace_logger.log_match_scored(sequence_id, m.candidate_match_id, p1_name, p2_name, b1_name, b2_name,
-                                        total_distance, barcode_presence, float(score))
+            trace_logger.log_match_scored(sequence_id, m, float(score))
         
         scored_matches.append((score, m))
     
@@ -1707,13 +1692,7 @@ def choose_best_match(matches: List[SequenceMatch],
     if trace_logger:
         for score, m in scored_matches:
             if score < best_score:
-                p1_name = m.get_p1().name if m.get_p1() else 'none'
-                p2_name = m.get_p2().name if m.get_p2() else 'none'
-                b1_name = m.best_b1()[0] if m.best_b1() else 'none'
-                b2_name = m.best_b2()[0] if m.best_b2() else 'none'
-                trace_logger.log_match_discarded(sequence_id, m.candidate_match_id,
-                                               p1_name, p2_name, b1_name, b2_name,
-                                               float(score), 'lower_score')
+                trace_logger.log_match_discarded(sequence_id, m, float(score), 'lower_score')
     
     # Determine match configuration for trace logging
     has_multiple = len(equivalent_matches) > 1
@@ -1773,23 +1752,37 @@ def choose_best_match(matches: List[SequenceMatch],
         trace_logger.log_multiple_matches_detected(sequence_id, match_type, 
                                                  len(equivalent_matches), pools_involved, specimen_candidates)
     
-    return MatchSelection(
-        equivalent_matches=equivalent_matches,
-        best_score=best_score,
-        has_multiple=has_multiple,
-        match_type=match_type
-    )
+    return equivalent_matches
 
 
 
 def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens,
                 trace_logger: Optional[TraceLogger] = None,
-                sequence_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
+                sequence_id: Optional[str] = None,
+                args: Optional[argparse.Namespace] = None,
+                equivalent_matches_count: int = 1) -> Tuple[str, Optional[str]]:
     """Returns tuple of (sample_id, pool_name)"""
     # Start with previously determined pool from primers
     pool = match.get_pool()
 
-    if match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match():
+    # Check if we should downgrade full matches to partial
+    is_full_match = match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match()
+    should_downgrade = (is_full_match and equivalent_matches_count > 1 and 
+                       args and args.resolve_multiple_matches == MultipleMatchStrategy.DOWNGRADE_FULL)
+    
+    if should_downgrade:
+        # Downgrade full match to partial output
+        p1_name = match.get_p1().name if match.get_p1() else 'unknown'
+        p2_name = match.get_p2().name if match.get_p2() else 'unknown'
+        b1_name = match.best_b1()[0] if match.best_b1() else 'unknown'
+        b2_name = match.best_b2()[0] if match.best_b2() else 'unknown'
+        sample_id = f"{SampleId.PREFIX_FWD_MATCH}downgraded_{p1_name}_{p2_name}_{b1_name}_{b2_name}"
+        resolution_type = 'downgraded_multiple_full'
+        
+        # Log downgrade decision
+        if trace_logger:
+            trace_logger.log_match_discarded(sequence_id, match, 5.0, 'downgraded_multiple_full')
+    elif is_full_match:
         ids = specimens.specimens_for_barcodes_and_primers(
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
         if len(ids) > 1:
@@ -1819,12 +1812,8 @@ def match_sample(match: SequenceMatch, sample_id: str, specimens: Specimens,
     
     # Log specimen resolution
     if trace_logger:
-        p1_name = match.get_p1().name if match.get_p1() else 'none'
-        p2_name = match.get_p2().name if match.get_p2() else 'none'
-        b1_name = match.best_b1()[0] if match.best_b1() else 'none'
-        b2_name = match.best_b2()[0] if match.best_b2() else 'none'
-        trace_logger.log_specimen_resolved(sequence_id, sample_id, resolution_type,
-                                          pool or 'none', p1_name, p2_name, b1_name, b2_name)
+        trace_logger.log_specimen_resolved(sequence_id, match, sample_id, 
+                                         resolution_type, pool or 'none')
 
     return sample_id, pool
 
@@ -1842,11 +1831,15 @@ class Orientation(Enum):
     FORWARD = 1
     REVERSE = 2
     UNKNOWN = 3
+    
+    def to_string(self) -> str:
+        """Convert orientation to lowercase string for trace logging."""
+        return self.name.lower()
 
 
-def determine_orientation_with_scores(parameters: MatchParameters, seq: str, rseq: str,
-                                     fwd_primers: List[PrimerInfo], 
-                                     rev_primers: List[PrimerInfo]) -> Tuple[Orientation, int, int]:
+def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
+                          fwd_primers: List[PrimerInfo], 
+                          rev_primers: List[PrimerInfo]) -> Tuple[Orientation, int, int]:
     """Determine sequence orientation by checking primer matches, returning scores.
     Returns (orientation, forward_score, reverse_score)."""
 
@@ -1882,14 +1875,6 @@ def determine_orientation_with_scores(parameters: MatchParameters, seq: str, rse
     
     return orientation, forward_matches, reverse_matches
 
-
-def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
-                          fwd_primers: List[PrimerInfo], rev_primers: List[PrimerInfo]) -> Orientation:
-    """Determine sequence orientation by checking primer matches.
-    Returns FORWARD/REVERSE only when highly confident, otherwise UNKNOWN."""
-    orientation, _, _ = determine_orientation_with_scores(parameters, seq, rseq, fwd_primers, rev_primers)
-    return orientation
-
 def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) -> Optional[str]:
     """
     Determine the primer pool based on matched primers.
@@ -1923,11 +1908,23 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
     rs = str(rseq.seq)
 
     if parameters.preorient:
-        orientation = determine_orientation(parameters, s, rs,
-                                            specimens.get_primers(Primer.FWD),
-                                            specimens.get_primers(Primer.REV))
+        orientation, fwd_score, rev_score = determine_orientation(
+            parameters, s, rs,
+            specimens.get_primers(Primer.FWD),
+            specimens.get_primers(Primer.REV))
+        
+        # Log orientation detection for trace
+        if trace_logger:
+            confidence = 0.0
+            if fwd_score + rev_score > 0:
+                confidence = abs(fwd_score - rev_score) / (fwd_score + rev_score)
+            trace_logger.log_orientation_detected(sequence_id, orientation.to_string(), 
+                                                 fwd_score, rev_score, confidence)
     else:
         orientation = Orientation.UNKNOWN
+        # When not pre-orienting, orientation is unknown
+        if trace_logger:
+            trace_logger.log_orientation_detected(sequence_id, orientation.to_string(), 0, 0, 0.0)
 
     matches = []
     match_counter = 0
@@ -1948,33 +1945,8 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                 
                 # Log primer match result if we found primers
                 if trace_logger and (match.p1_match or match.p2_match):
-                    match_type = 'both' if match.p1_match and match.p2_match else \
-                                 'forward_only' if match.p1_match else 'reverse_only'
-                    p1_name = match.get_p1().name if match.get_p1() else 'none'
-                    p2_name = match.get_p2().name if match.get_p2() else 'none'
-                    p1_dist = match.p1_match.distance() if match.p1_match else -1
-                    p2_dist = match.p2_match.distance() if match.p2_match else -1
-                    orientation_used = 'as_is' if orientation in [Orientation.FORWARD, Orientation.UNKNOWN] else 'reverse_complement'
-                    trace_logger.log_primer_matched(sequence_id, candidate_match_id, match_type, p1_name, p2_name,
-                                                   p1_dist, p2_dist, pool or 'none', orientation_used)
-                    
-                    # Log barcode match result for this candidate match
-                    b1_name = match.best_b1()[0] if match.has_b1_match() else 'none'
-                    b2_name = match.best_b2()[0] if match.has_b2_match() else 'none'
-                    b1_dist = match.b1_distance() if match.has_b1_match() else -1
-                    b2_dist = match.b2_distance() if match.has_b2_match() else -1
-                    
-                    if match.has_b1_match() and match.has_b2_match():
-                        barcode_match_type = 'both'
-                    elif match.has_b1_match():
-                        barcode_match_type = 'forward_only'
-                    elif match.has_b2_match():
-                        barcode_match_type = 'reverse_only'
-                    else:
-                        barcode_match_type = 'none'
-                    
-                    trace_logger.log_barcode_matched(sequence_id, candidate_match_id, barcode_match_type,
-                                                   b1_name, b2_name, b1_dist, b2_dist, p1_name, p2_name)
+                    trace_logger.log_primer_matched(sequence_id, match, pool or 'none', 'as_is')
+                    trace_logger.log_barcode_matched(sequence_id, match)
                     
                 matches.append(match)
                 match_counter += 1
@@ -1993,33 +1965,8 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                 
                 # Log primer match result if we found primers 
                 if trace_logger and (match.p1_match or match.p2_match):
-                    match_type = 'both' if match.p1_match and match.p2_match else \
-                                 'forward_only' if match.p1_match else 'reverse_only'
-                    p1_name = match.get_p1().name if match.get_p1() else 'none'
-                    p2_name = match.get_p2().name if match.get_p2() else 'none'
-                    p1_dist = match.p1_match.distance() if match.p1_match else -1
-                    p2_dist = match.p2_match.distance() if match.p2_match else -1
-                    orientation_used = 'reverse_complement'
-                    trace_logger.log_primer_matched(sequence_id, candidate_match_id, match_type, p1_name, p2_name,
-                                                   p1_dist, p2_dist, pool or 'none', orientation_used)
-                    
-                    # Log barcode match result for this candidate match
-                    b1_name = match.best_b1()[0] if match.has_b1_match() else 'none'
-                    b2_name = match.best_b2()[0] if match.has_b2_match() else 'none'
-                    b1_dist = match.b1_distance() if match.has_b1_match() else -1
-                    b2_dist = match.b2_distance() if match.has_b2_match() else -1
-                    
-                    if match.has_b1_match() and match.has_b2_match():
-                        barcode_match_type = 'both'
-                    elif match.has_b1_match():
-                        barcode_match_type = 'forward_only'
-                    elif match.has_b2_match():
-                        barcode_match_type = 'reverse_only'
-                    else:
-                        barcode_match_type = 'none'
-                    
-                    trace_logger.log_barcode_matched(sequence_id, candidate_match_id, barcode_match_type,
-                                                   b1_name, b2_name, b1_dist, b2_dist, p1_name, p2_name)
+                    trace_logger.log_primer_matched(sequence_id, match, pool or 'none', 'reverse_complement')
+                    trace_logger.log_barcode_matched(sequence_id, match)
                     
                 matches.append(match)
                 match_counter += 1
@@ -2043,8 +1990,7 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
     
     # Log primer search attempt
     if trace_logger:
-        primer_direction = 'forward' if which_primer == Primer.FWD else 'reverse'
-        trace_logger.log_primer_search(sequence_id, primer_info.name, primer_direction,
+        trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
                                       search_start, search_end, False, -1, -1)
 
     primer_match = align_seq(primer_rc, sequence, parameters.max_dist_primers[primer],
@@ -2056,9 +2002,8 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
         
         # Log successful primer match
         if trace_logger:
-            primer_direction = 'forward' if which_primer == Primer.FWD else 'reverse'
             match_pos = primer_match.location()[0] if primer_match.location() else -1
-            trace_logger.log_primer_search(sequence_id, primer_info.name, primer_direction,
+            trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
                                           search_start, search_end, True, primer_match.distance(), match_pos)
 
         # Get relevant barcodes for this primer pair
@@ -2079,8 +2024,7 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
                 
                 # Log barcode search attempt 
                 if trace_logger:
-                    barcode_type = 'forward' if which_barcode == Barcode.B1 else 'reverse'
-                    trace_logger.log_barcode_search(sequence_id, b, barcode_type, primer_info.name,
+                    trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(), primer_info.name,
                                                    barcode_search_start, barcode_search_end, False, -1, -1)
                 
                 if not prefilter.match(b_rc, target_seq):
@@ -2091,9 +2035,8 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
                 if barcode_match.matched():
                     # Log successful barcode search
                     if trace_logger:
-                        barcode_type = 'forward' if which_barcode == Barcode.B1 else 'reverse'
                         match_pos = barcode_match.location()[0] if barcode_match.location() else -1
-                        trace_logger.log_barcode_search(sequence_id, b, barcode_type, primer_info.name,
+                        trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(), primer_info.name,
                                                        barcode_search_start, barcode_search_end, True, 
                                                        barcode_match.distance(), match_pos)
                     
@@ -2113,8 +2056,7 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
     else:
         # Log failed primer search  
         if trace_logger:
-            primer_direction = 'forward' if which_primer == Primer.FWD else 'reverse'
-            trace_logger.log_primer_search(sequence_id, primer_info.name, primer_direction,
+            trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
                                           search_start, search_end, False, -1, -1)
 
 def output_write_operation(write_op: WriteOperation,
