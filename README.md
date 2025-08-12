@@ -340,7 +340,49 @@ This system enables detailed analysis of processing efficiency, match patterns, 
 
 **For complete trace event documentation, see [trace_event_schema.md](trace_event_schema.md).**
 
-**Note:** A trace visualization system is currently in development to provide graphical analysis of the trace data, including sequence flow diagrams and match pattern analysis.
+### Trace-Based Statistics and Visualization
+
+The trace system enables comprehensive post-processing analysis through two complementary tools:
+
+#### trace_to_stats.py - Flexible Statistics Engine
+
+Converts trace events into statistical summaries with any combination of analysis dimensions:
+
+```bash
+# Hierarchical text analysis
+python trace_to_stats.py trace/ --hierarchical pool primer_pair outcome
+python trace_to_stats.py trace/ --hierarchical orientation match_type --count-by sequences
+
+# Export data for visualization  
+python trace_to_stats.py trace/ --sankey-data pool outcome --output flow.json
+
+# List all available dimensions
+python trace_to_stats.py trace/ --list-dimensions
+```
+
+**Available dimensions:** `orientation`, `pool`, `primer_pair`, `forward_primer`, `reverse_primer`, `forward_barcode`, `reverse_barcode`, `barcode_count`, `match_type`, `outcome`, `selection_strategy`, `discard_reason`, `outcome_detailed`, and more.
+
+**Counting modes:**
+- `candidate_matches`: Count every primer-pair match attempt (detailed pipeline analysis)  
+- `sequences`: Count unique sequences only (overall success rates)
+
+#### stats_to_sankey.py - Interactive Flow Diagrams
+
+Creates interactive Sankey diagrams from trace statistics:
+
+```bash  
+# Basic flow diagram
+python stats_to_sankey.py flow.json diagram.html
+
+# Custom styling
+python stats_to_sankey.py flow.json diagram.html --theme dark --width 1600 --height 800
+```
+
+**Features:**
+- Semantic coloring based on processing pipeline stages
+- Interactive hover details with flow counts
+- Automatic layout adaptation to data structure
+- Support for arbitrary user-defined pools and dimensions
 
 ### Debug Output (-D)
 

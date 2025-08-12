@@ -30,7 +30,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CandidateMatch:
-    """Represents a single candidate match attempt or synthesized unmatched sequence."""
+    """Represents a single candidate match attempt or synthesized unmatched sequence.
+    
+    Design Philosophy:
+    - Each CandidateMatch represents one potential primer-pair match location
+    - Synthesized matches represent sequences with no primer matches found
+    - All dimensions use "none"/"unknown" for missing/unresolved values
+    - Computed properties provide derived dimensions for flexible analysis
+    - Discard reasons enable detailed contamination and quality analysis
+    """
     
     # Primary Keys
     candidate_match_id: Optional[str]  # None for unmatched sequences
@@ -49,6 +57,7 @@ class CandidateMatch:
     resolution_type: str = "unknown"           # full_match, partial_forward, partial_reverse, unknown
     outcome: str = "unknown"                   # matched, partial, unknown, discarded
     selection_strategy: str = "none"           # unique, first, discarded, none
+    discard_reason: str = "none"               # lower_score, downgraded_multiple_full, none
     
     # Boolean Dimensions (computed from above)
     @property
@@ -81,10 +90,31 @@ class CandidateMatch:
     @property
     def barcode_pair(self) -> str:
         return f"{self.forward_barcode}-{self.reverse_barcode}"
+    
+    @property
+    def outcome_detailed(self) -> str:
+        """Detailed outcome including discard reason for analysis."""
+        if self.outcome == "discarded" and self.discard_reason != "none":
+            return f"discarded_{self.discard_reason}"
+        else:
+            return self.outcome
 
 
 class TraceEventParser:
-    """Parses trace events and builds CandidateMatch objects."""
+    """Parses trace events and builds CandidateMatch objects.
+    
+    Design Philosophy:
+    - Event-driven reconstruction: Build analysis objects from trace events
+    - Robust parsing: Handle incomplete/malformed events gracefully  
+    - Synthesized completeness: Create matches for unmatched sequences
+    - Single-pass efficiency: Parse all events once, build all matches
+    
+    Key Behaviors:
+    - Groups events by sequence_id for coherent processing
+    - Creates one CandidateMatch per PRIMER_MATCHED event (candidate location)
+    - Synthesizes CandidateMatch for sequences with no primer matches
+    - Enriches matches with barcode, selection, and outcome data from related events
+    """
     
     def __init__(self):
         self.candidate_matches: List[CandidateMatch] = []
@@ -303,6 +333,7 @@ class TraceEventParser:
                 event.get('candidate_match_id') == candidate_match_id):
                 match.outcome = "discarded"
                 match.selection_strategy = "discarded"
+                match.discard_reason = event.get('discard_reason', 'unknown')
                 return
         
         # Check for match selection (this candidate was chosen)
@@ -333,7 +364,20 @@ class TraceEventParser:
 
 
 class StatsAggregator:
-    """Aggregates CandidateMatch objects into hierarchical statistics."""
+    """Aggregates CandidateMatch objects into hierarchical statistics.
+    
+    Design Philosophy:
+    - Dimension-agnostic: Works with any combination of CandidateMatch dimensions
+    - Flexible counting: Count by candidate matches (locations) or unique sequences
+    - Generic algorithms: No hardcoded dimension logic, fully general approach
+    - Clean separation: Statistics logic independent of visualization concerns
+    
+    Key Features:
+    - Hierarchical aggregation: Build nested trees of any dimension combination
+    - Sankey flow generation: Create node/link data for any dimension sequence
+    - Validation: Ensure requested dimensions exist and counting mode is valid
+    - Performance: Efficient single-pass aggregation algorithms
+    """
     
     def __init__(self, matches: List[CandidateMatch]):
         self.matches = matches

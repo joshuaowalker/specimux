@@ -30,60 +30,61 @@ except ImportError:
 
 
 class SankeyVisualizer:
-    """Generates plotly Sankey diagrams from trace statistics JSON."""
+    """Generates plotly Sankey diagrams from trace statistics JSON.
     
-    # Color schemes
-    COLOR_SCHEMES = {
+    Design Philosophy:
+    - Modular separation: Complete independence from statistics computation
+    - Semantic coloring: Use processing pipeline knowledge for intuitive colors
+    - Universal applicability: Work with any dimensions without hardcoded logic
+    - Robust layout: Use plotly's adaptive algorithms instead of brittle positioning
+    
+    Coloring Heuristics:
+    - Success gradient: Red (failed) → Orange (partial) → Yellow → Green (complete)
+    - Semantic mapping: forward=green, reverse=blue, discarded=gray
+    - Pool diversity: Hash-based color wheel for arbitrary user pool names
+    - Pattern recognition: none/partial/full primers get red/orange/green respectively
+    - Consistent assignment: Same values get same colors across runs via hashing
+    """
+    
+    # Base color palettes for heuristic coloring
+    PALETTES = {
         'light': {
-            # Pools
-            'pool_ITS': '#2E86AB',
-            'pool_ITS2': '#A23B72', 
-            'pool_none': '#D32F2F',
-            
-            # Primer pairs (green gradient for full pairs, orange for partial, red for none)
-            'primer_full': '#2E7D32',      # Both primers - dark green
-            'primer_partial': '#FF9800',   # One primer - orange  
-            'primer_none': '#D32F2F',      # No primers - red
-            
-            # Barcode counts
-            'barcode_2': '#1B5E20',        # Both barcodes - darkest green
-            'barcode_1': '#8BC34A',        # One barcode - light green
-            'barcode_0': '#B71C1C',        # No barcodes - dark red
-            
-            # Outcomes
-            'outcome_matched': '#1B5E20',       # Matched - dark green
-            'outcome_partial': '#FF9800',       # Partial - orange
-            'outcome_unknown': '#B71C1C',       # Unknown - red
-            'outcome_discarded': '#424242',     # Discarded - dark gray
-            
-            # Default fallbacks
-            'default': '#CCCCCC'
+            # Success gradient: red -> orange -> yellow -> green
+            'success_colors': ['#D32F2F', '#FF9800', '#FFC107', '#4CAF50', '#2E7D32'],
+            # Distinct color wheel for arbitrary categorical values (pools, primers, etc.)
+            'categorical_colors': [
+                '#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#6A994E', 
+                '#A663CC', '#4ECDC4', '#FF6B6B', '#4ECDC4', '#45B7D1'
+            ],
+            # Orientation colors
+            'orientation_forward': '#4CAF50',   # Green - forward processing
+            'orientation_reverse': '#2196F3',   # Blue - reverse processing  
+            'orientation_unknown': '#FF9800',   # Orange - uncertain
+            # Special semantic colors
+            'none_missing': '#D32F2F',          # Red for none/missing values
+            'discarded': '#424242',             # Gray for discarded items
+            'default': '#9E9E9E'                # Light gray fallback
         },
         'dark': {
-            # Darker theme with more saturated colors
-            'pool_ITS': '#4FC3F7',
-            'pool_ITS2': '#E91E63', 
-            'pool_none': '#F44336',
-            
-            'primer_full': '#4CAF50',
-            'primer_partial': '#FFC107',
-            'primer_none': '#F44336',
-            
-            'barcode_2': '#2E7D32',
-            'barcode_1': '#8BC34A',
-            'barcode_0': '#E53935',
-            
-            'outcome_matched': '#2E7D32',
-            'outcome_partial': '#FFC107',
-            'outcome_unknown': '#E53935',
-            'outcome_discarded': '#616161',
-            
-            'default': '#9E9E9E'
+            'success_colors': ['#F44336', '#FFC107', '#FFEB3B', '#8BC34A', '#4CAF50'],
+            'categorical_colors': [
+                '#4FC3F7', '#E91E63', '#FF9800', '#E53935', '#8BC34A',
+                '#BA68C8', '#4DB6AC', '#FF7043', '#81C784', '#64B5F6'
+            ],
+            'orientation_forward': '#8BC34A',
+            'orientation_reverse': '#64B5F6', 
+            'orientation_unknown': '#FFC107',
+            'none_missing': '#F44336',
+            'discarded': '#616161',
+            'default': '#BDBDBD'
         }
     }
     
     def __init__(self, theme: str = 'light'):
-        self.colors = self.COLOR_SCHEMES.get(theme, self.COLOR_SCHEMES['light'])
+        self.theme = theme
+        self.palette = self.PALETTES.get(theme, self.PALETTES['light'])
+        # Cache for consistent pool colors
+        self._pool_color_cache = {}
     
     def generate_diagram(self, data: Dict[str, Any], output_file: str, 
                         width: int = 1200, height: int = 600) -> None:
@@ -103,8 +104,10 @@ class SankeyVisualizer:
         
         # Prepare node data for plotly
         node_labels = [node['label'] for node in nodes]
-        node_colors = [self._get_node_color(node) for node in nodes]
-        node_x, node_y = self._calculate_node_positions(nodes, len(dimensions))
+        node_colors = [self._get_node_color(node, nodes) for node in nodes]
+        
+        # Use plotly's automatic layout instead of explicit positioning
+        # This is more robust and adapts better to different data
         
         # Create node index mapping
         node_index = {node['id']: i for i, node in enumerate(nodes)}
@@ -137,7 +140,7 @@ class SankeyVisualizer:
             hover_info += f"Flow: {flow_count:,} {count_by.replace('_', ' ')}"
             hover_text.append(hover_info)
         
-        # Create the Sankey diagram
+        # Create the Sankey diagram with automatic layout
         fig = go.Figure(data=[go.Sankey(
             node=dict(
                 pad=20,
@@ -145,8 +148,6 @@ class SankeyVisualizer:
                 line=dict(color="rgba(0,0,0,0.3)", width=0.5),
                 label=node_labels,
                 color=node_colors,
-                x=node_x,
-                y=node_y,
                 hovertemplate='%{customdata}<extra></extra>',
                 customdata=hover_text
             ),
@@ -211,35 +212,163 @@ class SankeyVisualizer:
                     if key not in link:
                         raise ValueError(f"Link {i} missing required key: {key}")
     
-    def _get_node_color(self, node: Dict[str, Any]) -> str:
-        """Determine color for a node based on its dimension and value."""
+    def _get_node_color(self, node: Dict[str, Any], all_nodes: List[Dict]) -> str:
+        """Determine color using semantic heuristics based on dimension and value."""
         dimension = node['dimension']
-        value = node['value']
+        value = str(node['value'])
         
-        # Pool colors
+        # Pool colors: Use categorical color wheel for arbitrary pool names
         if dimension == 'pool':
-            return self.colors.get(f'pool_{value}', self.colors['default'])
+            return self._get_pool_color(value)
         
-        # Primer pair colors
-        elif dimension == 'primer_pair':
-            if value == 'none-none':
-                return self.colors['primer_none']
-            elif 'none' in value:
-                return self.colors['primer_partial']
-            else:
-                return self.colors['primer_full']
+        # Primer-related dimensions: Pattern-based coloring
+        elif dimension in ['primer_pair', 'forward_primer', 'reverse_primer']:
+            return self._get_primer_color(value)
         
-        # Barcode count colors  
+        # Barcode dimensions: Count or presence-based
         elif dimension == 'barcode_count':
-            return self.colors.get(f'barcode_{value}', self.colors['default'])
+            return self._get_barcode_count_color(value)
+        elif dimension in ['forward_barcode', 'reverse_barcode', 'barcode_pair']:
+            return self._get_barcode_color(value)
+        elif dimension in ['forward_barcode_matched', 'reverse_barcode_matched']:
+            return self._get_boolean_color(value)
         
-        # Outcome colors
-        elif dimension == 'outcome':
-            return self.colors.get(f'outcome_{value}', self.colors['default'])
+        # Orientation: Semantic direction colors
+        elif dimension == 'orientation':
+            return self._get_orientation_color(value)
         
-        # Default color for other dimensions
+        # Match type: Success gradient based on completeness
+        elif dimension == 'match_type':
+            return self._get_match_type_color(value)
+        
+        # Outcome/resolution: Success gradient with detailed discard reasons
+        elif dimension in ['outcome', 'resolution_type', 'outcome_detailed']:
+            return self._get_outcome_color(value)
+        
+        # Selection strategy: Process-based coloring
+        elif dimension == 'selection_strategy':
+            return self._get_selection_color(value)
+        
+        # Boolean dimensions
+        elif dimension == 'specimen_matched':
+            return self._get_boolean_color(value)
+        
+        # Categorical dimensions: Use color wheel based on unique values in layer
         else:
-            return self.colors['default']
+            return self._get_categorical_color(dimension, value, all_nodes)
+    
+    def _get_pool_color(self, pool_name: str) -> str:
+        """Get color for pool using consistent categorical assignment."""
+        if pool_name.lower() in ['none', 'unknown']:
+            return self.palette['none_missing']
+        
+        # Use cached color for consistency
+        if pool_name not in self._pool_color_cache:
+            # Assign color based on hash for consistency across runs
+            color_idx = hash(pool_name) % len(self.palette['categorical_colors'])
+            self._pool_color_cache[pool_name] = self.palette['categorical_colors'][color_idx]
+        
+        return self._pool_color_cache[pool_name]
+    
+    def _get_primer_color(self, primer_value: str) -> str:
+        """Color primers based on completeness pattern."""
+        if primer_value.lower() in ['none', 'none-none']:
+            return self.palette['none_missing']
+        elif 'none' in primer_value.lower() or 'unknown' in primer_value.lower():
+            return self.palette['success_colors'][1]  # Orange - partial
+        else:
+            return self.palette['success_colors'][4]  # Green - complete
+    
+    def _get_barcode_count_color(self, count_str: str) -> str:
+        """Color barcode counts on success gradient."""
+        try:
+            count = int(count_str)
+            if count == 0:
+                return self.palette['success_colors'][0]  # Red
+            elif count == 1:
+                return self.palette['success_colors'][2]  # Yellow
+            else:  # 2 or more
+                return self.palette['success_colors'][4]  # Green
+        except ValueError:
+            return self.palette['default']
+    
+    def _get_barcode_color(self, barcode_value: str) -> str:
+        """Color individual barcodes."""
+        if barcode_value.lower() in ['none', 'unknown']:
+            return self.palette['none_missing']
+        else:
+            return self.palette['success_colors'][3]  # Light green - present
+    
+    def _get_orientation_color(self, orientation: str) -> str:
+        """Color orientations with semantic meaning."""
+        orientation_lower = orientation.lower()
+        if orientation_lower == 'forward':
+            return self.palette['orientation_forward']
+        elif orientation_lower == 'reverse':
+            return self.palette['orientation_reverse']
+        else:
+            return self.palette['orientation_unknown']
+    
+    def _get_match_type_color(self, match_type: str) -> str:
+        """Color match types based on completeness."""
+        match_lower = match_type.lower()
+        if match_lower == 'both':
+            return self.palette['success_colors'][4]  # Green - both found
+        elif match_lower in ['forward_only', 'reverse_only']:
+            return self.palette['success_colors'][2]  # Yellow - partial
+        else:
+            return self.palette['success_colors'][0]  # Red - none
+    
+    def _get_outcome_color(self, outcome: str) -> str:
+        """Color outcomes on success gradient with detailed discard reason support."""
+        outcome_lower = outcome.lower()
+        if outcome_lower == 'matched':
+            return self.palette['success_colors'][4]  # Green - success
+        elif outcome_lower == 'partial':
+            return self.palette['success_colors'][2]  # Yellow - partial success
+        elif outcome_lower.startswith('discarded'):
+            # Handle detailed discard reasons with color variations
+            if 'lower_score' in outcome_lower:
+                return '#757575'  # Medium gray - competitive discard
+            elif 'downgraded_multiple_full' in outcome_lower:
+                return '#9E9E9E'  # Light gray - contamination flagging
+            else:
+                return self.palette['discarded']  # Default gray - general discard
+        else:  # unknown
+            return self.palette['success_colors'][0]  # Red - failed
+    
+    def _get_selection_color(self, strategy: str) -> str:
+        """Color selection strategies."""
+        strategy_lower = strategy.lower()
+        if strategy_lower == 'unique':
+            return self.palette['success_colors'][4]  # Green - ideal case
+        elif strategy_lower == 'first':
+            return self.palette['success_colors'][2]  # Yellow - ambiguity resolved
+        elif strategy_lower == 'discarded':
+            return self.palette['discarded']          # Gray - not selected
+        else:
+            return self.palette['default']
+    
+    def _get_boolean_color(self, bool_str: str) -> str:
+        """Color boolean values."""
+        if bool_str.lower() in ['true', '1', 'yes']:
+            return self.palette['success_colors'][4]  # Green - true
+        else:
+            return self.palette['success_colors'][0]  # Red - false
+    
+    def _get_categorical_color(self, dimension: str, value: str, all_nodes: List[Dict]) -> str:
+        """Assign colors to arbitrary categorical values using color wheel."""
+        # Get all unique values for this dimension to ensure consistent assignment
+        dimension_values = sorted(set(
+            str(node['value']) for node in all_nodes if node['dimension'] == dimension
+        ))
+        
+        try:
+            value_index = dimension_values.index(value)
+            color_index = value_index % len(self.palette['categorical_colors'])
+            return self.palette['categorical_colors'][color_index]
+        except ValueError:
+            return self.palette['default']
     
     def _get_link_color(self, link: Dict[str, Any], nodes: List[Dict]) -> str:
         """Determine color for a link (semi-transparent version of source node)."""
@@ -249,7 +378,7 @@ class SankeyVisualizer:
             return 'rgba(200,200,200,0.3)'
         
         # Get source color and make it semi-transparent
-        source_color = self._get_node_color(source_node)
+        source_color = self._get_node_color(source_node, nodes)
         
         # Convert hex to rgba with alpha
         if source_color.startswith('#'):
@@ -261,41 +390,6 @@ class SankeyVisualizer:
         else:
             return 'rgba(200,200,200,0.3)'  # Fallback
     
-    def _calculate_node_positions(self, nodes: List[Dict], num_layers: int) -> tuple:
-        """Calculate x and y positions for nodes."""
-        # Group nodes by layer
-        layers = {}
-        for node in nodes:
-            layer = node['layer']
-            if layer not in layers:
-                layers[layer] = []
-            layers[layer].append(node)
-        
-        node_x = []
-        node_y = []
-        
-        # Calculate positions
-        for node in nodes:
-            layer = node['layer']
-            layer_nodes = layers[layer]
-            
-            # X position: evenly distribute layers
-            if num_layers > 1:
-                x = layer / (num_layers - 1)
-            else:
-                x = 0.5
-            
-            # Y position: evenly distribute nodes within layer
-            if len(layer_nodes) > 1:
-                node_index = layer_nodes.index(node)
-                y = node_index / (len(layer_nodes) - 1)
-            else:
-                y = 0.5
-            
-            node_x.append(x)
-            node_y.append(y)
-        
-        return node_x, node_y
 
 
 def main():
