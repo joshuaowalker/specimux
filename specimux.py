@@ -838,10 +838,19 @@ class OutputManager:
             # Full match (including downgraded and multiple specimen matches)
             return os.path.join(self.output_dir, "full", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
 
-    def write_sequence(self, write_op: WriteOperation):
+    def write_sequence(self, write_op: WriteOperation, trace_logger: Optional['TraceLogger'] = None):
         """Write a sequence to the appropriate output file."""
         filename = self._make_filename(write_op.sample_id, write_op.primer_pool,
                                        write_op.p1_name, write_op.p2_name, write_op.resolution_type)
+
+        # Log sequence output with actual filename
+        if trace_logger:
+            # Create relative path from output directory
+            relative_path = os.path.relpath(filename, self.output_dir)
+            primer_pair = f"{write_op.p1_name}-{write_op.p2_name}"
+            
+            trace_logger.log_sequence_output(write_op.seq_id, write_op.sample_id,
+                                           write_op.primer_pool, primer_pair, relative_path)
 
         # Ensure directory exists
         os.makedirs(os.path.dirname(filename), exist_ok=True)
@@ -1099,10 +1108,10 @@ class TraceLogger:
         self._log_event(sequence_id, 'SPECIMEN_RESOLVED', specimen_id, resolution_type,
                        pool, p1_name, p2_name, b1_name, b2_name)
     
-    def log_sequence_output(self, sequence_id: str, output_type: str, specimen_id: str,
+    def log_sequence_output(self, sequence_id: str, specimen_id: str,
                            pool: str, primer_pair: str, file_path: str):
         """Log output decision."""
-        self._log_event(sequence_id, 'SEQUENCE_OUTPUT', output_type, specimen_id,
+        self._log_event(sequence_id, 'SEQUENCE_OUTPUT', specimen_id,
                        pool, primer_pair, file_path)
     
     def log_no_match_found(self, sequence_id: str, stage_failed: str, reason: str):
@@ -1601,8 +1610,6 @@ def process_sequences(seq_records: List[SeqRecord],
             sequence_id = trace_logger.get_sequence_id(seq, record_offset + idx)
             trace_logger.log_sequence_received(sequence_id, len(seq), seq.id)
         
-        has_full_match = False
-
         if args.min_length != -1 and len(seq) < args.min_length:
             if trace_logger:
                 trace_logger.log_sequence_filtered(sequence_id, len(seq), 'too_short')
@@ -1622,6 +1629,7 @@ def process_sequences(seq_records: List[SeqRecord],
                 
                 # Process all equivalent matches and create write operations directly
                 equivalent_count = len(best_matches)
+                has_full_match = False
                 for match in best_matches:
                     # Determine final sample ID for this match (includes specimen resolution and fallback logic)
                     final_sample_id, resolution_type = match_sample(match, specimens, trace_logger, sequence_id, 
@@ -1631,22 +1639,13 @@ def process_sequences(seq_records: List[SeqRecord],
                     op = create_write_operation(final_sample_id, args, seq, match, resolution_type)
                     write_ops.append(op)
                     
-                    # Count successful matches and log sequence output for this operation
+                    # Count successful matches  
                     if resolution_type.is_full_match():
-                        op_output_type = 'full'
                         has_full_match = True
-                    elif resolution_type.is_partial_match():
-                        op_output_type = 'partial'
-                    else:
-                        op_output_type = 'unknown'
-                    
-                    # Log sequence output
-                    if trace_logger:
-                        pool_name = op.primer_pool
-                        primer_pair = f"{op.p1_name}-{op.p2_name}"
-                        file_path = f"{op_output_type}/{pool_name}/{primer_pair}/{op.sample_id}.fastq"
-                        trace_logger.log_sequence_output(sequence_id, op_output_type, op.sample_id, 
-                                                        pool_name, primer_pair, file_path)
+                
+                # Only count sequences with at least one full match as successful
+                if has_full_match:
+                    matched_count += 1
             else:
                 # No matches found - create minimal match object for output
                 match = SequenceMatch(seq, specimens.b_length())
@@ -1655,17 +1654,7 @@ def process_sequences(seq_records: List[SeqRecord],
                 op = create_write_operation(SampleId.UNKNOWN, args, seq, match, ResolutionType.UNKNOWN)
                 write_ops.append(op)
                 
-                # Log sequence output for no-match case
-                if trace_logger:
-                    pool_name = op.primer_pool
-                    primer_pair = f"{op.p1_name}-{op.p2_name}"
-                    file_path = f"unknown/{pool_name}/{primer_pair}/{op.sample_id}.fastq"
-                    trace_logger.log_sequence_output(sequence_id, 'unknown', op.sample_id, 
-                                                    pool_name, primer_pair, file_path)
-
-        # Only count sequences with at least one full match as successful
-        if has_full_match:
-            matched_count += 1
+                # Note: Sequence output logging moved to OutputManager.write_sequence where actual filename is known
 
     return write_ops, total_count, matched_count
 
@@ -2032,7 +2021,8 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
 
 def output_write_operation(write_op: WriteOperation,
                            output_manager: OutputManager,
-                           args: argparse.Namespace) -> None:
+                           args: argparse.Namespace,
+                           trace_logger: Optional['TraceLogger'] = None) -> None:
     if not args.output_to_files:
         fh = sys.stdout
         formatted_seq = write_op.sequence
@@ -2047,7 +2037,7 @@ def output_write_operation(write_op: WriteOperation,
             fh.write("+\n")
             fh.write(write_op.quality_sequence + "\n")
     else:
-        output_manager.write_sequence(write_op)
+        output_manager.write_sequence(write_op, trace_logger)
 
 def color_sequence(seq: str, quality_scores: List[int], p1_location: Tuple[int, int],
                    p2_location: Tuple[int, int], b1_location: Tuple[int, int], b2_location: Tuple[int, int]):
@@ -2230,7 +2220,7 @@ def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
         if args.output_to_files and _output_manager is not None:
             try:
                 for write_op in write_ops:
-                    output_write_operation(write_op, _output_manager, args)
+                    output_write_operation(write_op, _output_manager, args, _trace_logger)
                 # Ensure buffer is flushed after each batch
                 _output_manager.file_manager.flush_all()
             except Exception as e:
@@ -2670,12 +2660,12 @@ def specimux(args):
             write_ops, batch_total, batch_matched = process_sequences(
                 seq_batch, parameters, specimens, args, prefilter, trace_logger, num_seqs)
             
-            # Close trace logger after processing batch
+            for write_op in write_ops:
+                output_write_operation(write_op, output_manager, args, trace_logger)
+            
+            # Close trace logger after processing and writing batch
             if trace_logger:
                 trace_logger.__exit__(None, None, None)
-            
-            for write_op in write_ops:
-                output_write_operation(write_op, output_manager, args)
 
             num_seqs += batch_total
             total_processed += batch_total
