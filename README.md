@@ -486,7 +486,7 @@ python v04_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --outpu
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
-- 0.5.1 (August 2025): Reorganized output with match-type-first directory structure for easier access to primary data, added automatic cleanup of empty directories, added processing flow statistics (stats.json) and interactive Sankey diagram visualization
+- 0.6.0-dev (August 2025): Major refactoring with multiple match processing (replacing "ambiguity" concept), reorganized output with match-type-first directory structure for easier access to primary data, comprehensive trace event system with 3 verbosity levels, trace-based statistics framework (trace_to_stats.py), interactive Sankey flow diagrams (stats_to_sankey.py), enhanced log statistics with hierarchical pool/primer breakdowns, automatic cleanup of empty directories
 - 0.5 (March 2025): Added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
 - 0.4 (February 2025): Added Bloom filter optimization
 - 0.3 (December 2024): Code cleanup and write pooling improvements
