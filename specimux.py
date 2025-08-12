@@ -1653,8 +1653,6 @@ def process_sequences(seq_records: List[SeqRecord],
                     trace_logger.log_no_match_found(sequence_id, 'primer_search', 'No primer matches found')
                 op = create_write_operation(SampleId.UNKNOWN, args, seq, match, ResolutionType.UNKNOWN)
                 write_ops.append(op)
-                
-                # Note: Sequence output logging moved to OutputManager.write_sequence where actual filename is known
 
     return write_ops, total_count, matched_count
 
@@ -2004,8 +2002,6 @@ def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters:
                         
             if bm:
                 match.add_barcode_match(bm, bc, reversed_sequence, which_barcode)
-        
-        # Note: BARCODE_MATCHED logging moved to match_sequence to log complete barcode result per candidate match
     else:
         # Log failed primer search  
         if trace_logger:
