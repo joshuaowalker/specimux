@@ -176,7 +176,7 @@ The match-type-first organization provides several advantages:
 1. **Primary Data Access**: Full matches are immediately accessible in the `full/` directory without navigating through multiple subdirectories
 2. **Clean Separation**: Partial matches and unknowns are segregated, reducing clutter when accessing your primary demultiplexed data
 3. **Convenient Aggregation**: Pool-level directories (e.g., `full/ITS/`) collect all successful matches for that target region
-4. **Recovery Options**: The `partial/` directory contains sequences that may be recoverable using tools like `speciharvest.py`
+4. **Recovery Options**: The `partial/` directory contains sequences that may be recoverable using tools like `specimine.py`
 5. **Automatic Cleanup**: Empty directories are automatically removed after processing to keep the output clean
 
 #### Key Directories
