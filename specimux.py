@@ -1943,12 +1943,14 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                 if pool:
                     match.set_pool(pool)
                 
-                # Log primer match result if we found primers
-                if trace_logger and (match.p1_match or match.p2_match):
-                    trace_logger.log_primer_matched(sequence_id, match, pool or 'none', 'as_is')
-                    trace_logger.log_barcode_matched(sequence_id, match)
+                # Only add matches where at least one primer was found
+                if match.p1_match or match.p2_match:
+                    # Log primer match result
+                    if trace_logger:
+                        trace_logger.log_primer_matched(sequence_id, match, pool or 'none', 'as_is')
+                        trace_logger.log_barcode_matched(sequence_id, match)
                     
-                matches.append(match)
+                    matches.append(match)
                 match_counter += 1
 
             if orientation in [Orientation.REVERSE, Orientation.UNKNOWN]:
@@ -1963,12 +1965,14 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                 if pool:
                     match.set_pool(pool)
                 
-                # Log primer match result if we found primers 
-                if trace_logger and (match.p1_match or match.p2_match):
-                    trace_logger.log_primer_matched(sequence_id, match, pool or 'none', 'reverse_complement')
-                    trace_logger.log_barcode_matched(sequence_id, match)
+                # Only add matches where at least one primer was found
+                if match.p1_match or match.p2_match:
+                    # Log primer match result
+                    if trace_logger:
+                        trace_logger.log_primer_matched(sequence_id, match, pool or 'none', 'reverse_complement')
+                        trace_logger.log_barcode_matched(sequence_id, match)
                     
-                matches.append(match)
+                    matches.append(match)
                 match_counter += 1
     
     # TODO: Consider whether primer pairs that match almost exactly the same extent 
