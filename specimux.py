@@ -175,7 +175,7 @@ class PrimerInfo:
         self.specimens = set()
         self.pools = pools
 
-class PrimerRegistry:
+class PrimerDatabase:
     """Manages primers and their relationships to pools"""
 
     def __init__(self):
@@ -281,7 +281,7 @@ class PrimerRegistry:
         return stats
 
 
-class MatchResult:
+class AlignmentResult:
     """Wrapper around edlib match result"""
     def __init__(self, edlib_match):
         self._edlib_match = edlib_match
@@ -300,7 +300,7 @@ class MatchResult:
 
     def reversed(self, seq_length):
         """Return a new MatchResult with locations relative to the reversed sequence"""
-        m = MatchResult(self._edlib_match.copy())
+        m = AlignmentResult(self._edlib_match.copy())
         m._reverse(seq_length)
         return m
 
@@ -317,14 +317,14 @@ class MatchResult:
 
         self._edlib_match['locations'] = [(loc[0] + s, loc[1] + s) for loc in self._edlib_match['locations']]  # adjust relative match to absolute
 
-class SequenceMatch:
+class CandidateMatch:
     def __init__(self, sequence, barcode_length, candidate_match_id: Optional[str] = None):
         self.sequence_length = len(sequence)
         self.sequence = sequence
-        self.p1_match: Optional[MatchResult] = None
-        self._b1_matches: List[Tuple[str, MatchResult, float]] = []
-        self.p2_match: Optional[MatchResult] = None
-        self._b2_matches: List[Tuple[str, MatchResult, float]] = []
+        self.p1_match: Optional[AlignmentResult] = None
+        self._b1_matches: List[Tuple[str, AlignmentResult, float]] = []
+        self.p2_match: Optional[AlignmentResult] = None
+        self._b2_matches: List[Tuple[str, AlignmentResult, float]] = []
         self._p1: Optional[PrimerInfo] = None
         self._p2: Optional[PrimerInfo] = None
         self._pool: Optional[str] = None  # New: track the pool
@@ -340,7 +340,7 @@ class SequenceMatch:
         """Get the primer pool for this match"""
         return self._pool
 
-    def add_barcode_match(self, match: MatchResult, barcode: str, reverse: bool, which: Barcode):
+    def add_barcode_match(self, match: AlignmentResult, barcode: str, reverse: bool, which: Barcode):
         m = match
         if reverse:
             m = m.reversed(self.sequence_length)
@@ -371,7 +371,7 @@ class SequenceMatch:
         best_distance = self.b2_distance()
         return [b for b, _, d in self._b2_matches if abs(d - best_distance) < self.match_tolerance]
 
-    def set_primer_match(self, match: MatchResult, primer: PrimerInfo, reverse: bool, which: Primer):
+    def set_primer_match(self, match: AlignmentResult, primer: PrimerInfo, reverse: bool, which: Primer):
         m = match
         if reverse:
             m = m.reversed(self.sequence_length)
@@ -466,7 +466,7 @@ class SequenceMatch:
 
 
 class Specimens:
-    def __init__(self, primer_registry: PrimerRegistry):
+    def __init__(self, primer_registry: PrimerDatabase):
         self._specimens = []  # List of (id, pool, b1, p1s, b2, p2s) tuples for reference
         self._barcode_length = 0
         self._primers = {}
@@ -651,7 +651,7 @@ class WriteOperation(NamedTuple):
     p2_name: str
     resolution_type: ResolutionType
 
-class WorkItem(NamedTuple):
+class SequenceBatch(NamedTuple):
     seq_number: int
     seq_records: List  # This now contains actual sequence records, not an iterator
     parameters: MatchParameters
@@ -999,8 +999,8 @@ class TraceLogger:
         self._log_event(sequence_id, 'ORIENTATION_DETECTED', orientation, 
                        forward_score, reverse_score, f"{confidence:.3f}")
     
-    def log_primer_matched(self, sequence_id: str, match: 'SequenceMatch',
-                          pool: str, orientation_used: str):
+    def log_primer_matched(self, sequence_id: str, match: 'CandidateMatch',
+                           pool: str, orientation_used: str):
         """Log successful primer match for a specific candidate match."""
         (candidate_match_id, p1_name, p2_name, _, _, 
          _, _, p1_dist, p2_dist, _, _) = self._extract_match_info(match)
@@ -1017,7 +1017,7 @@ class TraceLogger:
                        p1_name, p2_name, p1_dist, p2_dist,
                        pool, orientation_used)
     
-    def log_barcode_matched(self, sequence_id: str, match: 'SequenceMatch'):
+    def log_barcode_matched(self, sequence_id: str, match: 'CandidateMatch'):
         """Log barcode match result for a specific candidate match."""
         (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
          _, _, _, _, b1_dist, b2_dist) = self._extract_match_info(match)
@@ -1036,7 +1036,7 @@ class TraceLogger:
                        b1_name, b2_name, b1_dist, b2_dist,
                        p1_name, p2_name)
     
-    def _extract_match_info(self, match: 'SequenceMatch') -> tuple:
+    def _extract_match_info(self, match: 'CandidateMatch') -> tuple:
         """Extract common information from SequenceMatch for trace logging.
         
         Returns: (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
@@ -1081,7 +1081,7 @@ class TraceLogger:
         return (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
                 barcode_presence, total_distance, p1_dist, p2_dist, b1_dist, b2_dist)
     
-    def log_match_scored(self, sequence_id: str, match: 'SequenceMatch', score: float):
+    def log_match_scored(self, sequence_id: str, match: 'CandidateMatch', score: float):
         """Log match scoring for a specific candidate match."""
         (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
          barcode_presence, total_distance, _, _, _, _) = self._extract_match_info(match)
@@ -1100,8 +1100,8 @@ class TraceLogger:
                        forward_primer, reverse_primer, forward_barcode, reverse_barcode,
                        pool, str(is_unique).lower())
     
-    def log_specimen_resolved(self, sequence_id: str, match: 'SequenceMatch',
-                             specimen_id: str, resolution_type: str, pool: str):
+    def log_specimen_resolved(self, sequence_id: str, match: 'CandidateMatch',
+                              specimen_id: str, resolution_type: str, pool: str):
         """Log specimen resolution."""
         (_, p1_name, p2_name, b1_name, b2_name, 
          _, _, _, _, _, _) = self._extract_match_info(match)
@@ -1118,8 +1118,8 @@ class TraceLogger:
         """Log when no matches found."""
         self._log_event(sequence_id, 'NO_MATCH_FOUND', stage_failed, reason)
     
-    def log_match_discarded(self, sequence_id: str, match: 'SequenceMatch', 
-                           score: float, discard_reason: str):
+    def log_match_discarded(self, sequence_id: str, match: 'CandidateMatch',
+                            score: float, discard_reason: str):
         """Log when a candidate match is discarded."""
         (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
          _, _, _, _, _, _) = self._extract_match_info(match)
@@ -1335,14 +1335,14 @@ class BloomPrefilter:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-def read_primers_file(filename: str) -> PrimerRegistry:
+def read_primers_file(filename: str) -> PrimerDatabase:
     """
     Read primers file and build primer registry
 
     Returns:
         PrimerRegistry object managing all primers and their relationships
     """
-    registry = PrimerRegistry()
+    registry = PrimerDatabase()
 
     for record in SeqIO.parse(filename, "fasta"):
         name = record.id
@@ -1389,7 +1389,7 @@ def read_primers_file(filename: str) -> PrimerRegistry:
 
     return registry
 
-def read_specimen_file(filename: str, primer_registry: PrimerRegistry) -> Specimens:
+def read_specimen_file(filename: str, primer_registry: PrimerDatabase) -> Specimens:
     """
     Read a tab-separated specimen file and return a Specimens object.
     Expected columns: SampleID, PrimerPool, FwIndex, FwPrimer, RvIndex, RvPrimer
@@ -1502,7 +1502,7 @@ def align_seq(query: Union[str, Seq, SeqRecord],
              max_distance: int,
              start: int,
              end: int,
-             mode: str = AlignMode.INFIX) -> MatchResult:
+             mode: str = AlignMode.INFIX) -> AlignmentResult:
     # Convert query to string if it's a Seq or SeqRecord - not functionally necessary, but improves performance
     if isinstance(query, (Seq, SeqRecord)):
         query = str(query.seq if isinstance(query, SeqRecord) else query)
@@ -1524,7 +1524,7 @@ def align_seq(query: Union[str, Seq, SeqRecord],
     if r['editDistance'] != -1 and r['editDistance'] > max_distance:
         r['editDistance'] = -1
 
-    m = MatchResult(r)
+    m = AlignmentResult(r)
     m.adjust_start(s)
     return m
 
@@ -1621,19 +1621,19 @@ def process_sequences(seq_records: List[SeqRecord],
             rseq.id = seq.id
             rseq.description = seq.description
 
-            matches = match_sequence(prefilter, parameters, seq, rseq, specimens, trace_logger, sequence_id)
+            matches = find_candidate_matches(prefilter, parameters, seq, rseq, specimens, trace_logger, sequence_id)
 
             # Handle match selection and processing
             if matches:
-                best_matches = choose_best_match(matches, trace_logger, sequence_id)
+                best_matches = select_best_matches(matches, trace_logger, sequence_id)
                 
                 # Process all equivalent matches and create write operations directly
                 equivalent_count = len(best_matches)
                 has_full_match = False
                 for match in best_matches:
                     # Determine final sample ID for this match (includes specimen resolution and fallback logic)
-                    final_sample_id, resolution_type = match_sample(match, specimens, trace_logger, sequence_id, 
-                                                                   args, equivalent_count)
+                    final_sample_id, resolution_type = resolve_specimen(match, specimens, trace_logger, sequence_id,
+                                                                        args, equivalent_count)
                     
                     # Create and add write operation directly
                     op = create_write_operation(final_sample_id, args, seq, match, resolution_type)
@@ -1648,7 +1648,7 @@ def process_sequences(seq_records: List[SeqRecord],
                     matched_count += 1
             else:
                 # No matches found - create minimal match object for output
-                match = SequenceMatch(seq, specimens.b_length())
+                match = CandidateMatch(seq, specimens.b_length())
                 if trace_logger:
                     trace_logger.log_no_match_found(sequence_id, 'primer_search', 'No primer matches found')
                 op = create_write_operation(SampleId.UNKNOWN, args, seq, match, ResolutionType.UNKNOWN)
@@ -1658,9 +1658,9 @@ def process_sequences(seq_records: List[SeqRecord],
 
 
 
-def choose_best_match(matches: List[SequenceMatch], 
-                     trace_logger: Optional[TraceLogger] = None,
-                     sequence_id: Optional[str] = None) -> List[SequenceMatch]:
+def select_best_matches(matches: List[CandidateMatch],
+                        trace_logger: Optional[TraceLogger] = None,
+                        sequence_id: Optional[str] = None) -> List[CandidateMatch]:
     """Select all equivalent best matches based on match quality scoring"""
     if not matches:
         raise ValueError("No matches provided to choose_best_match")
@@ -1705,11 +1705,11 @@ def choose_best_match(matches: List[SequenceMatch],
 
 
 
-def match_sample(match: SequenceMatch, specimens: Specimens,
-                trace_logger: Optional[TraceLogger] = None,
-                sequence_id: Optional[str] = None,
-                args: Optional[argparse.Namespace] = None,
-                equivalent_matches_count: int = 1) -> Tuple[str, ResolutionType]:
+def resolve_specimen(match: CandidateMatch, specimens: Specimens,
+                     trace_logger: Optional[TraceLogger] = None,
+                     sequence_id: Optional[str] = None,
+                     args: Optional[argparse.Namespace] = None,
+                     equivalent_matches_count: int = 1) -> Tuple[str, ResolutionType]:
     """Determine final sample ID for this match, including specimen resolution and fallback logic.
     
     Returns:
@@ -1854,10 +1854,10 @@ def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) ->
     return None
 
 
-def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq: SeqRecord,
-                   rseq: SeqRecord, specimens: Specimens, 
-                   trace_logger: Optional[TraceLogger] = None,
-                   sequence_id: Optional[str] = None) -> List[SequenceMatch]:
+def find_candidate_matches(prefilter: BarcodePrefilter, parameters: MatchParameters, seq: SeqRecord,
+                           rseq: SeqRecord, specimens: Specimens,
+                           trace_logger: Optional[TraceLogger] = None,
+                           sequence_id: Optional[str] = None) -> List[CandidateMatch]:
     """Match sequence against primers and barcodes"""
     # extract string versions for performance - roughly 18% improvement
     s = str(seq.seq)
@@ -1889,7 +1889,7 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
         for rev_primer in specimens.get_paired_primers(fwd_primer.primer):
             if orientation in [Orientation.FORWARD, Orientation.UNKNOWN]:
                 candidate_match_id = f"{sequence_id}_match_{match_counter}"
-                match = SequenceMatch(seq, specimens.b_length(), candidate_match_id)
+                match = CandidateMatch(seq, specimens.b_length(), candidate_match_id)
                 match_one_end(prefilter, match, parameters, rs, True, fwd_primer,
                               Primer.FWD, Barcode.B1, trace_logger, sequence_id)
                 match_one_end(prefilter, match, parameters, s, False, rev_primer,
@@ -1910,7 +1910,7 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
 
             if orientation in [Orientation.REVERSE, Orientation.UNKNOWN]:
                 candidate_match_id = f"{sequence_id}_match_{match_counter}"
-                match = SequenceMatch(rseq, specimens.b_length(), candidate_match_id)
+                match = CandidateMatch(rseq, specimens.b_length(), candidate_match_id)
                 match_one_end(prefilter, match, parameters, s, True, fwd_primer,
                               Primer.FWD, Barcode.B1, trace_logger, sequence_id)
                 match_one_end(prefilter, match, parameters, rs, False, rev_primer,
@@ -1934,7 +1934,7 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
     # for cases where multiple primer pairs cover nearly identical sequence regions.
     return matches
 
-def match_one_end(prefilter: BarcodePrefilter, match: SequenceMatch, parameters: MatchParameters, sequence: str,
+def match_one_end(prefilter: BarcodePrefilter, match: CandidateMatch, parameters: MatchParameters, sequence: str,
                   reversed_sequence: bool, primer_info: PrimerInfo,
                   which_primer: Primer, which_barcode: Barcode,
                   trace_logger: Optional[TraceLogger] = None,
@@ -2197,7 +2197,7 @@ def cleanup_worker():
         except Exception as e:
             logging.error(f"Error cleaning up worker trace logger: {e}")
 
-def worker(work_item: WorkItem, specimens: Specimens, args: argparse.Namespace):
+def worker(work_item: SequenceBatch, specimens: Specimens, args: argparse.Namespace):
     """Process a batch of sequences and write results directly"""
     global _output_manager, _barcode_prefilter, _trace_logger
     try:
@@ -2439,7 +2439,7 @@ def specimux_mp(args):
                 cumulative_idx = 0
                 for i, batch in enumerate(iter_batches(seq_records, sequence_block_size,
                                                        last_seq_to_output, all_seqs)):
-                    work_item = WorkItem(i, batch, parameters, cumulative_idx)
+                    work_item = SequenceBatch(i, batch, parameters, cumulative_idx)
                     cumulative_idx += len(batch)
                     yield work_item
             
