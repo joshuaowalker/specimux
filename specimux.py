@@ -1951,7 +1951,7 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                         trace_logger.log_barcode_matched(sequence_id, match)
                     
                     matches.append(match)
-                match_counter += 1
+                    match_counter += 1
 
             if orientation in [Orientation.REVERSE, Orientation.UNKNOWN]:
                 candidate_match_id = f"{sequence_id}_match_{match_counter}"
@@ -1973,7 +1973,7 @@ def match_sequence(prefilter: BarcodePrefilter, parameters: MatchParameters, seq
                         trace_logger.log_barcode_matched(sequence_id, match)
                     
                     matches.append(match)
-                match_counter += 1
+                    match_counter += 1
     
     # TODO: Consider whether primer pairs that match almost exactly the same extent 
     # should be considered distinct matches or not. This affects multiple match detection
