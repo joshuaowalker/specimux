@@ -361,7 +361,12 @@ python trace_to_stats.py trace/ --sankey-data pool outcome --output flow.json
 
 # List all available dimensions
 python trace_to_stats.py trace/ --list-dimensions
+
+# Classification diagnostics (similar to v0.5 classification system)
+python trace_to_stats.py trace/ --hierarchical pool primer_pair match_type --count-by sequences
 ```
+
+To obtain similar diagnostic information as the v0.5 classification system, use the last command above. This provides a biologically meaningful breakdown showing exactly which primers and barcodes were detected for each sequence, organized by pool and primer pair.
 
 **Available dimensions:** `orientation`, `pool`, `primer_pair`, `forward_primer`, `reverse_primer`, `forward_barcode`, `reverse_barcode`, `barcode_count`, `match_type`, `outcome`, `selection_strategy`, `discard_reason`, `outcome_detailed`, and more.
 
