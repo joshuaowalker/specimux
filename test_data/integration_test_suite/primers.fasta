@@ -1,0 +1,6 @@
+>ITS4 pool=ITS,ITS2 position=reverse
+TCCTCCGCTTATTGATATGC
+>ITS1F pool=ITS position=forward
+CTTGGTCATTTAGAGGAAGTAA
+>gITS7 pool=ITS2 position=forward
+GTGARTCATCGARTCTTTG
