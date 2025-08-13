@@ -650,6 +650,7 @@ class WriteOperation(NamedTuple):
     p1_name: str
     p2_name: str
     resolution_type: ResolutionType
+    trace_sequence_id: Optional[str] = None
 
 class SequenceBatch(NamedTuple):
     seq_number: int
@@ -849,7 +850,7 @@ class OutputManager:
             relative_path = os.path.relpath(filename, self.output_dir)
             primer_pair = f"{write_op.p1_name}-{write_op.p2_name}"
             
-            trace_logger.log_sequence_output(write_op.seq_id, write_op.sample_id,
+            trace_logger.log_sequence_output(write_op.trace_sequence_id, write_op.sample_id,
                                            write_op.primer_pool, primer_pair, relative_path)
 
         # Ensure directory exists
@@ -1535,7 +1536,7 @@ def get_quality_seq(seq):
         return [40]*len(seq)
 
 
-def create_write_operation(sample_id, args, seq, match, resolution_type):
+def create_write_operation(sample_id, args, seq, match, resolution_type, trace_sequence_id=None):
     formatted_seq = seq.seq
     quality_scores = get_quality_seq(seq)
 
@@ -1577,7 +1578,8 @@ def create_write_operation(sample_id, args, seq, match, resolution_type):
         primer_pool=primer_pool,
         p1_name=p1_name,
         p2_name=p2_name,
-        resolution_type=resolution_type
+        resolution_type=resolution_type,
+        trace_sequence_id=trace_sequence_id
     )
 
 
@@ -1636,7 +1638,7 @@ def process_sequences(seq_records: List[SeqRecord],
                                                                         args, equivalent_count)
                     
                     # Create and add write operation directly
-                    op = create_write_operation(final_sample_id, args, seq, match, resolution_type)
+                    op = create_write_operation(final_sample_id, args, seq, match, resolution_type, sequence_id)
                     write_ops.append(op)
                     
                     # Count successful matches  
@@ -1651,7 +1653,7 @@ def process_sequences(seq_records: List[SeqRecord],
                 match = CandidateMatch(seq, specimens.b_length())
                 if trace_logger:
                     trace_logger.log_no_match_found(sequence_id, 'primer_search', 'No primer matches found')
-                op = create_write_operation(SampleId.UNKNOWN, args, seq, match, ResolutionType.UNKNOWN)
+                op = create_write_operation(SampleId.UNKNOWN, args, seq, match, ResolutionType.UNKNOWN, sequence_id)
                 write_ops.append(op)
 
     return write_ops, total_count, matched_count
