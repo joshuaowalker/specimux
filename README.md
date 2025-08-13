@@ -166,7 +166,10 @@ output_dir/
       unknown-unknown/             # No primers detected at all
         sample_unknown.fastq
   
-  log.txt                          # Run statistics and classification report
+  trace/                           # Diagnostic trace files (with -d flag)
+    specimux_trace_TIMESTAMP_WORKER.tsv  # Detailed processing events per worker
+  
+  log.txt                          # Complete console output log with run parameters and results
 ```
 
 #### Directory Structure Benefits
@@ -304,16 +307,16 @@ Raw sequence:
 
 ## Diagnostic Features
 
-### Run Log
+### Run Logging
 
-At the end of each run, Specimux creates a log.txt file in the output directory containing:
-- Date and time of the run
-- Command line used
-- Input files (primer, specimen, and sequence files)
-- Run statistics (total sequences, match rate, processing time, etc.)
-- Detailed classification statistics
+Specimux provides comprehensive logging during processing:
+- Real-time progress updates with sequence counts and match rates
+- Pool configuration validation and statistics
+- Final processing summary (total sequences, match rate, processing time)
+- Command line parameters used for the run
+- Error reporting and diagnostic information
 
-This log is generated regardless of whether the -d/--diagnostics flag is used and provides a permanent record of each processing run.
+When using file output (`-F` flag), all console output is automatically duplicated to `log.txt` in the output directory, providing a permanent record of each processing run.
 
 ### Trace Logging System (-d)
 
@@ -465,7 +468,7 @@ ONT01.02-B01     AGCAATCGCGCAC   CTTGGTCATTTAGAGGAAGTAA      ACTCGCGGTGCCA   TCC
 
 ### Converter Tool
 
-The `v04_specimen_converter.py` script automatically:
+The `v05_specimen_converter.py` script automatically:
 
 1. Extracts all unique primer sequences
 2. Generates a `primers.fasta` file with proper pool annotations
@@ -475,7 +478,7 @@ The `v04_specimen_converter.py` script automatically:
 ### Usage
 
 ```bash
-python v04_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --output-primers=primers.fasta --pool-name=ITS
+python v05_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --output-primers=primers.fasta --pool-name=ITS
 ```
 
 ### Arguments
@@ -486,7 +489,7 @@ python v04_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --outpu
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
-- 0.6.0-dev (August 2025): Major refactoring with multiple match processing (replacing "ambiguity" concept), reorganized output with match-type-first directory structure for easier access to primary data, comprehensive trace event system with 3 verbosity levels, trace-based statistics framework (trace_to_stats.py), interactive Sankey flow diagrams (stats_to_sankey.py), enhanced log statistics with hierarchical pool/primer breakdowns, automatic cleanup of empty directories
+- 0.6.0-dev (August 2025): Major refactoring with multiple match processing (replacing "ambiguity" concept), reorganized output with match-type-first directory structure for easier access to primary data, comprehensive trace event system with 3 verbosity levels, trace-based statistics framework (trace_to_stats.py) with hierarchical analysis capabilities, interactive Sankey flow diagrams (stats_to_sankey.py), automatic cleanup of empty directories
 - 0.5 (March 2025): Added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
 - 0.4 (February 2025): Added Bloom filter optimization
 - 0.3 (December 2024): Code cleanup and write pooling improvements

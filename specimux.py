@@ -2145,8 +2145,7 @@ def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespac
     """Initialize worker process with shared resources"""
     global _output_manager, _barcode_prefilter, _trace_logger
     try:
-        l = logging.DEBUG if args.debug else logging.INFO
-        logging.basicConfig(level=l, format='%(asctime)s - %(levelname)s - %(message)s')
+        setup_logging(args.debug, args.output_dir if args.output_to_files else None)
 
         if not args.disable_prefilter:
             barcodes = barcodes_for_bloom_prefilter(specimens)
@@ -2816,12 +2815,35 @@ def setup_match_parameters(args, specimens):
 
     return parameters
 
+def setup_logging(debug: bool, output_dir: str = None):
+    """Set up logging to both console and file if output directory is specified."""
+    level = logging.DEBUG if debug else logging.INFO
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Clear any existing handlers
+    logging.getLogger().handlers.clear()
+    
+    # Set up console logging
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logging.getLogger().addHandler(console_handler)
+    
+    # Set up file logging if output directory specified
+    if output_dir:
+        log_file = os.path.join(output_dir, 'log.txt')
+        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler.setFormatter(formatter)
+        logging.getLogger().addHandler(file_handler)
+        
+    logging.getLogger().setLevel(level)
+
 def main(argv):
     args = parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+    setup_logging(args.debug, args.output_dir if args.output_to_files else None)
+    
+    # Log version and command line used
+    logging.info(f"Starting {version()}")
+    logging.info(f"Command line: {' '.join(argv)}")
 
     if args.output_to_files:
         specimux_mp(args)  # Use multiprocess for file output
