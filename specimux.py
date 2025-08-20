@@ -2479,16 +2479,19 @@ def specimux_mp(args):
 
 def write_primers_fasta(output_dir: str, fwd_primer: PrimerInfo, rev_primer: PrimerInfo):
     """
-    Write a primers.fasta file containing the forward and reverse primers to the specified directory.
+    Write primers.fasta and primers.txt files containing the forward and reverse primers to the specified directory.
+    
+    The primers.fasta file includes full headers with position and pool information.
+    The primers.txt file includes simplified headers with only the primer ID for compatibility with older tools.
 
     Args:
-        output_dir: Directory to write the primers.fasta file to
+        output_dir: Directory to write the primers files to
         fwd_primer: Forward primer info
         rev_primer: Reverse primer info
     """
-    primer_file_path = os.path.join(output_dir, "primers.fasta")
-
-    with open(primer_file_path, 'w') as f:
+    # Write primers.fasta with full headers
+    primer_fasta_path = os.path.join(output_dir, "primers.fasta")
+    with open(primer_fasta_path, 'w') as f:
         # Write forward primer
         f.write(f">{fwd_primer.name} position=forward pool={','.join(fwd_primer.pools)}\n")
         f.write(f"{fwd_primer.primer}\n")
@@ -2496,20 +2499,34 @@ def write_primers_fasta(output_dir: str, fwd_primer: PrimerInfo, rev_primer: Pri
         # Write reverse primer
         f.write(f">{rev_primer.name} position=reverse pool={','.join(rev_primer.pools)}\n")
         f.write(f"{rev_primer.primer}\n")
+    
+    # Write primers.txt with simplified headers
+    primer_txt_path = os.path.join(output_dir, "primers.txt")
+    with open(primer_txt_path, 'w') as f:
+        # Write forward primer with simplified header
+        f.write(f">{fwd_primer.name}\n")
+        f.write(f"{fwd_primer.primer}\n")
+
+        # Write reverse primer with simplified header
+        f.write(f">{rev_primer.name}\n")
+        f.write(f"{rev_primer.primer}\n")
 
 
 def write_all_primers_fasta(output_dir: str, fwd_primers: List[PrimerInfo], rev_primers: List[PrimerInfo]):
     """
-    Write a primers.fasta file containing all forward and reverse primers to the specified directory.
+    Write primers.fasta and primers.txt files containing all forward and reverse primers to the specified directory.
+    
+    The primers.fasta file includes full headers with position and pool information.
+    The primers.txt file includes simplified headers with only the primer ID for compatibility with older tools.
 
     Args:
-        output_dir: Directory to write the primers.fasta file to
+        output_dir: Directory to write the primers files to
         fwd_primers: List of forward primer info objects
         rev_primers: List of reverse primer info objects
     """
-    primer_file_path = os.path.join(output_dir, "primers.fasta")
-
-    with open(primer_file_path, 'w') as f:
+    # Write primers.fasta with full headers
+    primer_fasta_path = os.path.join(output_dir, "primers.fasta")
+    with open(primer_fasta_path, 'w') as f:
         # Write all forward primers
         for fwd_primer in fwd_primers:
             f.write(f">{fwd_primer.name} position=forward pool={','.join(fwd_primer.pools)}\n")
@@ -2518,6 +2535,19 @@ def write_all_primers_fasta(output_dir: str, fwd_primers: List[PrimerInfo], rev_
         # Write all reverse primers
         for rev_primer in rev_primers:
             f.write(f">{rev_primer.name} position=reverse pool={','.join(rev_primer.pools)}\n")
+            f.write(f"{rev_primer.primer}\n")
+    
+    # Write primers.txt with simplified headers
+    primer_txt_path = os.path.join(output_dir, "primers.txt")
+    with open(primer_txt_path, 'w') as f:
+        # Write all forward primers with simplified headers
+        for fwd_primer in fwd_primers:
+            f.write(f">{fwd_primer.name}\n")
+            f.write(f"{fwd_primer.primer}\n")
+
+        # Write all reverse primers with simplified headers
+        for rev_primer in rev_primers:
+            f.write(f">{rev_primer.name}\n")
             f.write(f"{rev_primer.primer}\n")
 
 
