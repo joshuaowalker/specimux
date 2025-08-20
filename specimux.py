@@ -2147,7 +2147,7 @@ def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespac
     """Initialize worker process with shared resources"""
     global _output_manager, _barcode_prefilter, _trace_logger
     try:
-        setup_logging(args.debug, args.output_dir if args.output_to_files else None)
+        setup_logging(args.debug, args.output_dir if args.output_to_files else None, is_worker=True)
 
         if not args.disable_prefilter:
             barcodes = barcodes_for_bloom_prefilter(specimens)
@@ -2817,7 +2817,7 @@ def setup_match_parameters(args, specimens):
 
     return parameters
 
-def setup_logging(debug: bool, output_dir: str = None):
+def setup_logging(debug: bool, output_dir: str = None, is_worker: bool = False):
     """Set up logging to both console and file if output directory is specified."""
     level = logging.DEBUG if debug else logging.INFO
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -2831,7 +2831,9 @@ def setup_logging(debug: bool, output_dir: str = None):
     logging.getLogger().addHandler(console_handler)
     
     # Set up file logging if output directory specified
-    if output_dir:
+    # Only the main process should create the file handler
+    if output_dir and not is_worker:
+        os.makedirs(output_dir, exist_ok=True)  # Ensure directory exists
         log_file = os.path.join(output_dir, 'log.txt')
         file_handler = logging.FileHandler(log_file, mode='w')
         file_handler.setFormatter(formatter)
