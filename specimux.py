@@ -2113,6 +2113,8 @@ def parse_args(argv):
     parser.add_argument("--disable-prefilter", action="store_true", help="Disable barcode prefiltering (bloom filter optimization)")
     parser.add_argument("--disable-preorient", action="store_true", help="Disable heuristic pre-orientation")
     parser.add_argument("-t", "--threads", type=int, default=-1, help="Number of worker threads to use")
+    parser.add_argument("--sample-topq", type=int, default=0, metavar="N",
+                        help="Create subsample directories with top N sequences by average quality score (default: disabled)")
     parser.add_argument("-v", "--version", action="version", version=version())
 
     args = parser.parse_args(argv[1:])
@@ -2473,6 +2475,10 @@ def specimux_mp(args):
     # Clean up empty directories after all processing is complete
     if args.output_to_files:
         cleanup_empty_directories(args.output_dir)
+    
+    # Create subsamples if requested
+    if args.output_to_files and args.sample_topq > 0:
+        subsample_top_quality(args.output_dir, args.sample_topq)
 
     cleanup_locks(args.output_dir)
 
@@ -2610,6 +2616,79 @@ def create_output_files(args, specimens):
                 unknown_primer_dir = f"unknown-{rev_primer.name}"
                 os.makedirs(os.path.join(args.output_dir, "partial", pool, unknown_primer_dir), exist_ok=True)
                 os.makedirs(os.path.join(args.output_dir, "unknown", pool, unknown_primer_dir), exist_ok=True)
+
+def subsample_top_quality(output_dir: str, top_n: int):
+    """
+    Create subsample directories with top N sequences by average quality score.
+    
+    Processes all .fastq files in the full/ subdirectory and creates corresponding
+    files in subsample/ with only the top N sequences sorted by average quality.
+    
+    Args:
+        output_dir: Base output directory containing full/ subdirectory
+        top_n: Number of top-quality sequences to retain in each file
+    """
+    from Bio import SeqIO
+    
+    full_dir = os.path.join(output_dir, "full")
+    if not os.path.exists(full_dir):
+        logging.warning(f"Full directory not found: {full_dir}")
+        return
+    
+    logging.info(f"Creating subsamples with top {top_n} sequences by quality...")
+    
+    # Walk through all directories in full/
+    processed_files = 0
+    failed_files = 0
+    
+    for root, dirs, files in os.walk(full_dir):
+        for fname in files:
+            if fname.endswith(".fastq"):
+                # Create corresponding subsample directory structure
+                rel_path = os.path.relpath(root, full_dir)
+                subsample_dir = os.path.join(output_dir, "subsample", rel_path)
+                os.makedirs(subsample_dir, exist_ok=True)
+                
+                # Copy primer files to subsample directory
+                for primer_file in ["primers.fasta", "primers.txt"]:
+                    src_primer = os.path.join(root, primer_file)
+                    if os.path.exists(src_primer):
+                        import shutil
+                        dst_primer = os.path.join(subsample_dir, primer_file)
+                        shutil.copy2(src_primer, dst_primer)
+                
+                # Process the fastq file
+                input_path = os.path.join(root, fname)
+                output_path = os.path.join(subsample_dir, fname)
+                
+                try:
+                    # Read all sequences and calculate average quality
+                    records = list(SeqIO.parse(input_path, "fastq"))
+                    
+                    if not records:
+                        continue
+                    
+                    # Calculate average quality for each record
+                    def avg_quality(record):
+                        if "phred_quality" in record.letter_annotations:
+                            return sum(record.letter_annotations["phred_quality"]) / len(record)
+                        return 0
+                    
+                    # Sort by average quality (highest first) and take top N
+                    records.sort(key=avg_quality, reverse=True)
+                    top_records = records[:top_n]
+                    
+                    # Write the subsampled sequences
+                    SeqIO.write(top_records, output_path, "fastq")
+                    
+                    processed_files += 1
+                    logging.debug(f"Subsampled {input_path}: {len(records)} → {len(top_records)} sequences")
+                    
+                except Exception as e:
+                    logging.warning(f"Failed to subsample {input_path}: {e}")
+                    failed_files += 1
+    
+    logging.info(f"Subsampling complete: {processed_files} files processed, {failed_files} failed")
 
 def iter_batches(seq_records, batch_size: int, max_seqs: int, all_seqs: bool):
     """Helper to iterate over sequence batches"""

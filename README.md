@@ -288,6 +288,38 @@ Raw sequence:
 - Improves performance through parallel processing
 - Memory usage increases with thread count
 
+### Quality-Based Subsampling
+
+The `--sample-topq N` option creates subsampled datasets containing only the highest-quality sequences:
+
+```bash
+python specimux.py primers.fasta specimens.txt sequences.fastq -F -O output --sample-topq 500
+```
+
+Features:
+- Creates `subsample/` directory mirroring the structure of `full/`
+- Sorts sequences by average Phred quality score
+- Retains only the top N sequences from each file
+- Preserves primer files (primers.fasta and primers.txt) in subsample directories
+- Runs as post-processing step after demultiplexing completes
+
+Use cases:
+- Generate high-confidence datasets for downstream analysis
+- Create smaller representative datasets for testing
+- Focus computational resources on highest-quality reads
+- Compatibility with tools like NGSpeciesID that benefit from quality filtering
+
+Example output structure:
+```
+output/
+├── full/           # Complete demultiplexed sequences
+│   └── ITS/
+│       └── sample_001.fastq (1000 sequences)
+└── subsample/      # Top 500 highest-quality sequences
+    └── ITS/
+        └── sample_001.fastq (500 sequences)
+```
+
 ### Performance Optimizations
 
 #### Bloom Filter Prefiltering (v0.4)
