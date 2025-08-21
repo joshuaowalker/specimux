@@ -542,7 +542,7 @@ class StatsAggregator:
         return links
 
 
-def format_hierarchical_output(stats: Dict[str, Any], indent: str = "  ") -> str:
+def format_hierarchical_output(stats: Dict[str, Any], indent: str = "     ") -> str:
     """Format hierarchical stats as human-readable text."""
     lines = []
     
@@ -553,19 +553,25 @@ def format_hierarchical_output(stats: Dict[str, Any], indent: str = "  ") -> str
     lines.append(f"Total: {stats['total_count']:,}")
     lines.append("")
     
+    # Calculate dynamic width for count field based on total
+    count_width = len(f"{stats['total_count']:,}")
+    
     # Data
-    lines.extend(_format_tree_level(stats["data"], stats["dimensions"], 0, indent))
+    lines.extend(_format_tree_level(stats["data"], stats["dimensions"], 0, indent, stats["total_count"], count_width))
     
     return "\n".join(lines)
 
 
-def _format_tree_level(data: Union[int, Dict], dimensions: List[str], depth: int, indent: str) -> List[str]:
+def _format_tree_level(data: Union[int, Dict], dimensions: List[str], depth: int, indent: str, parent_total: int, count_width: int) -> List[str]:
     """Recursively format tree levels."""
     if isinstance(data, int):
         return [f"{data:,}"]
     
     lines = []
     dimension_name = dimensions[depth] if depth < len(dimensions) else "value"
+    
+    # Calculate total for this level
+    level_total = _calculate_total(data)
     
     # Sort keys for consistent output
     sorted_keys = sorted(data.keys(), key=str)
@@ -575,12 +581,28 @@ def _format_tree_level(data: Union[int, Dict], dimensions: List[str], depth: int
         prefix = indent * depth
         
         if isinstance(value, int):
-            lines.append(f"{prefix}{key}: {value:,}")
+            # Leaf node - show percentage, count, then label with dimension
+            percentage = (value / parent_total * 100) if parent_total > 0 else 0
+            lines.append(f"{prefix}{percentage:5.1f}% {value:{count_width},} {key} ({dimension_name})")
         else:
-            lines.append(f"{prefix}{key}:")
-            lines.extend(_format_tree_level(value, dimensions, depth + 1, indent))
+            # Internal node - show percentage, count, then label with dimension
+            subtotal = _calculate_total(value)
+            percentage = (subtotal / parent_total * 100) if parent_total > 0 else 0
+            lines.append(f"{prefix}{percentage:5.1f}% {subtotal:{count_width},} {key} ({dimension_name})")
+            lines.extend(_format_tree_level(value, dimensions, depth + 1, indent, subtotal, count_width))
     
     return lines
+
+
+def _calculate_total(data: Union[int, Dict]) -> int:
+    """Calculate total count for a tree node."""
+    if isinstance(data, int):
+        return data
+    
+    total = 0
+    for value in data.values():
+        total += _calculate_total(value)
+    return total
 
 
 def main():
