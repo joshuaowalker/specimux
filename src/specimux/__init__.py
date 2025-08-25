@@ -2,14 +2,14 @@
 
 __version__ = "0.6.0-dev"
 
-# Re-export key functions and classes that might be useful for programmatic access
-from .core import (
-    PrimerDatabase,
-    Specimens,
-    MatchParameters,
-    specimux,
-    specimux_mp,
-)
+# Import key classes and functions from the refactored modules
+from .databases import PrimerDatabase, Specimens
+from .models import MatchParameters
+from .orchestration import specimux, specimux_mp
+from .io_utils import read_primers_file, read_specimen_file
+from .orchestration import setup_match_parameters
+from .demultiplex import process_sequences
+from .trace import TraceLogger
 
 __all__ = [
     "PrimerDatabase",
@@ -17,4 +17,9 @@ __all__ = [
     "MatchParameters",
     "specimux",
     "specimux_mp",
+    "read_primers_file",
+    "read_specimen_file",
+    "setup_match_parameters",
+    "process_sequences",
+    "TraceLogger",
 ]
