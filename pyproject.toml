@@ -32,18 +32,21 @@ dependencies = [
     "pybloomfiltermmap3>=0.6.0",
     "cachetools>=5.3.0",
     "tqdm>=4.65.0",
+    "plotly>=5.0.0",  # Included by default for visualization
 ]
 
 [project.optional-dependencies]
-viz = [
-    "plotly>=5.0.0",
-]
+# Note: For minimal install without plotly, users would need to install from source
+# and modify dependencies. Consider making plotly truly optional if size is a concern.
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
 ]
-all = [
-    "specimux[viz,dev]",
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
 ]
 
 [project.scripts]

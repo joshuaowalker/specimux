@@ -25,11 +25,11 @@ fungal biodiversity research. Specimux was designed to work seamlessly with the 
 Install specimux directly from GitHub using pip:
 
 ```bash
-# Install latest version
+# Install latest version (includes visualization support)
 pip install git+https://github.com/joshuaowalker/specimux.git
 
-# Install with visualization support
-pip install "git+https://github.com/joshuaowalker/specimux.git#egg=specimux[viz]"
+# Install with development tools
+pip install "git+https://github.com/joshuaowalker/specimux.git#egg=specimux[dev]"
 ```
 
 After installation, specimux commands are available globally:
@@ -54,8 +54,8 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install in development mode
 pip install -e .
 
-# Install with optional dependencies
-pip install -e ".[viz,dev]"
+# Install with development tools
+pip install -e ".[dev]"
 ```
 
 ### Requirements
