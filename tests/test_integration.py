@@ -14,7 +14,7 @@ def run_integration_test():
     """Run specimux integration test and validate results."""
     
     # Test data paths
-    test_dir = Path("test_data/integration_test_suite")
+    test_dir = Path(__file__).parent / "data" / "integration_test_suite"
     primers_file = test_dir / "primers.fasta"
     specimens_file = test_dir / "specimens.txt"
     sequences_file = test_dir / "sequences.fastq"
@@ -39,7 +39,7 @@ def run_integration_test():
         
         # Run specimux
         cmd = [
-            sys.executable, "specimux.py",
+            sys.executable, "-m", "specimux.cli",
             str(primers_file),
             str(specimens_file), 
             str(sequences_file),
@@ -79,9 +79,6 @@ def main():
     print("=" * 40)
     print()
     
-    if not Path("specimux.py").exists():
-        print("Error: specimux.py not found. Run from specimux repository root.")
-        sys.exit(1)
     
     success = run_integration_test()
     

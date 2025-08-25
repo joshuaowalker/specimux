@@ -3,19 +3,14 @@
 """
 Specimux: Demultiplex MinION sequences by dual barcode indexes and primers.
 
-This program is a substantial revision and enhancement of minibar.py, originally developed by:
-California Academy of Sciences, Institute for Biodiversity Science & Sustainability
-(https://github.com/calacademy-research/minibar)
+Copyright (c) 2024-2025 Josh Walker
 
-Original minibar.py license:
-BSD 2-Clause License
-Copyright (c) 2018, California Academy of Sciences, Institute for Biodiversity Science & Sustainability
-All rights reserved.
+Specimux is inspired by minibar.py (https://github.com/calacademy-research/minibar),
+originally developed by the California Academy of Sciences. While conceptually influenced
+by minibar's approach to demultiplexing, Specimux is an independent implementation with
+substantial algorithmic enhancements, architectural improvements, and additional features.
 
-Specimux extends and modifies the original minibar functionality with algorithmic enhancements
-and code restructuring. While it builds upon the core concepts of minibar,
-Specimux represents a significant departure from the original codebase.
-
+This software is released under the BSD 2-Clause License.
 For full terms of use and distribution, please see the LICENSE file accompanying this program.
 """
 
@@ -2078,66 +2073,7 @@ def color_sequence(seq: str, quality_scores: List[int], p1_location: Tuple[int, 
     return ''.join(colored_seq[start:end])
 
 
-def version():
-    # 0.1 September 14, 2024 - rewritten from minibar.py
-    # 0.2 November 10, 2024 - support for multiple primer pairs
-    # 0.3 December 4, 2024 - code & doc cleanup, write pooling
-    # 0.4 February 1, 2025 - bloom filter acceleration
-    # 0.5 March 19, 2025 - added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
-    # 0.6 August 2025 - multiple match processing, comprehensive trace event system, trace-based statistics framework
-    return "specimux.py version 0.6.0-dev"
-
-def parse_args(argv):
-    parser = argparse.ArgumentParser(description="Specimux: Demultiplex MinION sequences by dual barcode indexes and primers.")
-
-    parser.add_argument("primer_file", help="Fasta file containing primer information")
-    parser.add_argument("specimen_file", help="TSV file containing specimen mapping with barcodes and primers")
-    parser.add_argument("sequence_file", help="Sequence file in Fasta or Fastq format, gzipped or plain text")
-
-    parser.add_argument("--min-length", type=int, default=-1, help="Minimum sequence length.  Shorter sequences will be skipped (default: no filtering)")
-    parser.add_argument("--max-length", type=int, default=-1, help="Maximum sequence length.  Longer sequences will be skipped (default: no filtering)")
-    parser.add_argument("-n", "--num-seqs", type=str, default="-1", help="Number of sequences to read from file (e.g., -n 100 or -n 102,3)")
-    parser.add_argument("-e", "--index-edit-distance", type=int, default=-1, help="Barcode edit distance value, default is half of min distance between barcodes")
-    parser.add_argument("-E", "--primer-edit-distance", type=int, default=-1, help="Primer edit distance value, default is min distance between primers")
-    parser.add_argument("-l", "--search-len", type=int, default=80, help="Length to search for index and primer at start and end of sequence (default: 80)")
-    parser.add_argument("-F", "--output-to-files", action="store_true", help="Create individual sample files for sequences")
-    parser.add_argument("-P", "--output-file-prefix", default="sample_", help="Prefix for individual files when using -F (default: sample_)")
-    parser.add_argument("-O", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
-    parser.add_argument("--color", action="store_true", help="Highlight barcode matches in blue, primer matches in green")
-    parser.add_argument("--trim", choices=[TrimMode.NONE, TrimMode.TAILS, TrimMode.BARCODES, TrimMode.PRIMERS], default=TrimMode.BARCODES, help="trimming to apply")
-    parser.add_argument("--resolve-multiple-matches", choices=[MultipleMatchStrategy.RETAIN, MultipleMatchStrategy.DOWNGRADE_FULL], default=MultipleMatchStrategy.RETAIN, help="Strategy for handling multiple equivalent matches: 'retain' outputs all matches (default), 'downgrade-full' downgrades full matches to partial when multiple exist")
-    parser.add_argument("-d", "--diagnostics", nargs='?', const=1, type=int, choices=[1, 2, 3], 
-                        help="Enable diagnostic trace logging: 1=standard (default), 2=detailed, 3=verbose")
-    parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging")
-
-    parser.add_argument("--disable-prefilter", action="store_true", help="Disable barcode prefiltering (bloom filter optimization)")
-    parser.add_argument("--disable-preorient", action="store_true", help="Disable heuristic pre-orientation")
-    parser.add_argument("-t", "--threads", type=int, default=-1, help="Number of worker threads to use")
-    parser.add_argument("--sample-topq", type=int, default=0, metavar="N",
-                        help="Create subsample directories with top N sequences by average quality score (default: disabled)")
-    parser.add_argument("-v", "--version", action="version", version=version())
-
-    args = parser.parse_args(argv[1:])
-
-    if args.num_seqs:
-        process_num_seqs(args, parser)
-
-    return args
-
-def process_num_seqs(args, parser):
-    if ',' in args.num_seqs:
-        start, num = args.num_seqs.split(',')
-        try:
-            args.start_seq = int(start)
-            args.num_seqs = int(num)
-        except ValueError:
-            parser.error("Invalid format for -n option. Use 'start,num' with integers.")
-    else:
-        try:
-            args.num_seqs = int(args.num_seqs)
-            args.start_seq = 1
-        except ValueError:
-            parser.error("Invalid format for -n option. Use an integer or 'start,num' with integers.")
+# CLI functions moved to cli.py
 
 
 # Global variables for worker processes
@@ -2149,6 +2085,7 @@ def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespac
     """Initialize worker process with shared resources"""
     global _output_manager, _barcode_prefilter, _trace_logger
     try:
+        from .cli import setup_logging
         setup_logging(args.debug, args.output_dir if args.output_to_files else None, is_worker=True)
 
         if not args.disable_prefilter:
@@ -2926,46 +2863,7 @@ def setup_match_parameters(args, specimens):
 
     return parameters
 
-def setup_logging(debug: bool, output_dir: str = None, is_worker: bool = False):
-    """Set up logging to both console and file if output directory is specified."""
-    level = logging.DEBUG if debug else logging.INFO
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    
-    # Clear any existing handlers
-    logging.getLogger().handlers.clear()
-    
-    # Set up console logging
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logging.getLogger().addHandler(console_handler)
-    
-    # Set up file logging if output directory specified
-    # Only the main process should create the file handler
-    if output_dir and not is_worker:
-        os.makedirs(output_dir, exist_ok=True)  # Ensure directory exists
-        log_file = os.path.join(output_dir, 'log.txt')
-        file_handler = logging.FileHandler(log_file, mode='w')
-        file_handler.setFormatter(formatter)
-        logging.getLogger().addHandler(file_handler)
-        
-    logging.getLogger().setLevel(level)
-
-def main(argv):
-    args = parse_args(argv)
-    setup_logging(args.debug, args.output_dir if args.output_to_files else None)
-    
-    # Log version and command line used
-    logging.info(f"Starting {version()}")
-    logging.info(f"Command line: {' '.join(argv)}")
-
-    if args.output_to_files:
-        specimux_mp(args)  # Use multiprocess for file output
-    else:
-        if args.threads > 1:
-            logging.warning(f"Multithreading only supported for file output. Ignoring --threads {args.threads}")
-        specimux(args)     # Use single process for console output
-
-if __name__ == "__main__":
-    main(sys.argv)
+# CLI functions moved to cli.py
+# setup_logging and main are now in cli.py
 
 

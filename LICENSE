@@ -1,8 +1,11 @@
 BSD 2-Clause License
 
-Copyright (c) 2018, California Academy of Sciences, Institute for Biodiversity Science & Sustainability
-Copyright (c) 2024, Josh Walker
+Copyright (c) 2024-2025, Josh Walker
 All rights reserved.
+
+Note: Specimux is inspired by minibar.py, originally developed by the California Academy
+of Sciences (Copyright (c) 2018). While conceptually influenced by minibar, Specimux is
+an independent implementation.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:

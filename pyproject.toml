@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "specimux"
+version = "0.6.0-dev"
+description = "Dual barcode and primer demultiplexing system for MinION sequenced reads"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Josh Walker", email = "joshowalker@yahoo.com"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: BSD License",
+]
+keywords = ["bioinformatics", "demultiplexing", "minion", "nanopore", "sequencing"]
+
+dependencies = [
+    "edlib>=1.1.2",
+    "biopython>=1.81",
+    "pybloomfiltermmap3>=0.6.0",
+    "cachetools>=5.3.0",
+    "tqdm>=4.65.0",
+]
+
+[project.optional-dependencies]
+viz = [
+    "plotly>=5.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+all = [
+    "specimux[viz,dev]",
+]
+
+[project.scripts]
+specimux = "specimux.cli:main"
+specimine = "specimux.cli:specimine_main"
+specimux-convert = "specimux.cli:converter_main"
+specimux-trace = "specimux.cli:trace_main"
+specimux-visualize = "specimux.cli:visualize_main"
+
+[project.urls]
+Homepage = "https://github.com/joshuaowalker/specimux"
+Repository = "https://github.com/joshuaowalker/specimux"
+Issues = "https://github.com/joshuaowalker/specimux/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["specimux*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.txt", "*.fasta", "*.fastq"]

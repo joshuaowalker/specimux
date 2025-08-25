@@ -2,8 +2,10 @@
 
 Dual barcode and primer demultiplexing for MinION sequenced reads
 
-Specimux is a substantial revision and enhancement of minibar.py, originally developed by the
-California Academy of Sciences, Institute for Biodiversity Science & Sustainability.
+Specimux is an independent project inspired by minibar.py (originally developed by the
+California Academy of Sciences). While building upon core demultiplexing concepts from minibar,
+Specimux represents a complete reimplementation with substantial algorithmic enhancements and
+architectural improvements.
 
 Specimux is designed to improve the accuracy and throughput of DNA barcode identification for
 multiplexed MinION sequencing data, with a primary focus on serving the fungal sequencing
@@ -16,15 +18,67 @@ and approximately 765,000 nanopore reads in FastQ format. This real-world datase
 testing ground, ensuring Specimux's capabilities align closely with the needs of contemporary
 fungal biodiversity research. Specimux was designed to work seamlessly with the Primary Data Analysis protocol developed by Stephen Russell [1], serving the needs of community-driven fungal DNA barcoding projects.
 
-## Requirements
+## Installation
 
-**specimux.py** is written in Python and is compatible with Python 3. It requires several Python packages which can be installed using the provided `requirements.txt` file:
+### Option 1: Install from GitHub (Recommended)
 
-```bash 
-pip install -r requirements.txt
+Install specimux directly from GitHub using pip:
+
+```bash
+# Install latest version
+pip install git+https://github.com/joshuaowalker/specimux.git
+
+# Install with visualization support
+pip install "git+https://github.com/joshuaowalker/specimux.git#egg=specimux[viz]"
 ```
 
+After installation, specimux commands are available globally:
+```bash
+specimux --version
+specimux primers.fasta specimens.txt sequences.fastq -F -d
+```
+
+### Option 2: Local Development Installation
+
+For development or testing modifications:
+
+```bash
+# Clone the repository
+git clone https://github.com/joshuaowalker/specimux.git
+cd specimux
+
+# Create virtual environment (Python 3.8+ required)
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install in development mode
+pip install -e .
+
+# Install with optional dependencies
+pip install -e ".[viz,dev]"
+```
+
+### Requirements
+
+Specimux requires Python 3.8+ and automatically installs these dependencies:
+- edlib>=1.1.2 (sequence alignment)
+- biopython>=1.81 (sequence handling)
+- pybloomfiltermmap3>=0.6.0 (performance optimization)
+- cachetools>=5.3.0 (file handle caching)
+- tqdm>=4.65.0 (progress bars)
+- plotly>=5.0.0 (optional, for visualization)
+
 Specimux has been tested on MacOS and Linux machines.
+
+## Available Commands
+
+After installation, specimux provides several command-line tools:
+
+- **`specimux`** - Main demultiplexer for dual barcode and primer matching
+- **`specimine`** - Mine additional sequences from partial barcode matches
+- **`specimux-convert`** - Convert legacy specimen files to current format
+- **`specimux-trace`** - Analyze trace files to generate statistics
+- **`specimux-visualize`** - Create interactive Sankey diagrams from statistics
 
 ## Basic Usage
 
@@ -47,7 +101,7 @@ specimen2   ITS           GTACGTAC   ITS1F       CATGCATG   ITS4
 
 3. Run specimux:
 ```bash
-python specimux.py primers.fasta specimens.txt sequences.fastq -F -d
+specimux primers.fasta specimens.txt sequences.fastq -F -d
 ```
 
 ### Multiple Match Resolution
@@ -56,15 +110,15 @@ When multiple equivalent matches are found, you can control how they're handled:
 
 ```bash
 # Default: Output all equivalent matches to their respective specimen files
-python specimux.py primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches retain
+specimux primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches retain
 
 # Contamination flagging: Downgrade multiple full matches to partial output  
-python specimux.py primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches downgrade-full
+specimux primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches downgrade-full
 ```
 
 For a full list of options:
 ```bash
-python specimux.py -h
+specimux -h
 ```
 
 ## Primer Pool Organization
@@ -293,7 +347,7 @@ Raw sequence:
 The `--sample-topq N` option creates subsampled datasets containing only the highest-quality sequences:
 
 ```bash
-python specimux.py primers.fasta specimens.txt sequences.fastq -F -O output --sample-topq 500
+specimux primers.fasta specimens.txt sequences.fastq -F -O output --sample-topq 500
 ```
 
 Features:
@@ -379,23 +433,23 @@ This system enables detailed analysis of processing efficiency, match patterns, 
 
 The trace system enables comprehensive post-processing analysis through two complementary tools:
 
-#### trace_to_stats.py - Flexible Statistics Engine
+#### specimux-trace - Flexible Statistics Engine
 
 Converts trace events into statistical summaries with any combination of analysis dimensions:
 
 ```bash
 # Hierarchical text analysis
-python trace_to_stats.py trace/ --hierarchical pool primer_pair outcome
-python trace_to_stats.py trace/ --hierarchical orientation match_type --count-by sequences
+specimux-trace trace/ --hierarchical pool primer_pair outcome
+specimux-trace trace/ --hierarchical orientation match_type --count-by sequences
 
 # Export data for visualization  
-python trace_to_stats.py trace/ --sankey-data pool outcome --output flow.json
+specimux-trace trace/ --sankey-data pool outcome --output flow.json
 
 # List all available dimensions
-python trace_to_stats.py trace/ --list-dimensions
+specimux-trace trace/ --list-dimensions
 
 # Classification diagnostics (similar to v0.5 classification system)
-python trace_to_stats.py trace/ --hierarchical pool primer_pair match_type --count-by sequences
+specimux-trace trace/ --hierarchical pool primer_pair match_type --count-by sequences
 ```
 
 To obtain similar diagnostic information as the v0.5 classification system, use the last command above. This provides a biologically meaningful breakdown showing exactly which primers and barcodes were detected for each sequence, organized by pool and primer pair.
@@ -406,16 +460,16 @@ To obtain similar diagnostic information as the v0.5 classification system, use 
 - `candidate_matches`: Count every primer-pair match attempt (detailed pipeline analysis)  
 - `sequences`: Count unique sequences only (overall success rates)
 
-#### stats_to_sankey.py - Interactive Flow Diagrams
+#### specimux-visualize - Interactive Flow Diagrams
 
 Creates interactive Sankey diagrams from trace statistics:
 
 ```bash  
 # Basic flow diagram
-python stats_to_sankey.py flow.json diagram.html
+specimux-visualize flow.json diagram.html
 
 # Custom styling
-python stats_to_sankey.py flow.json diagram.html --theme dark --width 1600 --height 800
+specimux-visualize flow.json diagram.html --theme dark --width 1600 --height 800
 ```
 
 **Features:**
@@ -505,7 +559,7 @@ ONT01.02-B01     AGCAATCGCGCAC   CTTGGTCATTTAGAGGAAGTAA      ACTCGCGGTGCCA   TCC
 
 ### Converter Tool
 
-The `v05_specimen_converter.py` script automatically:
+The `specimux-convert` command automatically:
 
 1. Extracts all unique primer sequences
 2. Generates a `primers.fasta` file with proper pool annotations
@@ -515,7 +569,7 @@ The `v05_specimen_converter.py` script automatically:
 ### Usage
 
 ```bash
-python v05_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --output-primers=primers.fasta --pool-name=ITS
+specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primers.fasta --pool-name=ITS
 ```
 
 ### Arguments
@@ -526,7 +580,7 @@ python v05_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --outpu
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
-- 0.6.0-dev (August 2025): Major refactoring with multiple match processing (replacing "ambiguity" concept), reorganized output with match-type-first directory structure for easier access to primary data, comprehensive trace event system with 3 verbosity levels, trace-based statistics framework (trace_to_stats.py) with hierarchical analysis capabilities, interactive Sankey flow diagrams (stats_to_sankey.py), automatic cleanup of empty directories
+- 0.6.0-dev (August 2025): Modern Python packaging with pip installation support, dedicated CLI commands for all tools, major refactoring with multiple match processing (replacing "ambiguity" concept), reorganized output with match-type-first directory structure for easier access to primary data, comprehensive trace event system with 3 verbosity levels, trace-based statistics framework with hierarchical analysis capabilities, interactive Sankey flow diagrams, automatic cleanup of empty directories
 - 0.5 (March 2025): Added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
 - 0.4 (February 2025): Added Bloom filter optimization
 - 0.3 (December 2024): Code cleanup and write pooling improvements

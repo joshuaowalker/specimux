@@ -1,6 +1,39 @@
+# IDE
 .idea
+.vscode/
+
+# Project documentation
 CLAUDE.md
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Package build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+src/*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Specimux specific
+.specimux_locks/
+*.bloom
+log.txt
