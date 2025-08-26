@@ -8,7 +8,7 @@ version = "0.6.0-dev"
 description = "Dual barcode and primer demultiplexing system for MinION sequenced reads"
 readme = "README.md"
 license = {file = "LICENSE"}
-requires-python = ">=3.8,<3.12"
+requires-python = ">=3.10"
 authors = [
     {name = "Josh Walker", email = "joshowalker@yahoo.com"},
 ]
@@ -17,10 +17,10 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "License :: OSI Approved :: BSD License",
 ]
 keywords = ["bioinformatics", "demultiplexing", "minion", "nanopore", "sequencing"]
@@ -28,7 +28,7 @@ keywords = ["bioinformatics", "demultiplexing", "minion", "nanopore", "sequencin
 dependencies = [
     "edlib>=1.1.2",
     "biopython>=1.81",
-    "pybloomfiltermmap3>=0.6.0",
+    "pybloomfilter3>=0.7.3",
     "cachetools>=5.3.0",
     "tqdm>=4.65.0",
     "plotly>=5.0.0",  # Included by default for visualization

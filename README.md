@@ -47,7 +47,7 @@ For development or testing modifications:
 git clone https://github.com/joshuaowalker/specimux.git
 cd specimux
 
-# Create virtual environment (Python 3.8-3.11 required)
+# Create virtual environment (Python 3.10+ required)
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
@@ -60,17 +60,15 @@ pip install -e ".[dev]"
 
 ### Requirements
 
-**Python Version**: Specimux requires Python 3.8-3.11. Python 3.12+ support is currently limited by the `pybloomfiltermmap3` dependency compatibility.
+**Python Version**: Specimux requires Python 3.10 or newer, with full support for Python 3.10-3.13.
 
 Specimux automatically installs these dependencies:
 - edlib>=1.1.2 (sequence alignment)
 - biopython>=1.81 (sequence handling)
-- pybloomfiltermmap3>=0.6.0 (performance optimization)
+- pybloomfilter3>=0.7.3 (performance optimization)
 - cachetools>=5.3.0 (file handle caching)
 - tqdm>=4.65.0 (progress bars)
-- plotly>=5.0.0 (optional, for visualization)
-
-**Note**: The bloom filter performance optimization (`pybloomfiltermmap3`) currently prevents installation on Python 3.12+. Future versions will address this limitation by making bloom filter support optional or finding alternative implementations.
+- plotly>=5.0.0 (visualization support)
 
 Specimux has been tested on MacOS and Linux machines.
 
