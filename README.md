@@ -77,7 +77,7 @@ After installation, specimux provides several command-line tools:
 - **`specimux`** - Main demultiplexer for dual barcode and primer matching
 - **`specimine`** - Mine additional sequences from partial barcode matches
 - **`specimux-convert`** - Convert legacy specimen files to current format
-- **`specimux-trace`** - Analyze trace files to generate statistics
+- **`specimux-stats`** - Analyze trace files to generate statistics
 - **`specimux-visualize`** - Create interactive Sankey diagrams from statistics
 
 ## Basic Usage
@@ -433,23 +433,23 @@ This system enables detailed analysis of processing efficiency, match patterns, 
 
 The trace system enables comprehensive post-processing analysis through two complementary tools:
 
-#### specimux-trace - Flexible Statistics Engine
+#### specimux-stats - Flexible Statistics Engine
 
 Converts trace events into statistical summaries with any combination of analysis dimensions:
 
 ```bash
 # Hierarchical text analysis
-specimux-trace trace/ --hierarchical pool primer_pair outcome
-specimux-trace trace/ --hierarchical orientation match_type --count-by sequences
+specimux-stats trace/ --hierarchical pool primer_pair outcome
+specimux-stats trace/ --hierarchical orientation match_type --count-by sequences
 
 # Export data for visualization  
-specimux-trace trace/ --sankey-data pool outcome --output flow.json
+specimux-stats trace/ --sankey-data pool outcome --output flow.json
 
 # List all available dimensions
-specimux-trace trace/ --list-dimensions
+specimux-stats trace/ --list-dimensions
 
 # Classification diagnostics (similar to v0.5 classification system)
-specimux-trace trace/ --hierarchical pool primer_pair match_type --count-by sequences
+specimux-stats trace/ --hierarchical pool primer_pair match_type --count-by sequences
 ```
 
 To obtain similar diagnostic information as the v0.5 classification system, use the last command above. This provides a biologically meaningful breakdown showing exactly which primers and barcodes were detected for each sequence, organized by pool and primer pair.

@@ -53,7 +53,7 @@ test = [
 specimux = "specimux.cli:main"
 specimine = "specimux.cli:specimine_main"
 specimux-convert = "specimux.cli:converter_main"
-specimux-trace = "specimux.cli:trace_main"
+specimux-stats = "specimux.cli:trace_main"
 specimux-visualize = "specimux.cli:visualize_main"
 
 [project.urls]

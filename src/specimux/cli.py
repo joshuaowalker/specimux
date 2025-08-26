@@ -129,7 +129,7 @@ def converter_main():
 
 
 def trace_main():
-    """Entry point for specimux-trace command."""
+    """Entry point for specimux-stats command."""
     from . import trace_stats
     trace_stats.main()
 
