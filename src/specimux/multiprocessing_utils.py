@@ -14,6 +14,7 @@ import multiprocessing
 import os
 import sys
 import traceback
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 from .constants import TrimMode

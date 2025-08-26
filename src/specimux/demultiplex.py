@@ -16,7 +16,7 @@ from Bio.Seq import reverse_complement
 from Bio.SeqRecord import SeqRecord
 
 from .constants import (
-    AlignMode, Barcode, Primer, ResolutionType, SampleId, Orientation, TrimMode
+    AlignMode, Barcode, Primer, ResolutionType, SampleId, Orientation, TrimMode, MultipleMatchStrategy
 )
 from .databases import BarcodePrefilter, Specimens
 from .models import (

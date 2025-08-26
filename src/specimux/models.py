@@ -158,10 +158,10 @@ class CandidateMatch:
             return self._p2
 
     def has_both_primers(self) -> bool:
-        return self.p1_match and self.p2_match
+        return self.p1_match is not None and self.p2_match is not None
 
     def has_either_primer(self) -> bool:
-        return self.p1_match or self.p2_match
+        return self.p1_match is not None or self.p2_match is not None
 
     def has_both_barcodes(self) -> bool:
         return self.has_barcode_match(Barcode.B1) and self.has_barcode_match(Barcode.B2)
@@ -254,89 +254,81 @@ class CandidateMatch:
         """Check if reverse barcode matched (convenience method)."""
         return self.has_barcode_match(Barcode.B2)
     
-    def get_p1(self) -> Optional[PrimerInfo]:
+    def get_p1(self) -> PrimerInfo:
         """Get forward primer (convenience method)."""
         return self._p1
     
-    def get_p2(self) -> Optional[PrimerInfo]:
+    def get_p2(self) -> PrimerInfo:
         """Get reverse primer (convenience method)."""
         return self._p2
     
     def get_p1_location(self):
         """Get forward primer location (convenience method)."""
-        return self.p1_span() if self.p1_match else (0, 0)
+        return self.p1_match.location() if self.p1_match else None
     
     def get_p2_location(self):
         """Get reverse primer location (convenience method)."""
-        return self.p2_span() if self.p2_match else (0, 0)
+        return self.p2_match.location() if self.p2_match else None
     
     def get_barcode1_location(self):
         """Get forward barcode location (convenience method)."""
-        return self.b1_span() if self.has_barcode_match(Barcode.B1) else (0, 0)
+        return self._b1_matches[0][1].location() if len(self._b1_matches) > 0 else None
     
     def get_barcode2_location(self):
         """Get reverse barcode location (convenience method)."""
-        return self.b2_span() if self.has_barcode_match(Barcode.B2) else (0, 0)
+        return self._b2_matches[0][1].location() if len(self._b2_matches) > 0 else None
     
     def interprimer_extent(self):
         """Get the extent between primers."""
-        p1_loc = self.p1_span() if self.p1_match else None
-        p2_loc = self.p2_span() if self.p2_match else None
-        if p1_loc and p2_loc:
-            return (p1_loc[1], p2_loc[0])
-        return (0, len(self.sequence))
+        s = 0
+        e = self.sequence_length
+        if self.p1_match:
+            s = self.p1_match.location()[1] + 1
+        if self.p2_match:
+            e = self.p2_match.location()[0]
+        
+        return (s, e)
     
     def interbarcode_extent(self):
         """Get the extent between barcodes."""
-        b1_loc = self.b1_span() if self.has_barcode_match(Barcode.B1) else None
-        b2_loc = self.b2_span() if self.has_barcode_match(Barcode.B2) else None
-        if b1_loc and b2_loc:
-            return (b1_loc[1], b2_loc[0])
-        return (0, len(self.sequence))
+        s = 0
+        e = self.sequence_length
+        if self.p1_match:
+            s = self.p1_match.location()[0]
+        if self.p2_match:
+            e = self.p2_match.location()[1] + 1
+        
+        return (s, e)
     
     def intertail_extent(self):
         """Get the extent between tails (outermost matches)."""
-        # Find outermost matches
-        start = 0
-        end = len(self.sequence)
-        
-        # Check forward side
-        if self.has_barcode_match(Barcode.B1):
-            b1_loc = self.b1_span()
-            if b1_loc:
-                start = max(start, b1_loc[1])
-        elif self.p1_match:
-            p1_loc = self.p1_span()
-            if p1_loc:
-                start = max(start, p1_loc[1])
-        
-        # Check reverse side
-        if self.has_barcode_match(Barcode.B2):
-            b2_loc = self.b2_span()
-            if b2_loc:
-                end = min(end, b2_loc[0])
-        elif self.p2_match:
-            p2_loc = self.p2_span()
-            if p2_loc:
-                end = min(end, p2_loc[0])
-        
-        return (start, end)
+        ps, pe = self.interprimer_extent()
+        s = -1
+        e = -1
+        for b in self._b1_matches:
+            for l in b[1].locations():
+                if s == -1:
+                    s = l[0]
+                else:
+                    s = min(s, l[0])
+        for b in self._b2_matches:
+            for l in b[1].locations():
+                if e == -1:
+                    e = l[1] + 1
+                else:
+                    e = max(e, l[1] + 1)
+        if s == -1: s = max(0, ps - self._barcode_length)
+        if e == -1: e = min(self.sequence_length, pe + self._barcode_length)
+        return (s, e)
     
-    def trim_locations(self, offset):
-        """Adjust all location coordinates by offset."""
+    def trim_locations(self, start):
+        """Adjust all location coordinates by start offset."""
+        for b in self._b1_matches: b[1].adjust_start(-1 * start)
+        for b in self._b2_matches: b[1].adjust_start(-1 * start)
         if self.p1_match:
-            self.p1_match.adjust_start(-offset)
+            self.p1_match.adjust_start(-1 * start)
         if self.p2_match:
-            self.p2_match.adjust_start(-offset)
-        
-        # Adjust barcode locations
-        for i, (bc, match, dist) in enumerate(self._b1_matches):
-            match.adjust_start(-offset)
-            self._b1_matches[i] = (bc, match, dist)
-        
-        for i, (bc, match, dist) in enumerate(self._b2_matches):
-            match.adjust_start(-offset)
-            self._b2_matches[i] = (bc, match, dist)
+            self.p2_match.adjust_start(-1 * start)
 
 
 class MatchParameters:
