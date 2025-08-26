@@ -569,6 +569,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.6.1-dev (August 2025): Fix sequence orientation normalization bug introduced on August 11, 2025. Sequences are now properly normalized to canonical orientation regardless of input orientation, ensuring consistent output for the same biological sequences
 - 0.6.0-dev (August 2025): Modern Python packaging with pip installation support, Python 3.10-3.13 compatibility with maintained bloom filter dependency (pybloomfilter3), dedicated CLI commands for all tools, major code refactoring with modular architecture, multiple match processing (replacing "ambiguity" concept), reorganized output with match-type-first directory structure for easier access to primary data, comprehensive trace event system with 3 verbosity levels, trace-based statistics framework with hierarchical analysis capabilities, interactive Sankey flow diagrams, automatic cleanup of empty directories
 - 0.5.1 (March 2025): Primer Pools implementation with hierarchical output and pool-level full match collections, detailed run logging with log.txt files
 - 0.4 (February 2025): Added Bloom filter optimization for performance improvements

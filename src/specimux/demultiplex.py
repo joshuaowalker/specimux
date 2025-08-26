@@ -127,8 +127,9 @@ def process_sequences(seq_records: List[SeqRecord],
                     final_sample_id, resolution_type = resolve_specimen(match, specimens, trace_logger, sequence_id,
                                                                         args, equivalent_count)
                     
-                    # Create and add write operation directly
-                    op = create_write_operation(final_sample_id, args, seq, match, resolution_type, sequence_id)
+                    # Create and add write operation directly - use the sequence in the matched orientation
+                    # This ensures proper orientation normalization
+                    op = create_write_operation(final_sample_id, args, match.sequence, match, resolution_type, sequence_id)
                     write_ops.append(op)
                     
                     # Count successful matches  
@@ -143,7 +144,7 @@ def process_sequences(seq_records: List[SeqRecord],
                 match = CandidateMatch(seq, specimens.b_length())
                 if trace_logger:
                     trace_logger.log_no_match_found(sequence_id, 'primer_search', 'No primer matches found')
-                op = create_write_operation(SampleId.UNKNOWN, args, seq, match, ResolutionType.UNKNOWN, sequence_id)
+                op = create_write_operation(SampleId.UNKNOWN, args, match.sequence, match, ResolutionType.UNKNOWN, sequence_id)
                 write_ops.append(op)
 
     return write_ops, total_count, matched_count
