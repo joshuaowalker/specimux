@@ -22,9 +22,13 @@ fungal biodiversity research. Specimux was designed to work seamlessly with the 
 
 ### Option 1: Install from GitHub (Recommended)
 
-Install specimux directly from GitHub using pip:
+**Virtual Environment Recommended**: It's strongly recommended to use a virtual environment to avoid dependency conflicts:
 
 ```bash
+# Create and activate virtual environment
+python3 -m venv specimux-env
+source specimux-env/bin/activate  # On Windows: specimux-env\Scripts\activate
+
 # Install latest version (includes visualization support)
 pip install git+https://github.com/joshuaowalker/specimux.git
 
@@ -32,11 +36,13 @@ pip install git+https://github.com/joshuaowalker/specimux.git
 pip install "git+https://github.com/joshuaowalker/specimux.git#egg=specimux[dev]"
 ```
 
-After installation, specimux commands are available globally:
+After installation, specimux commands are available:
 ```bash
 specimux --version
 specimux primers.fasta specimens.txt sequences.fastq -F -d
 ```
+
+**Note**: Remember to activate your virtual environment (`source specimux-env/bin/activate`) each time you want to use specimux.
 
 ### Option 2: Local Development Installation
 
@@ -497,53 +503,34 @@ Highlights sequence components:
 
 ## Processing Flow Visualization
 
-Specimux generates a `stats.json` file containing detailed statistics about sequence processing flow, compatible with Sankey diagram visualization tools. This provides a visual representation of how sequences move through the processing pipeline: primer detection → outcome classification → pool assignment.
+The trace-based statistics system can generate data for Sankey flow diagrams showing how sequences move through the processing pipeline.
 
 ### Visualization Tool
 
-The included `visualize_stats.py` script creates interactive Sankey diagrams from the stats.json file:
+Use the `specimux-visualize` command to create interactive Sankey diagrams:
 
 ```bash
-# Basic usage
-python visualize_stats.py stats.json
+# Generate flow data first
+specimux-stats trace/ --sankey-data pool outcome --output flow.json
 
-# Custom output file
-python visualize_stats.py stats.json my_flow_diagram.html
+# Create visualization
+specimux-visualize flow.json my_flow_diagram.html
 
-# Custom dimensions
-python visualize_stats.py stats.json --width 1600 --height 800
+# Custom styling
+specimux-visualize flow.json diagram.html --theme dark --width 1600 --height 800
 ```
 
 ### Dependencies
 
-The visualization tool requires plotly:
-
-```bash
-pip install plotly
-```
+Visualization support is included by default with plotly>=5.0.0 dependency.
 
 ### Features
 
 - **Interactive Diagrams**: Hover over nodes and flows to see exact counts
-- **Color Coding**: Different colors for primer types, outcomes, and pools
-- **Customizable**: Adjustable dimensions for different display needs
+- **Semantic Coloring**: Automatic colors based on processing pipeline stages
+- **Customizable**: Adjustable dimensions and themes for different display needs
 - **Self-Contained**: Generated HTML files work offline and can be shared easily
-
-### Flow Stages
-
-The diagram shows sequence processing through these stages:
-
-1. **Total Sequences**: Starting point showing all input sequences
-2. **First Primer Detection**: Sequences grouped by detected forward primer
-3. **Primer Pair Formation**: Complete primer pair identification
-4. **Outcome Classification**: Matched, Partial, or Unknown outcomes
-5. **Pool Assignment**: Final assignment to primer pools
-
-This visualization helps identify:
-- Which primers are most/least effective
-- Where sequences are lost in the pipeline
-- Pool assignment patterns and potential issues
-- Overall processing efficiency
+- **Flexible Data**: Works with any combination of trace analysis dimensions
 
 ## Specimen File Converter
 
@@ -582,9 +569,9 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
-- 0.6.0-dev (August 2025): Modern Python packaging with pip installation support, dedicated CLI commands for all tools, major refactoring with multiple match processing (replacing "ambiguity" concept), reorganized output with match-type-first directory structure for easier access to primary data, comprehensive trace event system with 3 verbosity levels, trace-based statistics framework with hierarchical analysis capabilities, interactive Sankey flow diagrams, automatic cleanup of empty directories
-- 0.5 (March 2025): Added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
-- 0.4 (February 2025): Added Bloom filter optimization
+- 0.6.0-dev (August 2025): Modern Python packaging with pip installation support, Python 3.10-3.13 compatibility with maintained bloom filter dependency (pybloomfilter3), dedicated CLI commands for all tools, major code refactoring with modular architecture, multiple match processing (replacing "ambiguity" concept), reorganized output with match-type-first directory structure for easier access to primary data, comprehensive trace event system with 3 verbosity levels, trace-based statistics framework with hierarchical analysis capabilities, interactive Sankey flow diagrams, automatic cleanup of empty directories
+- 0.5.1 (March 2025): Primer Pools implementation with hierarchical output and pool-level full match collections, detailed run logging with log.txt files
+- 0.4 (February 2025): Added Bloom filter optimization for performance improvements
 - 0.3 (December 2024): Code cleanup and write pooling improvements
 - 0.2 (November 2024): Multiple primer pair support
 - 0.1 (September 2024): Initial release
