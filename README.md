@@ -2,8 +2,10 @@
 
 Dual barcode and primer demultiplexing for MinION sequenced reads
 
-Specimux is a substantial revision and enhancement of minibar.py, originally developed by the
-California Academy of Sciences, Institute for Biodiversity Science & Sustainability.
+Specimux is an independent project inspired by minibar.py (originally developed by the
+California Academy of Sciences). While building upon core demultiplexing concepts from minibar,
+Specimux represents a complete reimplementation with substantial algorithmic enhancements and
+architectural improvements.
 
 Specimux is designed to improve the accuracy and throughput of DNA barcode identification for
 multiplexed MinION sequencing data, with a primary focus on serving the fungal sequencing
@@ -16,15 +18,75 @@ and approximately 765,000 nanopore reads in FastQ format. This real-world datase
 testing ground, ensuring Specimux's capabilities align closely with the needs of contemporary
 fungal biodiversity research. Specimux was designed to work seamlessly with the Primary Data Analysis protocol developed by Stephen Russell [1], serving the needs of community-driven fungal DNA barcoding projects.
 
-## Requirements
+## Installation
 
-**specimux.py** is written in Python and is compatible with Python 3. It requires several Python packages which can be installed using the provided `requirements.txt` file:
+### Option 1: Install from GitHub (Recommended)
 
-```bash 
-pip install -r requirements.txt
+**Virtual Environment Recommended**: It's strongly recommended to use a virtual environment to avoid dependency conflicts:
+
+```bash
+# Create and activate virtual environment
+python3 -m venv specimux-env
+source specimux-env/bin/activate  # On Windows: specimux-env\Scripts\activate
+
+# Install latest version (includes visualization support)
+pip install git+https://github.com/joshuaowalker/specimux.git
+
+# Install with development tools
+pip install "git+https://github.com/joshuaowalker/specimux.git#egg=specimux[dev]"
 ```
 
+After installation, specimux commands are available:
+```bash
+specimux --version
+specimux primers.fasta specimens.txt sequences.fastq -F -d
+```
+
+**Note**: Remember to activate your virtual environment (`source specimux-env/bin/activate`) each time you want to use specimux.
+
+### Option 2: Local Development Installation
+
+For development or testing modifications:
+
+```bash
+# Clone the repository
+git clone https://github.com/joshuaowalker/specimux.git
+cd specimux
+
+# Create virtual environment (Python 3.10+ required)
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install in development mode
+pip install -e .
+
+# Install with development tools
+pip install -e ".[dev]"
+```
+
+### Requirements
+
+**Python Version**: Specimux requires Python 3.10 or newer, with full support for Python 3.10-3.13.
+
+Specimux automatically installs these dependencies:
+- edlib>=1.1.2 (sequence alignment)
+- biopython>=1.81 (sequence handling)
+- pybloomfilter3>=0.7.3 (performance optimization)
+- cachetools>=5.3.0 (file handle caching)
+- tqdm>=4.65.0 (progress bars)
+- plotly>=5.0.0 (visualization support)
+
 Specimux has been tested on MacOS and Linux machines.
+
+## Available Commands
+
+After installation, specimux provides several command-line tools:
+
+- **`specimux`** - Main demultiplexer for dual barcode and primer matching
+- **`specimine`** - Mine additional sequences from partial barcode matches
+- **`specimux-convert`** - Convert legacy specimen files to current format
+- **`specimux-stats`** - Analyze trace files to generate statistics
+- **`specimux-visualize`** - Create interactive Sankey diagrams from statistics
 
 ## Basic Usage
 
@@ -47,12 +109,24 @@ specimen2   ITS           GTACGTAC   ITS1F       CATGCATG   ITS4
 
 3. Run specimux:
 ```bash
-python specimux.py primers.fasta specimens.txt sequences.fastq -F -d
+specimux primers.fasta specimens.txt sequences.fastq -F -d
+```
+
+### Multiple Match Resolution
+
+When multiple equivalent matches are found, you can control how they're handled:
+
+```bash
+# Default: Output all equivalent matches to their respective specimen files
+specimux primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches retain
+
+# Contamination flagging: Downgrade multiple full matches to partial output  
+specimux primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches downgrade-full
 ```
 
 For a full list of options:
 ```bash
-python specimux.py -h
+specimux -h
 ```
 
 ## Primer Pool Organization
@@ -114,55 +188,68 @@ specimen2        RPB2        GTACGTAC        *         CATGCATG        *
 
 ### Output Organization
 
-Specimux organizes output by pool and primer pair with a hierarchical structure:
+Specimux organizes output with match quality at the top level, making it easy to access your primary data (full matches) while keeping partial matches and unknowns organized separately:
 
 ```
 output_dir/
-  ITS/
-    full/                          # Contains all full matches from the ITS pool
-      primers.fasta                # Contains all primers in the ITS pool
-      sample_specimen1.fastq
+  full/                            # All complete matches (PRIMARY DATA)
+    ITS/                           # Pool-level aggregation
+      sample_specimen1.fastq       # All ITS full matches collected here
       sample_specimen2.fastq
-    ITS1F-ITS4/
-      full/                        # Full matches for this specific primer pair
-        primers.fasta              # Contains just this primer pair
+      primers.fasta                # All primers in the ITS pool
+      ITS1F-ITS4/                  # Primer-pair specific matches
         sample_specimen1.fastq
-      partial/                     # Partial matches (only one barcode matched)
-        sample_barcode_fwd_ACGTACGT.fastq
-      ambiguous/                   # Ambiguous matches (multiple specimens matched)
-        sample_ambiguous.fastq
-      unknown/                     # Unknown matches (no specimen matched)
-        sample_unknown.fastq
-      primers.fasta                # Contains just this primer pair
-  RPB2/
-    full/                          # Contains all full matches from the RPB2 pool
-      primers.fasta                # Contains all primers in the RPB2 pool
+        sample_specimen2.fastq
+        primers.fasta              # Just this primer pair
+    RPB2/
       sample_specimen3.fastq
-    fRPB2-5F-RPB2-7.1R/
-      full/
-        sample_specimen3.fastq
       primers.fasta
+      fRPB2-5F-RPB2-7.1R/
+        sample_specimen3.fastq
+        primers.fasta
+  
+  partial/                         # One barcode matched (RECOVERY CANDIDATES)
+    ITS/
+      ITS1F-ITS4/
+        sample_barcode_fwd_ACGTACGT.fastq
+      ITS1F-unknown/               # Forward primer only detected
+        sample_barcode_fwd_ACGTACGT.fastq
+      unknown-ITS4/                # Reverse primer only detected
+        sample_barcode_rev_TGCATGCA.fastq
+  
+  # Note: ambiguous/ directory removed in v0.5+
+  # Multiple equivalent matches now output to their respective specimen files
+  
+  unknown/                         # No barcodes matched
+    ITS/
+      ITS1F-ITS4/                  # Primers detected but no barcodes
+        sample_unknown.fastq
     unknown/
-      sample_unknown.fastq
-  unknown/
-    unknown-unknown/
-      sample_unknown.fastq
+      unknown-unknown/             # No primers detected at all
+        sample_unknown.fastq
+  
+  trace/                           # Diagnostic trace files (with -d flag)
+    specimux_trace_TIMESTAMP_WORKER.tsv  # Detailed processing events per worker
+  
+  log.txt                          # Complete console output log with run parameters and results
 ```
 
-Each pool directory contains:
-- A "full" subdirectory that consolidates all full matches from any primer pair in the pool
-  - Contains a comprehensive primers.fasta with all primers in the pool
-  - Full match sequences are written both here and to their specific primer pair directory
+#### Directory Structure Benefits
 
-- Subdirectories for each primer pair combination
-  - Each primer pair directory has its own organization:
-    - "full" subdirectory for complete matches (both barcodes and primers matched)
-    - "partial" subdirectory for sequences which match only one barcode
-    - "ambiguous" subdirectory for sequences which match multiple specimens equally well
-    - "unknown" subdirectory for sequences matching primers but not barcodes
-  - A primers.fasta file is created in each primer pair directory containing the specific primer pair
+The match-type-first organization provides several advantages:
 
-This organization provides both specific access to sequences by primer pair and convenient access to all full matches by pool.
+1. **Primary Data Access**: Full matches are immediately accessible in the `full/` directory without navigating through multiple subdirectories
+2. **Clean Separation**: Partial matches and unknowns are segregated, reducing clutter when accessing your primary demultiplexed data
+3. **Convenient Aggregation**: Pool-level directories (e.g., `full/ITS/`) collect all successful matches for that target region
+4. **Recovery Options**: The `partial/` directory contains sequences that may be recoverable using tools like `specimine.py`
+5. **Automatic Cleanup**: Empty directories are automatically removed after processing to keep the output clean
+
+#### Key Directories
+
+- **full/[pool]/**: Contains ALL full matches for that pool, regardless of primer pair. Sequences appear both here and in their specific primer-pair subdirectory for maximum flexibility
+- **full/[pool]/[primer1-primer2]/**: Contains full matches for this specific primer pair only
+- **partial/[pool]/[primer1-unknown]/**: Contains sequences where only one primer was detected (potential recovery candidates)
+- **unknown/unknown/unknown-unknown/**: Contains sequences where no primers could be identified
 
 ### Pool Management
 
@@ -206,7 +293,7 @@ Specimux uses a "middle-out" strategy to identify primers and barcodes:
    - Full matches (both primers + barcodes) score highest
    - Partial matches scored progressively lower
    - Pool consistency considered in scoring
-   - Ambiguity reported when multiple high-scoring matches exist
+   - Multiple equivalent matches handled with configurable strategies
 
 All sequences are automatically normalized to forward orientation after matching, ensuring consistent output regardless of input orientation.
 
@@ -263,6 +350,38 @@ Raw sequence:
 - Improves performance through parallel processing
 - Memory usage increases with thread count
 
+### Quality-Based Subsampling
+
+The `--sample-topq N` option creates subsampled datasets containing only the highest-quality sequences:
+
+```bash
+specimux primers.fasta specimens.txt sequences.fastq -F -O output --sample-topq 500
+```
+
+Features:
+- Creates `subsample/` directory mirroring the structure of `full/`
+- Sorts sequences by average Phred quality score
+- Retains only the top N sequences from each file
+- Preserves primer files (primers.fasta and primers.txt) in subsample directories
+- Runs as post-processing step after demultiplexing completes
+
+Use cases:
+- Generate high-confidence datasets for downstream analysis
+- Create smaller representative datasets for testing
+- Focus computational resources on highest-quality reads
+- Compatibility with tools like NGSpeciesID that benefit from quality filtering
+
+Example output structure:
+```
+output/
+├── full/           # Complete demultiplexed sequences
+│   └── ITS/
+│       └── sample_001.fastq (1000 sequences)
+└── subsample/      # Top 500 highest-quality sequences
+    └── ITS/
+        └── sample_001.fastq (500 sequences)
+```
+
 ### Performance Optimizations
 
 #### Bloom Filter Prefiltering (v0.4)
@@ -282,39 +401,90 @@ Raw sequence:
 
 ## Diagnostic Features
 
-### Run Log
+### Run Logging
 
-At the end of each run, Specimux creates a log.txt file in the output directory containing:
-- Date and time of the run
-- Command line used
-- Input files (primer, specimen, and sequence files)
-- Run statistics (total sequences, match rate, processing time, etc.)
-- Detailed classification statistics
+Specimux provides comprehensive logging during processing:
+- Real-time progress updates with sequence counts and match rates
+- Pool configuration validation and statistics
+- Final processing summary (total sequences, match rate, processing time)
+- Command line parameters used for the run
+- Error reporting and diagnostic information
 
-This log is generated regardless of whether the -d/--diagnostics flag is used and provides a permanent record of each processing run.
+When using file output (`-F` flag), all console output is automatically duplicated to `log.txt` in the output directory, providing a permanent record of each processing run.
 
-### Classification Statistics (-d)
+### Trace Logging System (-d)
 
-Shows sequence assignment outcomes:
+The diagnostic mode now provides comprehensive trace logging for detailed pipeline analysis:
 
-1. Length Checks
-   - "Sequence Too Short/Long"
+**Verbosity Levels:**
+- `-d` or `-d1`: Standard events (match results, decisions, outputs)
+- `-d2`: Detailed events including successful search attempts  
+- `-d3`: Verbose events including all search attempts (successful and failed)
 
-2. Primer Matching
-   - "No Primer Matches"
-   - "No Forward/Reverse Primer Matches"
+**Trace Files:**
+- Created in `output_dir/trace/` directory
+- One TSV file per worker process: `specimux_trace_TIMESTAMP_WORKER.tsv`
+- Contains timestamped events tracking each sequence through the pipeline
 
-3. Barcode Matching
-   - "No Forward/Reverse Barcode Matches"
-   - "No Barcode Matches (May be truncated)"
+**Key Events Logged:**
+- Sequence received/filtered/output decisions
+- Primer/barcode search attempts and matches
+- Multiple match detection and resolution
+- Specimen identification and pool assignment
+- Match scoring and selection logic
 
-4. Ambiguity Checks
-   - "Multiple Primer/Orientation Full Matches"
-   - "Multiple Matches for Forward/Reverse Barcode"
-   - "No Specimen for Barcodes"
+This system enables detailed analysis of processing efficiency, match patterns, and troubleshooting of specific sequences.
 
-5. Success
-   - "Matched"
+**For complete trace event documentation, see [trace_event_schema.md](trace_event_schema.md).**
+
+### Trace-Based Statistics and Visualization
+
+The trace system enables comprehensive post-processing analysis through two complementary tools:
+
+#### specimux-stats - Flexible Statistics Engine
+
+Converts trace events into statistical summaries with any combination of analysis dimensions:
+
+```bash
+# Hierarchical text analysis
+specimux-stats trace/ --hierarchical pool primer_pair outcome
+specimux-stats trace/ --hierarchical orientation match_type --count-by sequences
+
+# Export data for visualization  
+specimux-stats trace/ --sankey-data pool outcome --output flow.json
+
+# List all available dimensions
+specimux-stats trace/ --list-dimensions
+
+# Classification diagnostics (similar to v0.5 classification system)
+specimux-stats trace/ --hierarchical pool primer_pair match_type --count-by sequences
+```
+
+To obtain similar diagnostic information as the v0.5 classification system, use the last command above. This provides a biologically meaningful breakdown showing exactly which primers and barcodes were detected for each sequence, organized by pool and primer pair.
+
+**Available dimensions:** `orientation`, `pool`, `primer_pair`, `forward_primer`, `reverse_primer`, `forward_barcode`, `reverse_barcode`, `barcode_count`, `match_type`, `outcome`, `selection_strategy`, `discard_reason`, `outcome_detailed`, and more.
+
+**Counting modes:**
+- `candidate_matches`: Count every primer-pair match attempt (detailed pipeline analysis)  
+- `sequences`: Count unique sequences only (overall success rates)
+
+#### specimux-visualize - Interactive Flow Diagrams
+
+Creates interactive Sankey diagrams from trace statistics:
+
+```bash  
+# Basic flow diagram
+specimux-visualize flow.json diagram.html
+
+# Custom styling
+specimux-visualize flow.json diagram.html --theme dark --width 1600 --height 800
+```
+
+**Features:**
+- Semantic coloring based on processing pipeline stages
+- Interactive hover details with flow counts
+- Automatic layout adaptation to data structure
+- Support for arbitrary user-defined pools and dimensions
 
 ### Debug Output (-D)
 
@@ -330,6 +500,37 @@ Highlights sequence components:
 - Barcodes in blue
 - Primers in green
 - Low quality bases (<Q10) in lowercase
+
+## Processing Flow Visualization
+
+The trace-based statistics system can generate data for Sankey flow diagrams showing how sequences move through the processing pipeline.
+
+### Visualization Tool
+
+Use the `specimux-visualize` command to create interactive Sankey diagrams:
+
+```bash
+# Generate flow data first
+specimux-stats trace/ --sankey-data pool outcome --output flow.json
+
+# Create visualization
+specimux-visualize flow.json my_flow_diagram.html
+
+# Custom styling
+specimux-visualize flow.json diagram.html --theme dark --width 1600 --height 800
+```
+
+### Dependencies
+
+Visualization support is included by default with plotly>=5.0.0 dependency.
+
+### Features
+
+- **Interactive Diagrams**: Hover over nodes and flows to see exact counts
+- **Semantic Coloring**: Automatic colors based on processing pipeline stages
+- **Customizable**: Adjustable dimensions and themes for different display needs
+- **Self-Contained**: Generated HTML files work offline and can be shared easily
+- **Flexible Data**: Works with any combination of trace analysis dimensions
 
 ## Specimen File Converter
 
@@ -347,7 +548,7 @@ ONT01.02-B01     AGCAATCGCGCAC   CTTGGTCATTTAGAGGAAGTAA      ACTCGCGGTGCCA   TCC
 
 ### Converter Tool
 
-The `v04_specimen_converter.py` script automatically:
+The `specimux-convert` command automatically:
 
 1. Extracts all unique primer sequences
 2. Generates a `primers.fasta` file with proper pool annotations
@@ -357,7 +558,7 @@ The `v04_specimen_converter.py` script automatically:
 ### Usage
 
 ```bash
-python v04_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --output-primers=primers.fasta --pool-name=ITS
+specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primers.fasta --pool-name=ITS
 ```
 
 ### Arguments
@@ -368,8 +569,10 @@ python v04_specimen_converter.py Index.txt --output-specimen=IndexPP.txt --outpu
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
-- 0.5 (March 2025): Added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
-- 0.4 (February 2025): Added Bloom filter optimization
+- 0.6.1 (August 2025): Fix sequence orientation normalization bug introduced on August 11, 2025. Sequences are now properly normalized to canonical orientation regardless of input orientation, ensuring consistent output for the same biological sequences
+- 0.6.0-dev (August 2025): Modern Python packaging with pip installation support, Python 3.10-3.13 compatibility with maintained bloom filter dependency (pybloomfilter3), dedicated CLI commands for all tools, major code refactoring with modular architecture, multiple match processing (replacing "ambiguity" concept), reorganized output with match-type-first directory structure for easier access to primary data, comprehensive trace event system with 3 verbosity levels, trace-based statistics framework with hierarchical analysis capabilities, interactive Sankey flow diagrams, automatic cleanup of empty directories
+- 0.5.1 (March 2025): Primer Pools implementation with hierarchical output and pool-level full match collections, detailed run logging with log.txt files
+- 0.4 (February 2025): Added Bloom filter optimization for performance improvements
 - 0.3 (December 2024): Code cleanup and write pooling improvements
 - 0.2 (November 2024): Multiple primer pair support
 - 0.1 (September 2024): Initial release

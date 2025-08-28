@@ -3,3 +3,6 @@ biopython>=1.81
 pybloomfiltermmap3>=0.6.0
 cachetools>=5.3.0
 tqdm>=4.65.0
+
+# Optional dependencies
+plotly>=5.0.0  # Required for stats_to_sankey.py visualization tool
