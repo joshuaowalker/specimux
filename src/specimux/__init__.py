@@ -1,7 +1,7 @@
 """Specimux: Demultiplexing tools for MinION sequenced reads."""
 
 # IMPORTANT: When updating version, also update cli.py version() function
-__version__ = "0.6.2"
+__version__ = "0.6.2-dev"
 
 # Import key classes and functions from the refactored modules
 from .databases import PrimerDatabase, Specimens

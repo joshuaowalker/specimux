@@ -15,7 +15,7 @@ def version():
     # 0.4 February 1, 2025 - bloom filter acceleration
     # 0.5 March 19, 2025 - added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
     # 0.6 August 2025 - multiple match processing, comprehensive trace event system, trace-based statistics framework
-    return "specimux version 0.6.2"
+    return "specimux version 0.6.2-dev"
 
 
 def parse_args(argv):
