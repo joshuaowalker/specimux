@@ -293,10 +293,10 @@ def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
         if rev_p1.matched():
             reverse_matches += 1
     for primer in rev_primers:
-        fwd_p2 = align_seq(primer.primer, seq, parameters.max_dist_primers[primer.primer],
-                           len(seq) - parameters.search_len, len(seq))
-        rev_p2 = align_seq(primer.primer, rseq, parameters.max_dist_primers[primer.primer],
-                           len(seq) - parameters.search_len, len(seq))
+        fwd_p2 = align_seq(primer.primer, rseq, parameters.max_dist_primers[primer.primer],
+                           0, parameters.search_len)
+        rev_p2 = align_seq(primer.primer, seq, parameters.max_dist_primers[primer.primer],
+                           0, parameters.search_len)
         if fwd_p2.matched():
             forward_matches += 1
         if rev_p2.matched():
