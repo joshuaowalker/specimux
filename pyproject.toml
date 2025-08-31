@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "specimux"
-version = "0.6.2-dev"
+version = "0.6.3-dev"
 description = "Dual barcode and primer demultiplexing system for MinION sequenced reads"
 readme = "README.md"
 license = {file = "LICENSE"}

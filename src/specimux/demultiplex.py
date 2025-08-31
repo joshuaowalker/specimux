@@ -314,7 +314,7 @@ def determine_orientation(parameters: MatchParameters, seq: str, rseq: str,
 
 def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) -> Optional[str]:
     """
-    Determine the primer pool based on matched primers.
+    Determine the primer pool based on primers used for match.
 
     Args:
         p1: Forward primer info (or None)
@@ -378,7 +378,7 @@ def find_candidate_matches(prefilter: BarcodePrefilter, parameters: MatchParamet
                 # Only add matches where at least one primer was found
                 if match.p1_match or match.p2_match:
                     # Determine and set pool for this match
-                    pool = get_pool_from_primers(match.get_p1(), match.get_p2())
+                    pool = get_pool_from_primers(fwd_primer, rev_primer)
                     match.set_pool(pool)
                     
                     # Log primer match result
@@ -399,7 +399,7 @@ def find_candidate_matches(prefilter: BarcodePrefilter, parameters: MatchParamet
                 # Only add matches where at least one primer was found
                 if match.p1_match or match.p2_match:
                     # Determine and set pool for this match
-                    pool = get_pool_from_primers(match.get_p1(), match.get_p2())
+                    pool = get_pool_from_primers(fwd_primer, rev_primer)
                     match.set_pool(pool)
                     
                     # Log primer match result

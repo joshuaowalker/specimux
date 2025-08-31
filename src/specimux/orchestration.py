@@ -640,8 +640,3 @@ def setup_match_parameters(args, specimens):
 
     return parameters
 
-# CLI functions moved to cli.py
-# setup_logging and main are now in cli.py
-
-
-
