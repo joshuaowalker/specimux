@@ -503,9 +503,13 @@ def cleanup_empty_directories(output_dir: str):
     
     Works bottom-up to remove directories that contain no files,
     only removing directories that were created by specimux.
+    Ignores primer metadata files when determining emptiness.
     """
     if not os.path.exists(output_dir):
         return
+    
+    # Files that don't count as "real" content for emptiness check
+    METADATA_FILES = {'primers.fasta', 'primers.txt'}
     
     # List to track directories removed for logging
     removed_dirs = []
@@ -516,9 +520,20 @@ def cleanup_empty_directories(output_dir: str):
         if dirpath == output_dir:
             continue
             
-        # Check if directory is empty (no files and no remaining subdirectories)
+        # Check if directory has any non-metadata files
+        content_files = [f for f in filenames if f not in METADATA_FILES]
+        
+        # Check if directory is effectively empty (no content files and no subdirectories)
         try:
-            if not filenames and not os.listdir(dirpath):
+            # Get list of subdirectories
+            subdirs = [d for d in os.listdir(dirpath) 
+                      if os.path.isdir(os.path.join(dirpath, d))]
+            
+            if not content_files and not subdirs:
+                # Remove metadata files first, then the directory
+                for f in filenames:
+                    if f in METADATA_FILES:
+                        os.remove(os.path.join(dirpath, f))
                 os.rmdir(dirpath)
                 removed_dirs.append(dirpath)
         except OSError:
@@ -531,12 +546,3 @@ def cleanup_empty_directories(output_dir: str):
             logging.debug(f"  Removed: {dir_path}")
         if len(removed_dirs) > 10:
             logging.debug(f"  ... and {len(removed_dirs) - 10} more")
-
-
-
-
-
-
-
-# Function moved to orchestration.py
-

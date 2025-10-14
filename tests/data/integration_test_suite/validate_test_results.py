@@ -34,11 +34,15 @@ def count_files_in_directory(directory):
     return dict(counts)
 
 def get_sequence_assignments(directory):
-    """Get mapping of sequence IDs to their file paths."""
+    """Get mapping of sequence IDs to their file paths with counts.
+    
+    Returns a dictionary where each sequence ID maps to a dictionary of
+    {file_path: count} showing how many times the sequence appears in each file.
+    """
     if not os.path.exists(directory):
         return {}
     
-    assignments = {}
+    assignments = defaultdict(lambda: defaultdict(int))
     for root, dirs, files in os.walk(directory):
         # Skip trace directory
         if 'trace' in root:
@@ -52,11 +56,11 @@ def get_sequence_assignments(directory):
                 # Parse FASTQ and collect sequence IDs
                 try:
                     for record in SeqIO.parse(file_path, "fastq"):
-                        assignments[record.id] = rel_path
+                        assignments[record.id][rel_path] += 1
                 except Exception as e:
                     print(f"Warning: Could not parse {file_path}: {e}")
     
-    return assignments
+    return dict(assignments)
 
 def compare_output_structure(actual_dir, expected_dir):
     """Compare the structure and file counts between actual and expected output."""
@@ -86,7 +90,11 @@ def compare_output_structure(actual_dir, expected_dir):
     return success
 
 def compare_sequence_assignments(actual_dir, expected_dir):
-    """Compare sequence assignments between actual and expected output."""
+    """Compare sequence assignments between actual and expected output.
+    
+    Handles sequences that appear in multiple locations by comparing the
+    complete set of locations and counts for each sequence.
+    """
     print(f"\nComparing sequence assignments:")
     
     actual_assignments = get_sequence_assignments(actual_dir)
@@ -101,24 +109,55 @@ def compare_sequence_assignments(actual_dir, expected_dir):
     mismatches = []
     
     for seq_id in sorted(all_sequences):
-        actual_file = actual_assignments.get(seq_id, "MISSING")
-        expected_file = expected_assignments.get(seq_id, "MISSING")
+        actual_locations = actual_assignments.get(seq_id, {})
+        expected_locations = expected_assignments.get(seq_id, {})
         
-        if actual_file == expected_file:
+        # Compare the complete set of locations and counts
+        if actual_locations == expected_locations:
             correct_assignments += 1
         else:
-            mismatches.append((seq_id, actual_file, expected_file))
+            mismatches.append((seq_id, actual_locations, expected_locations))
     
     print(f"  Sequence assignments: {correct_assignments}/{total_assignments} correct")
     
     if mismatches:
         print(f"  Mismatched assignments ({len(mismatches)}):")
-        for seq_id, actual, expected in mismatches[:10]:  # Show first 10
+        for seq_id, actual_locs, expected_locs in mismatches[:10]:  # Show first 10
             print(f"    {seq_id}")
-            print(f"      Actual:   {actual}")
-            print(f"      Expected: {expected}")
+            
+            # Format actual locations
+            if not actual_locs:
+                print(f"      Actual:   MISSING")
+            elif len(actual_locs) == 1:
+                file_path, count = list(actual_locs.items())[0]
+                print(f"      Actual:   {file_path}" + (f" (x{count})" if count > 1 else ""))
+            else:
+                print(f"      Actual:   {len(actual_locs)} locations:")
+                for file_path, count in sorted(actual_locs.items()):
+                    print(f"                {file_path}" + (f" (x{count})" if count > 1 else ""))
+            
+            # Format expected locations
+            if not expected_locs:
+                print(f"      Expected: MISSING")
+            elif len(expected_locs) == 1:
+                file_path, count = list(expected_locs.items())[0]
+                print(f"      Expected: {file_path}" + (f" (x{count})" if count > 1 else ""))
+            else:
+                print(f"      Expected: {len(expected_locs)} locations:")
+                for file_path, count in sorted(expected_locs.items()):
+                    print(f"                {file_path}" + (f" (x{count})" if count > 1 else ""))
+                    
         if len(mismatches) > 10:
             print(f"    ... and {len(mismatches) - 10} more")
+    
+    # Report statistics on multiple assignments
+    actual_multiples = sum(1 for locs in actual_assignments.values() if len(locs) > 1)
+    expected_multiples = sum(1 for locs in expected_assignments.values() if len(locs) > 1)
+    
+    if actual_multiples > 0 or expected_multiples > 0:
+        print(f"\n  Sequences with multiple locations:")
+        print(f"    Actual:   {actual_multiples} sequences")
+        print(f"    Expected: {expected_multiples} sequences")
     
     return correct_assignments == total_assignments
 

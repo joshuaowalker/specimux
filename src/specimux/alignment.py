@@ -103,6 +103,3 @@ def color_sequence(seq: str, quality_scores: List[int], p1_location: Tuple[int, 
 
     return ''.join(colored_seq[start:end])
 
-
-# CLI functions moved to cli.py
-

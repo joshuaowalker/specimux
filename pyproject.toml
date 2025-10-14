@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "specimux"
-version = "0.6.2"
+version = "0.6.3"
 description = "Dual barcode and primer demultiplexing system for MinION sequenced reads"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -32,6 +32,7 @@ dependencies = [
     "cachetools>=5.3.0",
     "tqdm>=4.65.0",
     "plotly>=5.0.0",  # Included by default for visualization
+    "watchdog>=3.0.0",  # File system monitoring for specimux-watch
 ]
 
 [project.optional-dependencies]
@@ -54,6 +55,7 @@ specimine = "specimux.cli:specimine_main"
 specimux-convert = "specimux.cli:converter_main"
 specimux-stats = "specimux.cli:trace_main"
 specimux-visualize = "specimux.cli:visualize_main"
+specimux-watch = "specimux.cli:watch_main"
 
 [project.urls]
 Homepage = "https://github.com/joshuaowalker/specimux"

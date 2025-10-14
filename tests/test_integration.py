@@ -248,11 +248,118 @@ class TestCoreModules:
         assert hasattr(MultipleMatchStrategy, 'DOWNGRADE_FULL')
 
 
+class TestSpecimuxWatch:
+    """Integration tests for specimux-watch file monitoring."""
+
+    @pytest.fixture
+    def watch_setup(self):
+        """Fixture providing temporary directories and test files for watch tests."""
+        with tempfile.TemporaryDirectory(prefix="specimux_watch_test_") as temp_dir:
+            temp_path = Path(temp_dir)
+            watch_dir = temp_path / "watch"
+            output_dir = temp_path / "output"
+            watch_dir.mkdir()
+
+            # Get test data paths
+            test_data_dir = Path(__file__).parent / "data" / "integration_test_suite"
+
+            yield {
+                'watch_dir': watch_dir,
+                'output_dir': output_dir,
+                'test_fastq': test_data_dir / "sequences.fastq",
+                'primers': test_data_dir / "primers.fasta",
+                'specimens': test_data_dir / "specimens.txt"
+            }
+
+    @pytest.mark.integration
+    def test_watch_ignores_existing_and_processes_new(self, watch_setup):
+        """Test that specimux-watch ignores pre-existing files and processes new ones."""
+        import time
+
+        # Copy a pre-existing file
+        existing_file = watch_setup['watch_dir'] / "existing.fastq"
+        shutil.copy(watch_setup['test_fastq'], existing_file)
+
+        # Start specimux-watch in background
+        cmd = [
+            sys.executable, "-m", "specimux.watch",
+            str(watch_setup['primers']),
+            str(watch_setup['specimens']),
+            str(watch_setup['watch_dir']),
+            "-F", "-O", str(watch_setup['output_dir']),
+            "--settle-time", "2",
+            "--stop-after", "1"  # Stop after processing 1 file
+        ]
+
+        watch_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        # Give watcher time to start and scan for existing files
+        time.sleep(1)
+
+        # Copy a new file
+        new_file = watch_setup['watch_dir'] / "newfile.fastq"
+        shutil.copy(watch_setup['test_fastq'], new_file)
+
+        # Wait for watch process to complete
+        stdout, stderr = watch_process.communicate(timeout=30)
+        combined_output = stdout + stderr
+
+        # Check that it ignored existing file
+        assert "pre-existing file(s)" in combined_output
+        assert "marking as ignored" in combined_output
+
+        # Check that it processed new file
+        assert "New file detected: newfile.fastq" in combined_output
+        assert "Successfully processed newfile.fastq" in combined_output or \
+               "Processed 1 file(s) total" in combined_output
+
+        # Verify state file exists and has correct structure
+        state_file = watch_setup['watch_dir'] / ".specimux-watch-state.json"
+        assert state_file.exists(), "State file was not created"
+
+        with open(state_file) as f:
+            state = json.load(f)
+
+        # Check that existing file was marked as ignored
+        existing_entries = [
+            entry for path, entry in state['processed_files'].items()
+            if 'existing.fastq' in path
+        ]
+        assert len(existing_entries) == 1
+        assert existing_entries[0]['status'] == 'ignored'
+
+        # Check that new file was processed
+        new_entries = [
+            entry for path, entry in state['processed_files'].items()
+            if 'newfile.fastq' in path
+        ]
+        assert len(new_entries) == 1
+        assert new_entries[0]['status'] in ['success', 'failed']  # Either is ok for this test
+
+    @pytest.mark.integration
+    def test_watch_help(self):
+        """Test that specimux-watch help command works."""
+        result = subprocess.run(
+            [sys.executable, "-m", "specimux.watch", "--help"],
+            capture_output=True,
+            text=True
+        )
+        assert result.returncode == 0
+        assert "Watch directory for new FASTQ files" in result.stdout
+        assert "watch_dir" in result.stdout
+        assert "--settle-time" in result.stdout
+
+
 @pytest.mark.slow
 @pytest.mark.integration
 class TestLargeDataset:
     """Tests with larger datasets (marked as slow)."""
-    
+
     @pytest.fixture(scope="class")
     def large_dataset_path(self):
         """Path to large test dataset (if available)."""
@@ -261,7 +368,7 @@ class TestLargeDataset:
         if not path.exists():
             pytest.skip("Large dataset not available")
         return path
-    
+
     def test_performance_with_large_dataset(self, large_dataset_path):
         """Test performance with large dataset."""
         # This is a placeholder for performance testing
