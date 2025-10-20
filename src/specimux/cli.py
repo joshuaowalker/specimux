@@ -15,7 +15,7 @@ def version():
     # 0.4 February 1, 2025 - bloom filter acceleration
     # 0.5 March 19, 2025 - added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
     # 0.6 August 2025 - multiple match processing, comprehensive trace event system, trace-based statistics framework
-    return "specimux version 0.6.3"
+    return "specimux version 0.6.4"
 
 
 def parse_args(argv):
@@ -33,7 +33,7 @@ def parse_args(argv):
     parser.add_argument("-E", "--primer-edit-distance", type=int, default=-1, help="Primer edit distance value, default is min distance between primers")
     parser.add_argument("-l", "--search-len", type=int, default=80, help="Length to search for index and primer at start and end of sequence (default: 80)")
     parser.add_argument("-F", "--output-to-files", action="store_true", help="Create individual sample files for sequences")
-    parser.add_argument("-P", "--output-file-prefix", default="sample_", help="Prefix for individual files when using -F (default: sample_)")
+    parser.add_argument("-P", "--output-file-prefix", default="", help="Prefix for individual files when using -F (default: no prefix)")
     parser.add_argument("-O", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
     parser.add_argument("--color", action="store_true", help="Highlight barcode matches in blue, primer matches in green")
     parser.add_argument("--trim", choices=[TrimMode.NONE, TrimMode.TAILS, TrimMode.BARCODES, TrimMode.PRIMERS], default=TrimMode.BARCODES, help="trimming to apply")
