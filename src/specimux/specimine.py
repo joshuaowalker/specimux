@@ -52,7 +52,8 @@ def parse_arguments():
 def extract_specimen_id(fastq_path: str) -> str:
     """Extract specimen ID from the FASTQ filename."""
     filename = os.path.basename(fastq_path)
-    match = re.match(r"sample_(.+)\.fastq", filename)
+    # Support both with and without sample_ prefix for backward compatibility
+    match = re.match(r"(?:sample_)?(.+)\.fastq", filename)
     if match:
         return match.group(1)
     else:
@@ -83,20 +84,30 @@ def derive_partial_match_filenames(specimen_dir: str, fwd_barcode: str, rev_barc
     """Derive filenames for partial matches based on barcodes."""
     partial_files = {}
 
-    # Directory structure: path/to/pool/primer-pair/partial/sample_barcode_*.fastq
+    # Directory structure: path/to/pool/primer-pair/partial/barcode_*.fastq
     partial_dir = os.path.join(os.path.dirname(specimen_dir), "partial")
 
     if fwd_barcode:
-        fwd_file = os.path.join(partial_dir, f"sample_barcode_fwd_{fwd_barcode}.fastq")
+        # Try without prefix first (new default), then with prefix (backward compatibility)
+        fwd_file = os.path.join(partial_dir, f"barcode_fwd_{fwd_barcode}.fastq")
+        fwd_file_legacy = os.path.join(partial_dir, f"sample_barcode_fwd_{fwd_barcode}.fastq")
+
         if os.path.exists(fwd_file):
             partial_files["forward"] = fwd_file
+        elif os.path.exists(fwd_file_legacy):
+            partial_files["forward"] = fwd_file_legacy
         else:
             logging.warning(f"Forward partial match file not found: {fwd_file}")
 
     if rev_barcode:
-        rev_file = os.path.join(partial_dir, f"sample_barcode_rev_{rev_barcode}.fastq")
+        # Try without prefix first (new default), then with prefix (backward compatibility)
+        rev_file = os.path.join(partial_dir, f"barcode_rev_{rev_barcode}.fastq")
+        rev_file_legacy = os.path.join(partial_dir, f"sample_barcode_rev_{rev_barcode}.fastq")
+
         if os.path.exists(rev_file):
             partial_files["reverse"] = rev_file
+        elif os.path.exists(rev_file_legacy):
+            partial_files["reverse"] = rev_file_legacy
         else:
             logging.warning(f"Reverse partial match file not found: {rev_file}")
 

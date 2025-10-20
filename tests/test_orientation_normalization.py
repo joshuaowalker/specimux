@@ -102,7 +102,7 @@ class TestOrientationNormalization:
                     rc_pool_dir = rc_full_dir / pool_dir.name
                     if rc_pool_dir.exists():
                         # Check pool-level files
-                        for original_file in pool_dir.glob("sample_*.fastq"):
+                        for original_file in pool_dir.glob("*.fastq"):
                             rc_file = rc_pool_dir / original_file.name
                             if rc_file.exists():
                                 # Compare sequences in these files
@@ -186,9 +186,9 @@ class TestOrientationNormalization:
                 if full_dir.exists():
                     for pool_dir in full_dir.iterdir():
                         if pool_dir.is_dir():
-                            for specimen_file in pool_dir.glob("sample_*.fastq"):
-                                # Extract specimen name from filename
-                                specimen_name = specimen_file.stem.replace("sample_", "")
+                            for specimen_file in pool_dir.glob("*.fastq"):
+                                # Extract specimen name from filename (no prefix to remove)
+                                specimen_name = specimen_file.stem
                                 specimen_set.add(specimen_name)
             
             # Both runs should identify the same specimens (same biological matches)

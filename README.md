@@ -196,28 +196,28 @@ Specimux organizes output with match quality at the top level, making it easy to
 output_dir/
   full/                            # All complete matches (PRIMARY DATA)
     ITS/                           # Pool-level aggregation
-      sample_specimen1.fastq       # All ITS full matches collected here
-      sample_specimen2.fastq
+      specimen1.fastq              # All ITS full matches collected here
+      specimen2.fastq
       primers.fasta                # All primers in the ITS pool
       ITS1F-ITS4/                  # Primer-pair specific matches
-        sample_specimen1.fastq
-        sample_specimen2.fastq
+        specimen1.fastq
+        specimen2.fastq
         primers.fasta              # Just this primer pair
     RPB2/
-      sample_specimen3.fastq
+      specimen3.fastq
       primers.fasta
       fRPB2-5F-RPB2-7.1R/
-        sample_specimen3.fastq
+        specimen3.fastq
         primers.fasta
   
   partial/                         # One barcode matched (RECOVERY CANDIDATES)
     ITS/
       ITS1F-ITS4/
-        sample_barcode_fwd_ACGTACGT.fastq
+        barcode_fwd_ACGTACGT.fastq
       ITS1F-unknown/               # Forward primer only detected
-        sample_barcode_fwd_ACGTACGT.fastq
+        barcode_fwd_ACGTACGT.fastq
       unknown-ITS4/                # Reverse primer only detected
-        sample_barcode_rev_TGCATGCA.fastq
+        barcode_rev_TGCATGCA.fastq
   
   # Note: ambiguous/ directory removed in v0.5+
   # Multiple equivalent matches now output to their respective specimen files
@@ -225,10 +225,10 @@ output_dir/
   unknown/                         # No barcodes matched
     ITS/
       ITS1F-ITS4/                  # Primers detected but no barcodes
-        sample_unknown.fastq
+        unknown.fastq
     unknown/
       unknown-unknown/             # No primers detected at all
-        sample_unknown.fastq
+        unknown.fastq
   
   trace/                           # Diagnostic trace files (with -d flag)
     specimux_trace_TIMESTAMP_WORKER.tsv  # Detailed processing events per worker
@@ -378,10 +378,10 @@ Example output structure:
 output/
 ├── full/           # Complete demultiplexed sequences
 │   └── ITS/
-│       └── sample_001.fastq (1000 sequences)
+│       └── specimen_001.fastq (1000 sequences)
 └── subsample/      # Top 500 highest-quality sequences
     └── ITS/
-        └── sample_001.fastq (500 sequences)
+        └── specimen_001.fastq (500 sequences)
 ```
 
 ### Live Sequencing with specimux-watch
@@ -620,6 +620,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.6.4 (October 2025): Change default output file prefix from "sample_" to empty string for cleaner filenames. All tools (specimux, specimux-watch, specimine) now produce files like "specimen_001.fastq" instead of "sample_specimen_001.fastq". Backward compatible with legacy "sample_" prefixed files. Users can still specify custom prefix with -P flag
 - 0.6.3 (October 2025): Add specimux-watch for live MinKNOW sequencing workflows with automatic file monitoring and processing. Fix duplicate output bug when primers belong to multiple pools. Pool assignment now uses the attempted primer pair context rather than matched primers. Fix empty directory pruning to ignore primer metadata files when determining if a directory should be removed. Update validation script to handle sequences appearing in multiple locations
 - 0.6.2 (August 2025): Fix primer orientation detection bug introduced in commit f0209a3 (January 29, 2025). The determine_orientation function now correctly searches for reverse primers at the beginning of the reverse complement sequence, properly detecting sequence orientation for pre-filtering
 - 0.6.1 (August 2025): Fix sequence orientation normalization bug introduced on August 11, 2025. Sequences are now properly normalized to canonical orientation regardless of input orientation, ensuring consistent output for the same biological sequences

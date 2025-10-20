@@ -335,7 +335,7 @@ def parse_args(argv):
     parser.add_argument("-E", "--primer-edit-distance", type=int, default=-1)
     parser.add_argument("-l", "--search-len", type=int, default=80)
     parser.add_argument("-F", "--output-to-files", action="store_true")
-    parser.add_argument("-P", "--output-file-prefix", default="sample_")
+    parser.add_argument("-P", "--output-file-prefix", default="")
     parser.add_argument("-O", "--output-dir", default=".")
     parser.add_argument("--color", action="store_true")
     parser.add_argument("--trim", type=str, default="barcodes")
@@ -379,7 +379,7 @@ def build_specimux_args(args) -> list:
         specimux_args.extend(['-l', str(args.search_len)])
     if args.output_to_files:
         specimux_args.append('-F')
-    if args.output_file_prefix != "sample_":
+    if args.output_file_prefix != "":
         specimux_args.extend(['-P', args.output_file_prefix])
     if args.output_dir != ".":
         specimux_args.extend(['-O', args.output_dir])
