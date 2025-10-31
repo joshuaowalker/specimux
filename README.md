@@ -620,6 +620,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.6.5 (October 2025): Fix bug in --disable-prefilter flag where code attempted to call .match() on None prefilter object, causing AttributeError. Updated type hints to Optional[BarcodePrefilter] and added None check before prefilter usage
 - 0.6.4 (October 2025): Change default output file prefix from "sample_" to empty string for cleaner filenames. All tools (specimux, specimux-watch, specimine) now produce files like "specimen_001.fastq" instead of "sample_specimen_001.fastq". Backward compatible with legacy "sample_" prefixed files. Users can still specify custom prefix with -P flag
 - 0.6.3 (October 2025): Add specimux-watch for live MinKNOW sequencing workflows with automatic file monitoring and processing. Fix duplicate output bug when primers belong to multiple pools. Pool assignment now uses the attempted primer pair context rather than matched primers. Fix empty directory pruning to ignore primer metadata files when determining if a directory should be removed. Update validation script to handle sequences appearing in multiple locations
 - 0.6.2 (August 2025): Fix primer orientation detection bug introduced in commit f0209a3 (January 29, 2025). The determine_orientation function now correctly searches for reverse primers at the beginning of the reverse complement sequence, properly detecting sequence orientation for pre-filtering
