@@ -238,11 +238,13 @@ def resolve_specimen(match: CandidateMatch, specimens: Specimens,
             resolution_type = ResolutionType.MULTIPLE_SPECIMENS
             # Use pool from first specimen
             pool = specimens.get_specimen_pool(sample_id)
+            match.set_pool(pool)
         elif len(ids) == 1:
             sample_id = ids[0]
             resolution_type = ResolutionType.FULL_MATCH
             # For unique matches, use specimen's pool
             pool = specimens.get_specimen_pool(ids[0])
+            match.set_pool(pool)
         else:
             logging.warning(
                 f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, "
@@ -322,16 +324,21 @@ def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) ->
 
     Returns:
         str: Pool name if one can be determined, None otherwise
+
+    Note:
+        Uses alphabetical sorting for deterministic selection when multiple pools are possible.
+        For full matches, this initial pool assignment may be overridden by the specimen's
+        declared pool in resolve_specimen().
     """
     if p1 and p2:
         # Find common pools between primers
         common_pools = set(p1.pools).intersection(p2.pools)
         if common_pools:
-            return list(common_pools)[0]
+            return sorted(common_pools)[0]  # Deterministic alphabetical selection
     elif p1:
-        return p1.pools[0]
+        return sorted(p1.pools)[0] if p1.pools else None
     elif p2:
-        return p2.pools[0]
+        return sorted(p2.pools)[0] if p2.pools else None
     return None
 
 
