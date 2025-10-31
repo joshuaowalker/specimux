@@ -79,7 +79,7 @@ def process_sequences(seq_records: List[SeqRecord],
                       parameters: MatchParameters,
                       specimens: Specimens,
                       args: argparse.Namespace,
-                      prefilter: BarcodePrefilter,
+                      prefilter: Optional[BarcodePrefilter],
                       trace_logger: Optional[TraceLogger] = None,
                       record_offset: int = 0) -> Tuple[List[WriteOperation], int, int]:
     """Process sequences and track pipeline events.
@@ -335,7 +335,7 @@ def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) ->
     return None
 
 
-def find_candidate_matches(prefilter: BarcodePrefilter, parameters: MatchParameters, seq: SeqRecord,
+def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: MatchParameters, seq: SeqRecord,
                            rseq: SeqRecord, specimens: Specimens,
                            trace_logger: Optional[TraceLogger] = None,
                            sequence_id: Optional[str] = None) -> List[CandidateMatch]:
@@ -415,7 +415,7 @@ def find_candidate_matches(prefilter: BarcodePrefilter, parameters: MatchParamet
     # for cases where multiple primer pairs cover nearly identical sequence regions.
     return matches
 
-def match_one_end(prefilter: BarcodePrefilter, match: CandidateMatch, parameters: MatchParameters, sequence: str,
+def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, parameters: MatchParameters, sequence: str,
                   reversed_sequence: bool, primer_info: PrimerInfo,
                   which_primer: Primer, which_barcode: Barcode,
                   trace_logger: Optional[TraceLogger] = None,
@@ -463,7 +463,7 @@ def match_one_end(prefilter: BarcodePrefilter, match: CandidateMatch, parameters
                     trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(), primer_info.name,
                                                    barcode_search_start, barcode_search_end, False, -1, -1)
                 
-                if not prefilter.match(b_rc, target_seq):
+                if prefilter and not prefilter.match(b_rc, target_seq):
                     continue
 
                 barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
