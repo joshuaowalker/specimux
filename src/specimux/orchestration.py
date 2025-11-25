@@ -424,7 +424,7 @@ def subsample_top_quality(output_dir: str, top_n: int):
                     
                     # Calculate average quality for each record
                     def avg_quality(record):
-                        if "phred_quality" in record.letter_annotations:
+                        if "phred_quality" in record.letter_annotations and len(record) > 0:
                             return sum(record.letter_annotations["phred_quality"]) / len(record)
                         return 0
                     

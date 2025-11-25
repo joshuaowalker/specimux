@@ -620,6 +620,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.6.7 (November 2025): Fix crash when using --trim with --sample-topq on sequences where trimming produces empty result. Very short sequences with overlapping primers now skip output instead of writing empty records that caused division by zero during subsampling
 - 0.6.6 (October 2025): Fix pool assignment bug for sequences matching primers shared across multiple pools. Full matches now correctly use the specimen's declared pool from Index.txt rather than ambiguous primer-based pool selection. Pool selection is now deterministic (alphabetical) for partial matches and edge cases. This fixes incorrect routing where specimens declared in one pool were being output to a different pool when primers belonged to multiple pools
 - 0.6.5 (October 2025): Fix bug in --disable-prefilter flag where code attempted to call .match() on None prefilter object, causing AttributeError. Updated type hints to Optional[BarcodePrefilter] and added None check before prefilter usage
 - 0.6.4 (October 2025): Change default output file prefix from "sample_" to empty string for cleaner filenames. All tools (specimux, specimux-watch, specimine) now produce files like "specimen_001.fastq" instead of "sample_specimen_001.fastq". Backward compatible with legacy "sample_" prefixed files. Users can still specify custom prefix with -P flag

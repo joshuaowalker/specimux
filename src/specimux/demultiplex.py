@@ -41,6 +41,10 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
         (s, e) = match.intertail_extent()
 
     if args.trim != TrimMode.NONE:
+        # Check if trimming would result in empty sequence
+        if s >= e:
+            logging.debug(f"Skipping sequence {seq.id}: trimming would produce empty sequence (trim region {s}:{e})")
+            return None
         formatted_seq = seq.seq[s:e]
         quality_scores = quality_scores[s:e]
         match.trim_locations(s)
@@ -130,7 +134,8 @@ def process_sequences(seq_records: List[SeqRecord],
                     # Create and add write operation directly - use the sequence in the matched orientation
                     # This ensures proper orientation normalization
                     op = create_write_operation(final_sample_id, args, match.sequence, match, resolution_type, sequence_id)
-                    write_ops.append(op)
+                    if op is not None:
+                        write_ops.append(op)
                     
                     # Count successful matches  
                     if resolution_type.is_full_match():
@@ -145,7 +150,8 @@ def process_sequences(seq_records: List[SeqRecord],
                 if trace_logger:
                     trace_logger.log_no_match_found(sequence_id, 'primer_search', 'No primer matches found')
                 op = create_write_operation(SampleId.UNKNOWN, args, match.sequence, match, ResolutionType.UNKNOWN, sequence_id)
-                write_ops.append(op)
+                if op is not None:
+                    write_ops.append(op)
 
     return write_ops, total_count, matched_count
 
