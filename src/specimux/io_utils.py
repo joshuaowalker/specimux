@@ -338,18 +338,38 @@ def read_specimen_file(filename: str, primer_registry: PrimerDatabase) -> Specim
         if missing_cols:
             raise ValueError(f"Missing required columns in specimen file: {missing_cols}")
 
+        empty_barcode_errors = []
         for row_num, row in enumerate(reader, start=1):
             try:
+                b1 = row['FwIndex'].upper()
+                b2 = row['RvIndex'].upper()
+
+                # Check for empty barcodes (single-indexed demultiplexing not supported)
+                if not b1.strip() or not b2.strip():
+                    empty_barcode_errors.append(
+                        f"Row {row_num} ({row['SampleID']}): "
+                        f"{'FwIndex is empty' if not b1.strip() else 'RvIndex is empty'}"
+                    )
+                    continue
+
                 specimens.add_specimen(
                     specimen_id=row['SampleID'],
                     pool=row['PrimerPool'],
-                    b1=row['FwIndex'].upper(),
+                    b1=b1,
                     p1=row['FwPrimer'],
-                    b2=row['RvIndex'].upper(),
+                    b2=b2,
                     p2=row['RvPrimer']
                 )
             except (KeyError, ValueError) as e:
                 raise ValueError(f"Error processing row {row_num}: {e}")
+
+        if empty_barcode_errors:
+            raise ValueError(
+                f"Empty barcodes found in {len(empty_barcode_errors)} specimen(s). "
+                f"Single-indexed demultiplexing is not supported.\n"
+                + "\n".join(empty_barcode_errors[:10])
+                + (f"\n... and {len(empty_barcode_errors) - 10} more" if len(empty_barcode_errors) > 10 else "")
+            )
 
     if len(specimens._specimens) == 0:
         raise ValueError("No valid data found in the specimen file")
