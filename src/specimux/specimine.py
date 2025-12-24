@@ -7,13 +7,13 @@ This tool finds additional candidate sequences from partial barcode matches by c
 them against known good sequences from a specimen's full matches.
 
 Usage:
-    python specimine.py --index INDEX.txt --fastq SPECIMEN.fastq [--partial-forward] [--partial-reverse] [--min-identity 0.85]
+    specimine --index INDEX.txt --fastq SPECIMEN.fastq [--partial-forward] [--no-partial-reverse] [--min-identity 0.85]
 
 Arguments:
     --index: Path to specimen index file (same as used with specimux)
     --fastq: Path to full match FASTQ file for a specimen
     --partial-forward: Include forward partial matches (default: False)
-    --partial-reverse: Include reverse partial matches (default: True)
+    --no-partial-reverse: Exclude reverse partial matches (included by default)
     --min-identity: Minimum alignment identity for a match (default: 0.85)
     --debug: Enable debug logging
 
@@ -27,7 +27,8 @@ import logging
 import os
 import re
 import sys
-from typing import Dict, List, Tuple
+import glob
+from typing import Dict, List, Optional, Tuple
 
 import edlib
 from Bio import SeqIO
@@ -41,8 +42,8 @@ def parse_arguments():
     parser.add_argument("--fastq", required=True, help="Path to full match FASTQ file for a specimen")
     parser.add_argument("--partial-forward", action="store_true", default=False,
                         help="Include forward partial matches (default: False)")
-    parser.add_argument("--partial-reverse", action="store_true", default=True,
-                        help="Include reverse partial matches (default: True)")
+    parser.add_argument("--no-partial-reverse", action="store_true", default=False,
+                        help="Exclude reverse partial matches (included by default)")
     parser.add_argument("--min-identity", type=float, default=0.85,
                         help="Minimum alignment identity for a match (default: 0.85)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -80,38 +81,109 @@ def find_barcodes(specimen_id: str, index_file: str) -> Tuple[str, str]:
     return None, None
 
 
-def derive_partial_match_filenames(specimen_dir: str, fwd_barcode: str, rev_barcode: str) -> Dict[str, str]:
-    """Derive filenames for partial matches based on barcodes."""
-    partial_files = {}
+def detect_input_level(fastq_path: str) -> Tuple[str, str, Optional[str]]:
+    """
+    Detect whether input is at pool level or primer-pair level.
 
-    # Directory structure: path/to/pool/primer-pair/partial/barcode_*.fastq
-    partial_dir = os.path.join(os.path.dirname(specimen_dir), "partial")
+    The specimux output structure is:
+        output_dir/full/{pool}/{specimen}.fastq              (pool level)
+        output_dir/full/{pool}/{primer-pair}/{specimen}.fastq (primer-pair level)
+
+    Returns:
+        Tuple of (output_root, pool_name, primer_pair_name or None)
+    """
+    path = os.path.abspath(fastq_path)
+    parts = path.split(os.sep)
+
+    # Find the 'full' directory index
+    try:
+        full_idx = parts.index('full')
+    except ValueError:
+        raise ValueError(f"Could not find 'full' directory in path: {fastq_path}")
+
+    output_root = os.sep.join(parts[:full_idx])
+    remaining = parts[full_idx + 1:-1]  # Exclude 'full' and filename
+
+    if len(remaining) == 1:
+        # Pool-level: full/{pool}/specimen.fastq
+        return output_root, remaining[0], None
+    elif len(remaining) == 2:
+        # Primer-pair level: full/{pool}/{primer-pair}/specimen.fastq
+        return output_root, remaining[0], remaining[1]
+    else:
+        raise ValueError(f"Unexpected path structure: {fastq_path}")
+
+
+def _find_partial_files(
+    partial_dir: str,
+    fwd_barcode: str,
+    rev_barcode: str,
+    partial_files: Dict[str, List[str]]
+) -> None:
+    """Helper to find partial files in a single directory."""
+    if not os.path.isdir(partial_dir):
+        return
 
     if fwd_barcode:
-        # Try without prefix first (new default), then with prefix (backward compatibility)
-        fwd_file = os.path.join(partial_dir, f"barcode_fwd_{fwd_barcode}.fastq")
-        fwd_file_legacy = os.path.join(partial_dir, f"sample_barcode_fwd_{fwd_barcode}.fastq")
-
-        if os.path.exists(fwd_file):
-            partial_files["forward"] = fwd_file
-        elif os.path.exists(fwd_file_legacy):
-            partial_files["forward"] = fwd_file_legacy
-        else:
-            logging.warning(f"Forward partial match file not found: {fwd_file}")
+        # Try both new and legacy naming patterns
+        patterns = [
+            os.path.join(partial_dir, f"barcode_fwd_{fwd_barcode}.fastq"),
+            os.path.join(partial_dir, f"sample_barcode_fwd_{fwd_barcode}.fastq"),  # legacy
+        ]
+        for pattern in patterns:
+            if os.path.exists(pattern):
+                partial_files["forward"].append(pattern)
+                break  # Use first match per directory
 
     if rev_barcode:
-        # Try without prefix first (new default), then with prefix (backward compatibility)
-        rev_file = os.path.join(partial_dir, f"barcode_rev_{rev_barcode}.fastq")
-        rev_file_legacy = os.path.join(partial_dir, f"sample_barcode_rev_{rev_barcode}.fastq")
+        patterns = [
+            os.path.join(partial_dir, f"barcode_rev_{rev_barcode}.fastq"),
+            os.path.join(partial_dir, f"sample_barcode_rev_{rev_barcode}.fastq"),  # legacy
+        ]
+        for pattern in patterns:
+            if os.path.exists(pattern):
+                partial_files["reverse"].append(pattern)
+                break
 
-        if os.path.exists(rev_file):
-            partial_files["reverse"] = rev_file
-        elif os.path.exists(rev_file_legacy):
-            partial_files["reverse"] = rev_file_legacy
-        else:
-            logging.warning(f"Reverse partial match file not found: {rev_file}")
 
-    return partial_files
+def derive_partial_match_filenames(fastq_path: str, fwd_barcode: str, rev_barcode: str) -> Dict[str, List[str]]:
+    """
+    Derive filenames for partial matches based on barcodes.
+
+    Handles both pool-level and primer-pair level input paths:
+        - Pool-level: searches all primer-pair directories under partial/{pool}/
+        - Primer-pair level: searches only the specific partial/{pool}/{primer-pair}/
+
+    Returns:
+        Dict mapping "forward" or "reverse" to LIST of matching files
+    """
+    partial_files: Dict[str, List[str]] = {"forward": [], "reverse": []}
+
+    output_root, pool, primer_pair = detect_input_level(fastq_path)
+
+    if primer_pair is not None:
+        # Primer-pair level: look in specific directory
+        partial_dir = os.path.join(output_root, "partial", pool, primer_pair)
+        _find_partial_files(partial_dir, fwd_barcode, rev_barcode, partial_files)
+    else:
+        # Pool-level: glob across ALL primer-pair directories
+        partial_pool_dir = os.path.join(output_root, "partial", pool)
+
+        if os.path.isdir(partial_pool_dir):
+            # Find all primer-pair directories
+            primer_pair_dirs = glob.glob(os.path.join(partial_pool_dir, "*"))
+            for pp_dir in primer_pair_dirs:
+                if os.path.isdir(pp_dir):
+                    _find_partial_files(pp_dir, fwd_barcode, rev_barcode, partial_files)
+
+    # Log warnings if no files found
+    if fwd_barcode and not partial_files["forward"]:
+        logging.warning(f"No forward partial match files found for barcode: {fwd_barcode}")
+    if rev_barcode and not partial_files["reverse"]:
+        logging.warning(f"No reverse partial match files found for barcode: {rev_barcode}")
+
+    # Remove empty lists
+    return {k: v for k, v in partial_files.items() if v}
 
 
 def calculate_identity(alignment_result: Dict, query_length: int) -> float:
@@ -122,7 +194,7 @@ def calculate_identity(alignment_result: Dict, query_length: int) -> float:
     return 1 - (d / query_length)
 
 
-def mine_sequences(full_match_file: str, partial_match_files: Dict[str, str], min_identity: float) -> List[SeqRecord]:
+def mine_sequences(full_match_file: str, partial_match_files: Dict[str, List[str]], min_identity: float) -> List[SeqRecord]:
     """Mine sequences from partial matches that align well with full matches."""
     # Load full match sequences
     full_matches = list(SeqIO.parse(full_match_file, "fastq"))
@@ -135,14 +207,19 @@ def mine_sequences(full_match_file: str, partial_match_files: Dict[str, str], mi
     # Initialize list to store mined sequences
     mined_records = []
 
-    # Process each partial match file
-    for partial_type, partial_file in partial_match_files.items():
-        logging.info(f"Processing {partial_type} partial matches from {partial_file}")
+    # Process each partial match type (forward/reverse)
+    for partial_type, partial_file_list in partial_match_files.items():
+        logging.info(f"Processing {partial_type} partial matches from {len(partial_file_list)} file(s)")
 
-        # Count total sequences in partial file for tqdm
-        partial_sequences = list(SeqIO.parse(partial_file, "fastq"))
+        # Aggregate all partial sequences from all files
+        partial_sequences = []
+        for partial_file in partial_file_list:
+            logging.debug(f"  Loading: {partial_file}")
+            sequences = list(SeqIO.parse(partial_file, "fastq"))
+            partial_sequences.extend(sequences)
+
         total_partials = len(partial_sequences)
-        logging.info(f"Found {total_partials} sequences in partial match file")
+        logging.info(f"Found {total_partials} sequences across all {partial_type} partial match files")
 
         match_count = 0
 
@@ -201,12 +278,18 @@ def main():
     logging.info(f"Found barcodes - Forward: {fwd_barcode}, Reverse: {rev_barcode}")
 
     # Determine partial match filenames
-    partial_match_files = derive_partial_match_filenames(os.path.dirname(args.fastq), fwd_barcode, rev_barcode)
+    partial_match_files = derive_partial_match_filenames(args.fastq, fwd_barcode, rev_barcode)
+
+    # Log found files for debugging
+    for ptype, files in partial_match_files.items():
+        logging.info(f"Found {len(files)} {ptype} partial match file(s)")
+        for f in files:
+            logging.debug(f"  - {f}")
 
     # Filter by user preferences
     if not args.partial_forward and "forward" in partial_match_files:
         del partial_match_files["forward"]
-    if not args.partial_reverse and "reverse" in partial_match_files:
+    if args.no_partial_reverse and "reverse" in partial_match_files:
         del partial_match_files["reverse"]
 
     if not partial_match_files:
