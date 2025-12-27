@@ -620,6 +620,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.6.9 (December 2025): Fix specimine path derivation for current output structure. The tool now correctly finds partial match files after the specimux output reorganization. Also fixes --partial-reverse flag (changed to --no-partial-reverse) which was broken due to argparse store_true with default=True
 - 0.6.8 (December 2025): Add validation for empty barcodes in specimen file. Single-indexed demultiplexing (where FwIndex or RvIndex is empty) is not supported and now produces a clear error message listing affected specimens instead of crashing during alignment
 - 0.6.7 (November 2025): Fix crash when using --trim with --sample-topq on sequences where trimming produces empty result. Very short sequences with overlapping primers now skip output instead of writing empty records that caused division by zero during subsampling
 - 0.6.6 (October 2025): Fix pool assignment bug for sequences matching primers shared across multiple pools. Full matches now correctly use the specimen's declared pool from Index.txt rather than ambiguous primer-based pool selection. Pool selection is now deterministic (alphabetical) for partial matches and edge cases. This fixes incorrect routing where specimens declared in one pool were being output to a different pool when primers belonged to multiple pools
