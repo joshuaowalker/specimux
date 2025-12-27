@@ -3,19 +3,13 @@ import sys
 import argparse
 import logging
 import os
-from . import core
+from . import core, __version__
 from .core import TrimMode, MultipleMatchStrategy
 
 
 def version():
     """Return version string."""
-    # 0.1 September 14, 2024 - rewritten from minibar.py
-    # 0.2 November 10, 2024 - support for multiple primer pairs
-    # 0.3 December 4, 2024 - code & doc cleanup, write pooling
-    # 0.4 February 1, 2025 - bloom filter acceleration
-    # 0.5 March 19, 2025 - added Primer Pools, Hierarchical Output with pool-level full match collections, and detailed run log
-    # 0.6 August 2025 - multiple match processing, comprehensive trace event system, trace-based statistics framework
-    return "specimux version 0.6.8"
+    return f"specimux version {__version__}"
 
 
 def parse_args(argv):
