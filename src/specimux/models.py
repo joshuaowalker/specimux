@@ -19,8 +19,8 @@ from .constants import Primer, Barcode, ResolutionType
 
 class PrimerInfo:
     """Information about a primer sequence and its associations."""
-    
-    def __init__(self, name: str, seq: str, direction: Primer, pools: List[str]):
+
+    def __init__(self, name: str, seq: str, direction: Primer, pools: List[str], file_index: int = 0):
         self.name = name
         self.primer = seq.upper()
         self.direction = direction
@@ -28,6 +28,7 @@ class PrimerInfo:
         self.barcodes = set()
         self.specimens = set()
         self.pools = pools
+        self.file_index = file_index  # Order in primers.fasta file (0-indexed)
 
 
 class AlignmentResult:

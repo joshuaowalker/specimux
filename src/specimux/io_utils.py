@@ -276,7 +276,7 @@ def read_primers_file(filename: str) -> PrimerDatabase:
     """
     registry = PrimerDatabase()
 
-    for record in SeqIO.parse(filename, "fasta"):
+    for file_index, record in enumerate(SeqIO.parse(filename, "fasta")):
         name = record.id
         sequence = str(record.seq)
 
@@ -306,7 +306,7 @@ def read_primers_file(filename: str) -> PrimerDatabase:
             raise ValueError(f"Invalid primer position '{position}' for {name}")
 
         # Create PrimerInfo and add to registry
-        primer = PrimerInfo(name, sequence, direction, pool_names)
+        primer = PrimerInfo(name, sequence, direction, pool_names, file_index=file_index)
         registry.add_primer(primer, pool_names)
 
     # Validate pool configurations

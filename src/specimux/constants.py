@@ -49,6 +49,7 @@ class MultipleMatchStrategy:
     """Strategy for handling multiple equivalent matches."""
     RETAIN = "retain"  # Default: output all equivalent matches
     DOWNGRADE_FULL = "downgrade-full"  # Downgrade full matches to partial if multiple exist
+    DEREPLICATE = "dereplicate"  # Group by specimen, select best match per specimen
 
 
 class ResolutionType(Enum):
@@ -59,6 +60,7 @@ class ResolutionType(Enum):
     DOWNGRADED_MULTIPLE = 4  # Full match downgraded due to multiple equivalent matches
     MULTIPLE_SPECIMENS = 5  # Multiple specimen matches (shouldn't happen in new flow)
     UNKNOWN = 6  # No resolution possible
+    DEREPLICATED = 7  # Full match selected via dereplication (best match per specimen)
 
     def to_string(self) -> str:
         """Convert resolution type to lowercase string for trace logging."""
@@ -72,12 +74,14 @@ class ResolutionType(Enum):
             return 'downgraded_multiple_full'
         elif self == ResolutionType.MULTIPLE_SPECIMENS:
             return 'multiple_specimens'
+        elif self == ResolutionType.DEREPLICATED:
+            return 'dereplicated'
         else:
             return 'unknown'
 
     def is_full_match(self) -> bool:
         """Check if this represents a successful full match."""
-        return self == ResolutionType.FULL_MATCH
+        return self in [ResolutionType.FULL_MATCH, ResolutionType.DEREPLICATED]
 
     def is_partial_match(self) -> bool:
         """Check if this represents a partial match."""

@@ -251,12 +251,28 @@ class TraceLogger:
     def log_match_discarded(self, sequence_id: str, match: 'CandidateMatch',
                             score: float, discard_reason: str):
         """Log when a candidate match is discarded."""
-        (candidate_match_id, p1_name, p2_name, b1_name, b2_name, 
+        (candidate_match_id, p1_name, p2_name, b1_name, b2_name,
          _, _, _, _, _, _) = self._extract_match_info(match)
         self._log_event(sequence_id, 'MATCH_DISCARDED', candidate_match_id,
                        p1_name, p2_name, b1_name, b2_name,
                        score, discard_reason)
-    
+
+    def log_dereplicate_expanded(self, sequence_id: str, match_count: int, expanded_count: int):
+        """Log dereplication expansion step."""
+        self._log_event(sequence_id, 'DEREPLICATE_EXPANDED', match_count, expanded_count)
+
+    def log_dereplicate_selected(self, sequence_id: str, specimen_id: str,
+                                 alternatives_count: int,
+                                 scores: tuple):
+        """Log dereplication selection for a specimen.
+
+        Args:
+            scores: Tuple of (barcode_dist, primer_dist, file_idx) for the winning match
+        """
+        barcode_dist, primer_dist, file_idx = scores
+        self._log_event(sequence_id, 'DEREPLICATE_SELECTED', specimen_id,
+                       alternatives_count, barcode_dist, primer_dist, file_idx)
+
     # Detailed events (verbosity level 2+)
     
     def log_primer_search(self, sequence_id: str, primer_name: str, primer_direction: str,
