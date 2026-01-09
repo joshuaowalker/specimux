@@ -243,7 +243,14 @@ class TraceLogger:
         """Log output decision."""
         self._log_event(sequence_id, 'SEQUENCE_OUTPUT', specimen_id,
                        pool, primer_pair, file_path)
-    
+
+    def log_sequence_trim_empty(self, sequence_id: str, trim_mode: str,
+                                 trim_start: int, trim_end: int, seq_length: int,
+                                 p1_name: str, p2_name: str):
+        """Log when trimming would produce an empty sequence."""
+        self._log_event(sequence_id, 'SEQUENCE_TRIM_EMPTY', trim_mode,
+                       trim_start, trim_end, seq_length, p1_name, p2_name)
+
     def log_no_match_found(self, sequence_id: str, stage_failed: str, reason: str):
         """Log when no matches found."""
         self._log_event(sequence_id, 'NO_MATCH_FOUND', stage_failed, reason)
@@ -281,11 +288,30 @@ class TraceLogger:
         Args:
             direction: 'forward' or 'reverse' (which barcode matched)
             barcode: The barcode sequence used for grouping
-            scores: Tuple of (barcode_dist, primer_dist, file_idx) for the winning match
+            scores: Tuple of (barcode_dist, neg_primer_count, primer_dist, file_idx)
         """
-        barcode_dist, primer_dist, file_idx = scores
+        barcode_dist, neg_primer_count, primer_dist, file_idx = scores
+        primer_count = -neg_primer_count  # Convert back to positive
         self._log_event(sequence_id, 'DEREPLICATE_PARTIAL_SELECTED', direction,
-                       barcode, alternatives_count, barcode_dist, primer_dist, file_idx)
+                       barcode, alternatives_count, barcode_dist, primer_count,
+                       primer_dist, file_idx)
+
+    def log_dereplicate_unknown_selected(self, sequence_id: str,
+                                          alternatives_count: int,
+                                          primer_count: int,
+                                          primer_dist: int,
+                                          file_idx: int):
+        """Log unknown match dereplication selection.
+
+        Args:
+            sequence_id: Sequence identifier
+            alternatives_count: Number of alternative matches considered
+            primer_count: Number of primers matched in winning match (0, 1, or 2)
+            primer_dist: Combined primer edit distance
+            file_idx: File order sum
+        """
+        self._log_event(sequence_id, 'DEREPLICATE_UNKNOWN_SELECTED',
+                       alternatives_count, primer_count, primer_dist, file_idx)
 
     # Detailed events (verbosity level 2+)
     
