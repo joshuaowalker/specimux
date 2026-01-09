@@ -132,7 +132,7 @@ timestamp | worker_id | event_seq | sequence_id | MATCH_DISCARDED | candidate_ma
 - `forward_barcode`: String, forward barcode (or "none")
 - `reverse_barcode`: String, reverse barcode (or "none")
 - `score`: Float, the match score
-- `discard_reason`: String, reason for discarding (e.g., "lower_score", "downgraded_multiple_full")
+- `discard_reason`: String, reason for discarding (e.g., "lower_score")
 
 ### SPECIMEN_RESOLVED
 **Purpose**: Log specimen identification result
@@ -140,7 +140,7 @@ timestamp | worker_id | event_seq | sequence_id | MATCH_DISCARDED | candidate_ma
 timestamp | worker_id | event_seq | sequence_id | SPECIMEN_RESOLVED | specimen_id | resolution_type | pool | forward_primer | reverse_primer | forward_barcode | reverse_barcode
 ```
 - `specimen_id`: String, resolved specimen ID (or "UNKNOWN", "FWD_ONLY_XXX", "REV_ONLY_XXX")
-- `resolution_type`: Enum: `full_match`, `partial_forward`, `partial_reverse`, `unknown`
+- `resolution_type`: Enum: `full_match`, `dereplicated_full`, `partial_forward`, `partial_reverse`, `unknown`
 - `pool`: String, pool name (or "unknown")
 - `forward_primer`: String, forward primer used
 - `reverse_primer`: String, reverse primer used
@@ -156,6 +156,60 @@ timestamp | worker_id | event_seq | sequence_id | SEQUENCE_OUTPUT | specimen_id 
 - `pool`: String, pool name
 - `primer_pair`: String, primer pair (format: "FWD-REV")
 - `file_path`: String, relative path where sequence will be written (output type can be derived from path)
+
+### SEQUENCE_TRIM_EMPTY
+**Purpose**: Log when trimming would produce an empty sequence (routed to fallback)
+```
+timestamp | worker_id | event_seq | sequence_id | SEQUENCE_TRIM_EMPTY | trim_mode | trim_start | trim_end | seq_length | forward_primer | reverse_primer
+```
+- `trim_mode`: String, the trim mode being applied (e.g., "barcodes", "primers")
+- `trim_start`: Integer, calculated trim start position
+- `trim_end`: Integer, calculated trim end position
+- `seq_length`: Integer, original sequence length
+- `forward_primer`: String, forward primer name
+- `reverse_primer`: String, reverse primer name
+
+### DEREPLICATE_EXPANDED
+**Purpose**: Log dereplication expansion step (matches expanded to specimen-level)
+```
+timestamp | worker_id | event_seq | sequence_id | DEREPLICATE_EXPANDED | match_count | expanded_count
+```
+- `match_count`: Integer, number of candidate matches before expansion
+- `expanded_count`: Integer, number of (match, specimen) pairs after expansion
+
+### DEREPLICATE_SELECTED
+**Purpose**: Log dereplication selection for a full match specimen
+```
+timestamp | worker_id | event_seq | sequence_id | DEREPLICATE_SELECTED | specimen_id | alternatives_count | barcode_dist | primer_dist | file_idx
+```
+- `specimen_id`: String, the selected specimen ID
+- `alternatives_count`: Integer, number of alternative matches considered
+- `barcode_dist`: Integer, total barcode edit distance of winning match
+- `primer_dist`: Integer, total primer edit distance of winning match
+- `file_idx`: Integer, file order sum (tiebreaker)
+
+### DEREPLICATE_PARTIAL_SELECTED
+**Purpose**: Log dereplication selection for a partial match (single barcode)
+```
+timestamp | worker_id | event_seq | sequence_id | DEREPLICATE_PARTIAL_SELECTED | direction | barcode | alternatives_count | barcode_dist | primer_count | primer_dist | file_idx
+```
+- `direction`: Enum: `forward`, `reverse` (which barcode matched)
+- `barcode`: String, the barcode used for grouping
+- `alternatives_count`: Integer, number of alternative matches considered
+- `barcode_dist`: Integer, barcode edit distance of winning match
+- `primer_count`: Integer, number of primers matched (0, 1, or 2)
+- `primer_dist`: Integer, total primer edit distance of winning match
+- `file_idx`: Integer, file order sum (tiebreaker)
+
+### DEREPLICATE_UNKNOWN_SELECTED
+**Purpose**: Log dereplication selection for an unknown match (no barcodes)
+```
+timestamp | worker_id | event_seq | sequence_id | DEREPLICATE_UNKNOWN_SELECTED | alternatives_count | primer_count | primer_dist | file_idx
+```
+- `alternatives_count`: Integer, number of alternative matches considered
+- `primer_count`: Integer, number of primers matched in winning match (0, 1, or 2)
+- `primer_dist`: Integer, combined primer edit distance
+- `file_idx`: Integer, file order sum (tiebreaker)
 
 ### NO_MATCH_FOUND
 **Purpose**: Log when no viable matches found

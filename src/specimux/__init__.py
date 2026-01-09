@@ -1,6 +1,6 @@
 """Specimux: Demultiplexing tools for MinION sequenced reads."""
 
-__version__ = "0.6.9"
+__version__ = "0.7.0"
 
 # Import key classes and functions from the refactored modules
 from .databases import PrimerDatabase, Specimens

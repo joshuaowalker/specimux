@@ -114,17 +114,21 @@ specimen2   ITS           GTACGTAC   ITS1F       CATGCATG   ITS4
 specimux primers.fasta specimens.txt sequences.fastq -F -d
 ```
 
-### Multiple Match Resolution
+### Dereplication
 
-When multiple equivalent matches are found, you can control how they're handled:
+When the same read matches multiple primer pairs (common with complex primer pools), specimux deduplicates the output by default:
 
 ```bash
-# Default: Output all equivalent matches to their respective specimen files
-specimux primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches retain
+# Default: Select best match per specimen/barcode group (recommended)
+specimux primers.fasta specimens.txt sequences.fastq --dereplicate best
 
-# Contamination flagging: Downgrade multiple full matches to partial output  
-specimux primers.fasta specimens.txt sequences.fastq --resolve-multiple-matches downgrade-full
+# Output all equivalent matches (may cause read amplification)
+specimux primers.fasta specimens.txt sequences.fastq --dereplicate none
 ```
+
+The `best` strategy selects the optimal match per specimen using tiebreakers: barcode distance, primer count, primer distance, and file order. This prevents artificial read amplification that can occur when overlapping primers cause the same read to match through multiple permutations.
+
+Note: If a read legitimately matches multiple different specimens (e.g., through different barcode combinations), it will still appear in each specimen's output file. Dereplication only prevents duplicate output when the same read matches the same specimen through different primer pair routes.
 
 For a full list of options:
 ```bash
@@ -620,6 +624,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.7.0 (January 2026): Add dereplication to prevent artificial read amplification. When complex primer pools cause the same read to match multiple primer permutations, specimux now selects the best match per specimen/barcode group by default. New `--dereplicate` option replaces `--resolve-multiple-matches` with values `best` (default) and `none`. The `downgrade-full` strategy has been removed. Also fixes a bug where ~180 reads per run were silently dropped when trimming would produce empty sequences (now routed to unknown output).
 - 0.6.9 (December 2025): Fix specimine path derivation for current output structure. The tool now correctly finds partial match files after the specimux output reorganization. Also fixes --partial-reverse flag (changed to --no-partial-reverse) which was broken due to argparse store_true with default=True
 - 0.6.8 (December 2025): Add validation for empty barcodes in specimen file. Single-indexed demultiplexing (where FwIndex or RvIndex is empty) is not supported and now produces a clear error message listing affected specimens instead of crashing during alignment
 - 0.6.7 (November 2025): Fix crash when using --trim with --sample-topq on sequences where trimming produces empty result. Very short sequences with overlapping primers now skip output instead of writing empty records that caused division by zero during subsampling

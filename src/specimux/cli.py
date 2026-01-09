@@ -31,7 +31,7 @@ def parse_args(argv):
     parser.add_argument("-O", "--output-dir", default=".", help="Directory for individual files when using -F (default: .)")
     parser.add_argument("--color", action="store_true", help="Highlight barcode matches in blue, primer matches in green")
     parser.add_argument("--trim", choices=[TrimMode.NONE, TrimMode.TAILS, TrimMode.BARCODES, TrimMode.PRIMERS], default=TrimMode.BARCODES, help="trimming to apply")
-    parser.add_argument("--resolve-multiple-matches", choices=[MultipleMatchStrategy.RETAIN, MultipleMatchStrategy.DOWNGRADE_FULL], default=MultipleMatchStrategy.RETAIN, help="Strategy for handling multiple equivalent matches: 'retain' outputs all matches (default), 'downgrade-full' downgrades full matches to partial when multiple exist")
+    parser.add_argument("--dereplicate", choices=[MultipleMatchStrategy.NONE, MultipleMatchStrategy.BEST], default=MultipleMatchStrategy.BEST, help="Dereplication strategy: 'best' selects best match per specimen/barcode group (default), 'none' outputs all matches")
     parser.add_argument("-d", "--diagnostics", nargs='?', const=1, type=int, choices=[1, 2, 3], 
                         help="Enable diagnostic trace logging: 1=standard (default), 2=detailed, 3=verbose")
     parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging")

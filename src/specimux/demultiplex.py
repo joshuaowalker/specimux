@@ -10,7 +10,8 @@ extracted from the original specimux.py monolithic file.
 import argparse
 import logging
 from enum import Enum
-from typing import List, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
 from Bio.Seq import reverse_complement
 from Bio.SeqRecord import SeqRecord
@@ -26,7 +27,8 @@ from .alignment import align_seq, get_quality_seq
 from .trace import TraceLogger
 
 
-def create_write_operation(sample_id, args, seq, match, resolution_type, trace_sequence_id=None):
+def create_write_operation(sample_id, args, seq, match, resolution_type, trace_sequence_id=None,
+                           trace_logger: Optional[TraceLogger] = None):
     formatted_seq = seq.seq
     quality_scores = get_quality_seq(seq)
 
@@ -43,8 +45,32 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
     if args.trim != TrimMode.NONE:
         # Check if trimming would result in empty sequence
         if s >= e:
-            logging.debug(f"Skipping sequence {seq.id}: trimming would produce empty sequence (trim region {s}:{e})")
-            return None
+            logging.debug(f"Sequence {seq.id}: trimming would produce empty sequence (trim region {s}:{e}), routing to fallback")
+            # Log trace event
+            if trace_logger:
+                p1_name = match.get_p1().name if match.get_p1() else "unknown"
+                p2_name = match.get_p2().name if match.get_p2() else "unknown"
+                trace_logger.log_sequence_trim_empty(
+                    trace_sequence_id, args.trim, s, e, len(formatted_seq), p1_name, p2_name)
+            # Return fallback WriteOperation with untrimmed sequence to unknown/unknown/unknown-unknown/
+            quality_seq = "".join(chr(q + 33) for q in quality_scores)
+            return WriteOperation(
+                sample_id=SampleId.UNKNOWN,
+                seq_id=seq.id,
+                distance_code=match.distance_code(),
+                sequence=str(formatted_seq),
+                quality_sequence=quality_seq,
+                quality_scores=quality_scores,
+                p1_location=match.get_p1_location(),
+                p2_location=match.get_p2_location(),
+                b1_location=match.get_barcode1_location(),
+                b2_location=match.get_barcode2_location(),
+                primer_pool="unknown",
+                p1_name="unknown",
+                p2_name="unknown",
+                resolution_type=ResolutionType.UNKNOWN,
+                trace_sequence_id=trace_sequence_id
+            )
         formatted_seq = seq.seq[s:e]
         quality_scores = quality_scores[s:e]
         match.trim_locations(s)
@@ -122,25 +148,54 @@ def process_sequences(seq_records: List[SeqRecord],
             # Handle match selection and processing
             if matches:
                 best_matches = select_best_matches(matches, trace_logger, sequence_id)
-                
-                # Process all equivalent matches and create write operations directly
-                equivalent_count = len(best_matches)
+
+                # Process matches based on strategy
                 has_full_match = False
-                for match in best_matches:
-                    # Determine final sample ID for this match (includes specimen resolution and fallback logic)
-                    final_sample_id, resolution_type = resolve_specimen(match, specimens, trace_logger, sequence_id,
-                                                                        args, equivalent_count)
-                    
-                    # Create and add write operation directly - use the sequence in the matched orientation
-                    # This ensures proper orientation normalization
-                    op = create_write_operation(final_sample_id, args, match.sequence, match, resolution_type, sequence_id)
-                    if op is not None:
-                        write_ops.append(op)
-                    
-                    # Count successful matches  
-                    if resolution_type.is_full_match():
-                        has_full_match = True
-                
+
+                if args.dereplicate == MultipleMatchStrategy.BEST:
+                    # Dereplicate: group by specimen, select best match per specimen
+                    derep_results = dereplicate_matches(best_matches, specimens, trace_logger, sequence_id)
+
+                    for match, specimen_id, b1, b2 in derep_results:
+                        if specimen_id is not None:
+                            # Full match with specific specimen - use directly
+                            resolution_type = ResolutionType.DEREPLICATED_FULL
+                            pool = specimens.get_specimen_pool(specimen_id)
+                            match.set_pool(pool)
+
+                            op = create_write_operation(specimen_id, args, match.sequence, match,
+                                                        resolution_type, sequence_id, trace_logger)
+                            if op is not None:
+                                write_ops.append(op)
+                            has_full_match = True
+                        else:
+                            # Partial/unknown - handle normally via resolve_specimen
+                            final_sample_id, resolution_type = resolve_specimen(
+                                match, specimens, trace_logger, sequence_id)
+                            op = create_write_operation(final_sample_id, args, match.sequence, match,
+                                                        resolution_type, sequence_id, trace_logger)
+                            if op is not None:
+                                write_ops.append(op)
+                            if resolution_type.is_full_match():
+                                has_full_match = True
+                else:
+                    # No dereplication: process all equivalent matches
+                    for match in best_matches:
+                        # Determine final sample ID for this match (includes specimen resolution and fallback logic)
+                        final_sample_id, resolution_type = resolve_specimen(
+                            match, specimens, trace_logger, sequence_id)
+
+                        # Create and add write operation directly - use the sequence in the matched orientation
+                        # This ensures proper orientation normalization
+                        op = create_write_operation(final_sample_id, args, match.sequence, match, resolution_type,
+                                                     sequence_id, trace_logger)
+                        if op is not None:
+                            write_ops.append(op)
+
+                        # Count successful matches
+                        if resolution_type.is_full_match():
+                            has_full_match = True
+
                 # Only count sequences with at least one full match as successful
                 if has_full_match:
                     matched_count += 1
@@ -149,7 +204,8 @@ def process_sequences(seq_records: List[SeqRecord],
                 match = CandidateMatch(seq, specimens.b_length())
                 if trace_logger:
                     trace_logger.log_no_match_found(sequence_id, 'primer_search', 'No primer matches found')
-                op = create_write_operation(SampleId.UNKNOWN, args, match.sequence, match, ResolutionType.UNKNOWN, sequence_id)
+                op = create_write_operation(SampleId.UNKNOWN, args, match.sequence, match, ResolutionType.UNKNOWN,
+                                            sequence_id, trace_logger)
                 if op is not None:
                     write_ops.append(op)
 
@@ -199,16 +255,292 @@ def select_best_matches(matches: List[CandidateMatch],
                 trace_logger.log_match_discarded(sequence_id, m, float(score), 'lower_score')
     
     # Note: Multiple matches are handled downstream in match_sample and logged via MATCH_SELECTED/MATCH_DISCARDED events
-    
+
     return equivalent_matches
 
+
+def dereplicate_matches(matches: List[CandidateMatch],
+                        specimens: Specimens,
+                        trace_logger: Optional[TraceLogger] = None,
+                        sequence_id: Optional[str] = None) -> List[Tuple[CandidateMatch, str, str, str]]:
+    """Dereplicate matches by grouping equivalent matches by specimen ID.
+
+    For each unique specimen that could be matched, select the best match using:
+    1. Total barcode edit distance (b1_distance + b2_distance) - lower wins
+    2. Total primer edit distance (p1_distance + p2_distance) - lower wins
+    3. File order of primers (p1.file_index + p2.file_index) - lower wins
+
+    Args:
+        matches: List of equivalent CandidateMatches (all with same score)
+        specimens: Specimens database for lookups
+        trace_logger: Optional trace logger
+        sequence_id: Sequence ID for tracing
+
+    Returns:
+        List of (CandidateMatch, specimen_id, b1, b2) tuples - one per unique specimen.
+        For partial matches (no specimen found), returns (match, None, None, None).
+    """
+    # Step 1: Expand matches to all possible (match, specimen_id, b1, b2, b1_dist, b2_dist) combinations
+    expanded: List[Tuple[CandidateMatch, Optional[str], Optional[str], Optional[str], float, float]] = []
+
+    for match in matches:
+        if not match.has_full_match():
+            # For partial matches, keep as-is (handled downstream)
+            expanded.append((match, None, None, None, 999.0, 999.0))
+            continue
+
+        p1 = match.get_p1()
+        p2 = match.get_p2()
+
+        # Get all equally-good barcodes
+        b1_candidates = match.best_b1()  # List of barcodes within tolerance
+        b2_candidates = match.best_b2()
+
+        # Get the distance dictionaries for specific barcode lookups
+        b1_distances = match.get_barcode_distances(Barcode.B1)
+        b2_distances = match.get_barcode_distances(Barcode.B2)
+
+        # For each barcode combination, find the specimen
+        found_any = False
+        for b1 in b1_candidates:
+            for b2 in b2_candidates:
+                specimen_id = specimens.specimen_for_exact_match(b1, b2, p1, p2)
+                if specimen_id:
+                    b1_dist = b1_distances.get(b1, 999.0)
+                    b2_dist = b2_distances.get(b2, 999.0)
+                    expanded.append((match, specimen_id, b1, b2, b1_dist, b2_dist))
+                    found_any = True
+
+        # If no specimen found for any barcode combo, treat as partial
+        if not found_any:
+            expanded.append((match, None, None, None, 999.0, 999.0))
+
+    # Log expansion
+    if trace_logger:
+        trace_logger.log_dereplicate_expanded(sequence_id, len(matches), len(expanded))
+
+    # Step 2: Group by specimen_id
+    specimen_groups: Dict[Optional[str], List[Tuple[CandidateMatch, Optional[str], Optional[str], Optional[str], float, float]]] = defaultdict(list)
+    for entry in expanded:
+        specimen_id = entry[1]
+        specimen_groups[specimen_id].append(entry)
+
+    # Step 3: For each specimen group, select the best match
+    results: List[Tuple[CandidateMatch, str, str, str]] = []
+
+    for specimen_id, group in specimen_groups.items():
+        if specimen_id is None:
+            # Separate matches by barcode status
+            def has_single_barcode(m: CandidateMatch) -> bool:
+                has_b1 = m.has_b1_match()
+                has_b2 = m.has_b2_match()
+                return (has_b1 and not has_b2) or (has_b2 and not has_b1)
+
+            def has_no_barcodes(m: CandidateMatch) -> bool:
+                return not m.has_b1_match() and not m.has_b2_match()
+
+            single_barcode_matches = [entry[0] for entry in group if has_single_barcode(entry[0])]
+            no_barcode_matches = [entry[0] for entry in group if has_no_barcodes(entry[0])]
+            other_matches = [entry[0] for entry in group
+                             if not has_single_barcode(entry[0]) and not has_no_barcodes(entry[0])]
+
+            # Dereplicate single-barcode matches (partials)
+            if single_barcode_matches:
+                derep_partials = dereplicate_partial_matches(
+                    single_barcode_matches, trace_logger, sequence_id)
+                for match in derep_partials:
+                    results.append((match, None, None, None))
+
+            # Dereplicate no-barcode matches (unknowns)
+            if no_barcode_matches:
+                derep_unknowns = dereplicate_unknown_matches(
+                    no_barcode_matches, trace_logger, sequence_id)
+                for match in derep_unknowns:
+                    results.append((match, None, None, None))
+
+            # Keep other matches as-is (full match without specimen - rare edge case)
+            for match in other_matches:
+                results.append((match, None, None, None))
+
+            continue
+
+        # Sort by tiebreaker hierarchy:
+        # 1. Total barcode distance (b1_dist + b2_dist) - lower wins
+        # 2. Total primer distance - lower wins
+        # 3. File index sum - lower wins
+        def sort_key(entry: Tuple[CandidateMatch, Optional[str], Optional[str], Optional[str], float, float]) -> Tuple[float, int, int]:
+            match, _, b1, b2, b1_dist, b2_dist = entry
+            barcode_dist = b1_dist + b2_dist
+            primer_dist = match.primer_distance(Primer.FWD) + match.primer_distance(Primer.REV)
+            p1 = match.get_p1()
+            p2 = match.get_p2()
+            file_index = (p1.file_index if p1 else 999) + (p2.file_index if p2 else 999)
+            return (barcode_dist, primer_dist, file_index)
+
+        group.sort(key=sort_key)
+        best = group[0]
+        results.append((best[0], specimen_id, best[2], best[3]))
+
+        # Log selection
+        if trace_logger:
+            scores = sort_key(best)
+            trace_logger.log_dereplicate_selected(
+                sequence_id, specimen_id,
+                len(group),  # alternatives considered
+                scores  # winning scores (barcode_dist, primer_dist, file_idx)
+            )
+
+    return results
+
+
+def dereplicate_partial_matches(
+        matches: List[CandidateMatch],
+        trace_logger: Optional[TraceLogger] = None,
+        sequence_id: Optional[str] = None) -> List[CandidateMatch]:
+    """Dereplicate partial matches by grouping by matched barcode.
+
+    For matches with exactly one barcode (regardless of primer count), group by
+    the matched barcode and select the best match per barcode using:
+    1. Barcode edit distance (only the matched one)
+    2. Combined primer distance (p1_distance + p2_distance)
+    3. File order sum (p1.file_index + p2.file_index)
+
+    Args:
+        matches: List of partial CandidateMatches
+        trace_logger: Optional trace logger
+        sequence_id: Sequence ID for tracing
+
+    Returns:
+        List of dereplicated CandidateMatches - one per unique barcode
+    """
+    # Group by (direction, barcode)
+    barcode_groups: Dict[Tuple[str, str], List[CandidateMatch]] = defaultdict(list)
+
+    for match in matches:
+        # Handle any match with exactly one barcode (regardless of primer count)
+        has_b1 = match.has_b1_match()
+        has_b2 = match.has_b2_match()
+
+        if has_b1 and not has_b2:
+            direction = 'forward'
+            barcodes = match.best_b1()
+        elif has_b2 and not has_b1:
+            direction = 'reverse'
+            barcodes = match.best_b2()
+        else:
+            # Either both barcodes (full match) or neither (unknown) - skip
+            continue
+
+        # Add to group for each equally-good barcode
+        for barcode in barcodes:
+            barcode_groups[(direction, barcode)].append(match)
+
+    # Select best match per barcode group
+    results: List[CandidateMatch] = []
+
+    for (direction, barcode), group in barcode_groups.items():
+        def sort_key(m: CandidateMatch) -> Tuple[float, int, int, int]:
+            # Barcode distance (only the matched one)
+            bc_dist = m.b1_distance() if direction == 'forward' else m.b2_distance()
+
+            # Count primer matches (negate so higher count sorts first)
+            primer_count = 0
+            if m.get_p1():
+                primer_count += 1
+            if m.get_p2():
+                primer_count += 1
+
+            # Combined primer distance
+            primer_dist = 0
+            file_idx = 0
+            if m.get_p1():
+                primer_dist += m.primer_distance(Primer.FWD)
+                file_idx += m.get_p1().file_index
+            if m.get_p2():
+                primer_dist += m.primer_distance(Primer.REV)
+                file_idx += m.get_p2().file_index
+
+            return (bc_dist, -primer_count, primer_dist, file_idx)
+
+        group.sort(key=sort_key)
+        best = group[0]
+        results.append(best)
+
+        # Log selection
+        if trace_logger:
+            trace_logger.log_dereplicate_partial_selected(
+                sequence_id, direction, barcode,
+                len(group),  # alternatives considered
+                sort_key(best)  # winning scores
+            )
+
+    return results
+
+
+def dereplicate_unknown_matches(
+        matches: List[CandidateMatch],
+        trace_logger: Optional[TraceLogger] = None,
+        sequence_id: Optional[str] = None) -> List[CandidateMatch]:
+    """Dereplicate unknown matches (no barcodes) to a single best match.
+
+    For matches with no barcodes, select the best match using:
+    1. Number of primer matches (2 > 1 > 0) - higher wins
+    2. Combined primer distance (p1_distance + p2_distance) - lower wins
+    3. File order sum (p1.file_index + p2.file_index) - lower wins
+
+    Args:
+        matches: List of unknown CandidateMatches (no barcodes)
+        trace_logger: Optional trace logger
+        sequence_id: Sequence ID for tracing
+
+    Returns:
+        List containing at most one CandidateMatch (the best one)
+    """
+    if not matches:
+        return []
+
+    def sort_key(m: CandidateMatch) -> Tuple[int, int, int]:
+        # Count primer matches (negate so higher count sorts first)
+        primer_count = 0
+        if m.get_p1():
+            primer_count += 1
+        if m.get_p2():
+            primer_count += 1
+
+        # Combined primer distance
+        primer_dist = 0
+        if m.get_p1():
+            primer_dist += m.primer_distance(Primer.FWD)
+        if m.get_p2():
+            primer_dist += m.primer_distance(Primer.REV)
+
+        # File order sum
+        file_idx = 0
+        if m.get_p1():
+            file_idx += m.get_p1().file_index
+        else:
+            file_idx += 999
+        if m.get_p2():
+            file_idx += m.get_p2().file_index
+        else:
+            file_idx += 999
+
+        return (-primer_count, primer_dist, file_idx)
+
+    matches_sorted = sorted(matches, key=sort_key)
+    best = matches_sorted[0]
+
+    if trace_logger and len(matches) > 1:
+        scores = sort_key(best)
+        trace_logger.log_dereplicate_unknown_selected(
+            sequence_id, len(matches), -scores[0], scores[1], scores[2])
+
+    return [best]
 
 
 def resolve_specimen(match: CandidateMatch, specimens: Specimens,
                      trace_logger: Optional[TraceLogger] = None,
-                     sequence_id: Optional[str] = None,
-                     args: Optional[argparse.Namespace] = None,
-                     equivalent_matches_count: int = 1) -> Tuple[str, ResolutionType]:
+                     sequence_id: Optional[str] = None) -> Tuple[str, ResolutionType]:
     """Determine final sample ID for this match, including specimen resolution and fallback logic.
     
     Returns:
@@ -218,24 +550,9 @@ def resolve_specimen(match: CandidateMatch, specimens: Specimens,
     # Start with pool already determined from primers in match_sequence
     pool = match.get_pool()
 
-    # Check if we should downgrade full matches to partial
     is_full_match = match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match()
-    should_downgrade = (is_full_match and equivalent_matches_count > 1 and 
-                       args and args.resolve_multiple_matches == MultipleMatchStrategy.DOWNGRADE_FULL)
-    
-    if should_downgrade:
-        # Downgrade full match to partial output
-        p1_name = match.get_p1().name if match.get_p1() else 'unknown'
-        p2_name = match.get_p2().name if match.get_p2() else 'unknown'
-        b1_name = match.best_b1()[0] if match.best_b1() else 'unknown'
-        b2_name = match.best_b2()[0] if match.best_b2() else 'unknown'
-        sample_id = f"{SampleId.PREFIX_FWD_MATCH}downgraded_{p1_name}_{p2_name}_{b1_name}_{b2_name}"
-        resolution_type = ResolutionType.DOWNGRADED_MULTIPLE
-        
-        # Log downgrade decision
-        if trace_logger:
-            trace_logger.log_match_discarded(sequence_id, match, 5.0, 'downgraded_multiple_full')
-    elif is_full_match:
+
+    if is_full_match:
         ids = specimens.specimens_for_barcodes_and_primers(
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
         if len(ids) > 1:

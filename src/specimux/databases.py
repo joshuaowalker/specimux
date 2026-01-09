@@ -229,6 +229,21 @@ class Specimens:
 
         return matching_specimens
 
+    def specimen_for_exact_match(self, b1: str, b2: str,
+                                 p1: PrimerInfo, p2: PrimerInfo) -> Optional[str]:
+        """Find specimen matching exact barcode and primer combination.
+
+        Unlike specimens_for_barcodes_and_primers() which accepts lists of barcodes,
+        this returns the specimen for a single specific barcode+primer combination.
+        Used by dereplication to map specific barcode choices to specimens.
+        """
+        for spec_id, pool, spec_b1, p1s, spec_b2, p2s in self._specimens:
+            if (p1 in p1s and p2 in p2s and
+                    spec_b1.upper() == b1.upper() and
+                    spec_b2.upper() == b2.upper()):
+                return spec_id
+        return None
+
     def get_primers(self, direction: Primer) -> List[PrimerInfo]:
         """Get all primers in a given direction."""
         return [p for p in self._primers.values() if p.direction == direction]

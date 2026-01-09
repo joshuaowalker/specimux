@@ -616,8 +616,8 @@ def setup_match_parameters(args, specimens):
     for p, pt in primer_thresholds.items():
         logging.info(f"Using Edit Distance Threshold {pt} for primer {p}")
 
-    # Log multiple match strategy
-    logging.info(f"Using multiple match strategy: {args.resolve_multiple_matches}")
+    # Log dereplication strategy
+    logging.info(f"Using dereplication strategy: {args.dereplicate}")
 
     if args.disable_preorient:
         logging.info("Sequence pre-orientation disabled, may run slower")

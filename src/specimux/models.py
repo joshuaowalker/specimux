@@ -19,8 +19,8 @@ from .constants import Primer, Barcode, ResolutionType
 
 class PrimerInfo:
     """Information about a primer sequence and its associations."""
-    
-    def __init__(self, name: str, seq: str, direction: Primer, pools: List[str]):
+
+    def __init__(self, name: str, seq: str, direction: Primer, pools: List[str], file_index: int = 0):
         self.name = name
         self.primer = seq.upper()
         self.direction = direction
@@ -28,6 +28,7 @@ class PrimerInfo:
         self.barcodes = set()
         self.specimens = set()
         self.pools = pools
+        self.file_index = file_index  # Order in primers.fasta file (0-indexed)
 
 
 class AlignmentResult:
@@ -168,10 +169,6 @@ class CandidateMatch:
 
     def has_full_match(self) -> bool:
         return self.has_both_primers() and self.has_both_barcodes()
-
-    def has_partial_match(self) -> bool:
-        """Check if we have primers but only one barcode."""
-        return self.has_both_primers() and (self.has_barcode_match(Barcode.B1) or self.has_barcode_match(Barcode.B2))
 
     def b1_span(self):
         if not self.has_barcode_match(Barcode.B1):

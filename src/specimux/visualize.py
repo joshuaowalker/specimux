@@ -330,8 +330,6 @@ class SankeyVisualizer:
             # Handle detailed discard reasons with color variations
             if 'lower_score' in outcome_lower:
                 return '#757575'  # Medium gray - competitive discard
-            elif 'downgraded_multiple_full' in outcome_lower:
-                return '#9E9E9E'  # Light gray - contamination flagging
             else:
                 return self.palette['discarded']  # Default gray - general discard
         else:  # unknown
