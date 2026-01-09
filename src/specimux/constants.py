@@ -47,9 +47,8 @@ class TrimMode:
 
 class MultipleMatchStrategy:
     """Strategy for handling multiple equivalent matches."""
-    RETAIN = "retain"  # Default: output all equivalent matches
-    DOWNGRADE_FULL = "downgrade-full"  # Downgrade full matches to partial if multiple exist
-    DEREPLICATE = "dereplicate"  # Group by specimen, select best match per specimen
+    NONE = "none"  # Default: output all equivalent matches
+    BEST = "best"  # Group by specimen/barcode, select best match per group
 
 
 class ResolutionType(Enum):
@@ -57,10 +56,9 @@ class ResolutionType(Enum):
     FULL_MATCH = 1  # Both primers + both barcodes matched to a specimen
     PARTIAL_FORWARD = 2  # Forward barcode only (generates FWD_ONLY_ sample ID)
     PARTIAL_REVERSE = 3  # Reverse barcode only (generates REV_ONLY_ sample ID)
-    DOWNGRADED_MULTIPLE = 4  # Full match downgraded due to multiple equivalent matches
-    MULTIPLE_SPECIMENS = 5  # Multiple specimen matches (shouldn't happen in new flow)
-    UNKNOWN = 6  # No resolution possible
-    DEREPLICATED = 7  # Full match selected via dereplication (best match per specimen)
+    MULTIPLE_SPECIMENS = 4  # Multiple specimen matches (shouldn't happen in new flow)
+    UNKNOWN = 5  # No resolution possible
+    DEREPLICATED_FULL = 6  # Full match selected via dereplication (best match per specimen)
 
     def to_string(self) -> str:
         """Convert resolution type to lowercase string for trace logging."""
@@ -70,18 +68,16 @@ class ResolutionType(Enum):
             return 'partial_forward'
         elif self == ResolutionType.PARTIAL_REVERSE:
             return 'partial_reverse'
-        elif self == ResolutionType.DOWNGRADED_MULTIPLE:
-            return 'downgraded_multiple_full'
         elif self == ResolutionType.MULTIPLE_SPECIMENS:
             return 'multiple_specimens'
-        elif self == ResolutionType.DEREPLICATED:
-            return 'dereplicated'
+        elif self == ResolutionType.DEREPLICATED_FULL:
+            return 'dereplicated_full'
         else:
             return 'unknown'
 
     def is_full_match(self) -> bool:
         """Check if this represents a successful full match."""
-        return self in [ResolutionType.FULL_MATCH, ResolutionType.DEREPLICATED]
+        return self in [ResolutionType.FULL_MATCH, ResolutionType.DEREPLICATED_FULL]
 
     def is_partial_match(self) -> bool:
         """Check if this represents a partial match."""

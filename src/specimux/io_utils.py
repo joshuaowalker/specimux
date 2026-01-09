@@ -215,7 +215,7 @@ class OutputManager:
             # Partial match (forward or reverse barcode only)
             return os.path.join(self.output_dir, "partial", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
         else:
-            # Full match (including downgraded and multiple specimen matches)
+            # Full match (including dereplicated and multiple specimen matches)
             return os.path.join(self.output_dir, "full", pool, primer_dir, f"{self.prefix}{safe_id}{extension}")
 
     def write_sequence(self, write_op: WriteOperation, trace_logger: Optional['TraceLogger'] = None):

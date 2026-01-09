@@ -57,7 +57,7 @@ class CandidateMatch:
     resolution_type: str = "unknown"           # full_match, partial_forward, partial_reverse, unknown
     outcome: str = "unknown"                   # matched, partial, unknown, discarded
     selection_strategy: str = "none"           # unique, first, discarded, none
-    discard_reason: str = "none"               # lower_score, downgraded_multiple_full, none
+    discard_reason: str = "none"               # lower_score, none
     
     # Boolean Dimensions (computed from above)
     @property

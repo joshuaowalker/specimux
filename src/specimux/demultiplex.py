@@ -150,17 +150,16 @@ def process_sequences(seq_records: List[SeqRecord],
                 best_matches = select_best_matches(matches, trace_logger, sequence_id)
 
                 # Process matches based on strategy
-                equivalent_count = len(best_matches)
                 has_full_match = False
 
-                if args.resolve_multiple_matches == MultipleMatchStrategy.DEREPLICATE:
+                if args.dereplicate == MultipleMatchStrategy.BEST:
                     # Dereplicate: group by specimen, select best match per specimen
                     derep_results = dereplicate_matches(best_matches, specimens, trace_logger, sequence_id)
 
                     for match, specimen_id, b1, b2 in derep_results:
                         if specimen_id is not None:
                             # Full match with specific specimen - use directly
-                            resolution_type = ResolutionType.DEREPLICATED
+                            resolution_type = ResolutionType.DEREPLICATED_FULL
                             pool = specimens.get_specimen_pool(specimen_id)
                             match.set_pool(pool)
 
@@ -172,7 +171,7 @@ def process_sequences(seq_records: List[SeqRecord],
                         else:
                             # Partial/unknown - handle normally via resolve_specimen
                             final_sample_id, resolution_type = resolve_specimen(
-                                match, specimens, trace_logger, sequence_id, args, equivalent_count)
+                                match, specimens, trace_logger, sequence_id)
                             op = create_write_operation(final_sample_id, args, match.sequence, match,
                                                         resolution_type, sequence_id, trace_logger)
                             if op is not None:
@@ -180,11 +179,11 @@ def process_sequences(seq_records: List[SeqRecord],
                             if resolution_type.is_full_match():
                                 has_full_match = True
                 else:
-                    # RETAIN or DOWNGRADE_FULL: process all equivalent matches
+                    # No dereplication: process all equivalent matches
                     for match in best_matches:
                         # Determine final sample ID for this match (includes specimen resolution and fallback logic)
-                        final_sample_id, resolution_type = resolve_specimen(match, specimens, trace_logger, sequence_id,
-                                                                            args, equivalent_count)
+                        final_sample_id, resolution_type = resolve_specimen(
+                            match, specimens, trace_logger, sequence_id)
 
                         # Create and add write operation directly - use the sequence in the matched orientation
                         # This ensures proper orientation normalization
@@ -541,9 +540,7 @@ def dereplicate_unknown_matches(
 
 def resolve_specimen(match: CandidateMatch, specimens: Specimens,
                      trace_logger: Optional[TraceLogger] = None,
-                     sequence_id: Optional[str] = None,
-                     args: Optional[argparse.Namespace] = None,
-                     equivalent_matches_count: int = 1) -> Tuple[str, ResolutionType]:
+                     sequence_id: Optional[str] = None) -> Tuple[str, ResolutionType]:
     """Determine final sample ID for this match, including specimen resolution and fallback logic.
     
     Returns:
@@ -553,24 +550,9 @@ def resolve_specimen(match: CandidateMatch, specimens: Specimens,
     # Start with pool already determined from primers in match_sequence
     pool = match.get_pool()
 
-    # Check if we should downgrade full matches to partial
     is_full_match = match.p1_match and match.p2_match and match.has_b1_match() and match.has_b2_match()
-    should_downgrade = (is_full_match and equivalent_matches_count > 1 and 
-                       args and args.resolve_multiple_matches == MultipleMatchStrategy.DOWNGRADE_FULL)
-    
-    if should_downgrade:
-        # Downgrade full match to partial output
-        p1_name = match.get_p1().name if match.get_p1() else 'unknown'
-        p2_name = match.get_p2().name if match.get_p2() else 'unknown'
-        b1_name = match.best_b1()[0] if match.best_b1() else 'unknown'
-        b2_name = match.best_b2()[0] if match.best_b2() else 'unknown'
-        sample_id = f"{SampleId.PREFIX_FWD_MATCH}downgraded_{p1_name}_{p2_name}_{b1_name}_{b2_name}"
-        resolution_type = ResolutionType.DOWNGRADED_MULTIPLE
-        
-        # Log downgrade decision
-        if trace_logger:
-            trace_logger.log_match_discarded(sequence_id, match, 5.0, 'downgraded_multiple_full')
-    elif is_full_match:
+
+    if is_full_match:
         ids = specimens.specimens_for_barcodes_and_primers(
             match.best_b1(), match.best_b2(), match.get_p1(), match.get_p2())
         if len(ids) > 1:

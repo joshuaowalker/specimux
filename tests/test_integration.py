@@ -243,9 +243,9 @@ class TestCoreModules:
     def test_multiple_match_strategy(self):
         """Test that MultipleMatchStrategy enum is accessible."""
         from specimux.core import MultipleMatchStrategy
-        
-        assert hasattr(MultipleMatchStrategy, 'RETAIN')
-        assert hasattr(MultipleMatchStrategy, 'DOWNGRADE_FULL')
+
+        assert hasattr(MultipleMatchStrategy, 'NONE')
+        assert hasattr(MultipleMatchStrategy, 'BEST')
 
 
 class TestSpecimuxWatch:
