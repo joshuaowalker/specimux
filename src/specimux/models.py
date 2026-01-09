@@ -170,10 +170,6 @@ class CandidateMatch:
     def has_full_match(self) -> bool:
         return self.has_both_primers() and self.has_both_barcodes()
 
-    def has_partial_match(self) -> bool:
-        """Check if we have primers but only one barcode."""
-        return self.has_both_primers() and (self.has_barcode_match(Barcode.B1) or self.has_barcode_match(Barcode.B2))
-
     def b1_span(self):
         if not self.has_barcode_match(Barcode.B1):
             return None

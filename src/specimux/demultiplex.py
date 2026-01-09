@@ -304,9 +304,27 @@ def dereplicate_matches(matches: List[CandidateMatch],
 
     for specimen_id, group in specimen_groups.items():
         if specimen_id is None:
-            # Non-full matches or no specimen found, keep all
-            for entry in group:
-                results.append((entry[0], None, None, None))
+            # Separate single-barcode matches for dereplication
+            # (any match with exactly one barcode, regardless of primer count)
+            def has_single_barcode(m: CandidateMatch) -> bool:
+                has_b1 = m.has_b1_match()
+                has_b2 = m.has_b2_match()
+                return (has_b1 and not has_b2) or (has_b2 and not has_b1)
+
+            single_barcode_matches = [entry[0] for entry in group if has_single_barcode(entry[0])]
+            other_matches = [entry[0] for entry in group if not has_single_barcode(entry[0])]
+
+            # Dereplicate single-barcode matches
+            if single_barcode_matches:
+                derep_partials = dereplicate_partial_matches(
+                    single_barcode_matches, trace_logger, sequence_id)
+                for match in derep_partials:
+                    results.append((match, None, None, None))
+
+            # Keep other matches as-is (no barcode or full match without specimen)
+            for match in other_matches:
+                results.append((match, None, None, None))
+
             continue
 
         # Sort by tiebreaker hierarchy:
@@ -333,6 +351,83 @@ def dereplicate_matches(matches: List[CandidateMatch],
                 sequence_id, specimen_id,
                 len(group),  # alternatives considered
                 scores  # winning scores (barcode_dist, primer_dist, file_idx)
+            )
+
+    return results
+
+
+def dereplicate_partial_matches(
+        matches: List[CandidateMatch],
+        trace_logger: Optional[TraceLogger] = None,
+        sequence_id: Optional[str] = None) -> List[CandidateMatch]:
+    """Dereplicate partial matches by grouping by matched barcode.
+
+    For matches with exactly one barcode (regardless of primer count), group by
+    the matched barcode and select the best match per barcode using:
+    1. Barcode edit distance (only the matched one)
+    2. Combined primer distance (p1_distance + p2_distance)
+    3. File order sum (p1.file_index + p2.file_index)
+
+    Args:
+        matches: List of partial CandidateMatches
+        trace_logger: Optional trace logger
+        sequence_id: Sequence ID for tracing
+
+    Returns:
+        List of dereplicated CandidateMatches - one per unique barcode
+    """
+    # Group by (direction, barcode)
+    barcode_groups: Dict[Tuple[str, str], List[CandidateMatch]] = defaultdict(list)
+
+    for match in matches:
+        # Handle any match with exactly one barcode (regardless of primer count)
+        has_b1 = match.has_b1_match()
+        has_b2 = match.has_b2_match()
+
+        if has_b1 and not has_b2:
+            direction = 'forward'
+            barcodes = match.best_b1()
+        elif has_b2 and not has_b1:
+            direction = 'reverse'
+            barcodes = match.best_b2()
+        else:
+            # Either both barcodes (full match) or neither (unknown) - skip
+            continue
+
+        # Add to group for each equally-good barcode
+        for barcode in barcodes:
+            barcode_groups[(direction, barcode)].append(match)
+
+    # Select best match per barcode group
+    results: List[CandidateMatch] = []
+
+    for (direction, barcode), group in barcode_groups.items():
+        def sort_key(m: CandidateMatch) -> Tuple[float, int, int]:
+            # Barcode distance (only the matched one)
+            bc_dist = m.b1_distance() if direction == 'forward' else m.b2_distance()
+
+            # Combined primer distance (ignore missing primers)
+            primer_dist = 0
+            file_idx = 0
+            if m.get_p1():
+                primer_dist += m.primer_distance(Primer.FWD)
+                file_idx += m.get_p1().file_index
+            if m.get_p2():
+                primer_dist += m.primer_distance(Primer.REV)
+                file_idx += m.get_p2().file_index
+
+            return (bc_dist, primer_dist, file_idx)
+
+        group.sort(key=sort_key)
+        best = group[0]
+        results.append(best)
+
+        # Log selection
+        if trace_logger:
+            trace_logger.log_dereplicate_partial_selected(
+                sequence_id, direction, barcode,
+                len(group),  # alternatives considered
+                sort_key(best)  # winning scores
             )
 
     return results

@@ -273,6 +273,20 @@ class TraceLogger:
         self._log_event(sequence_id, 'DEREPLICATE_SELECTED', specimen_id,
                        alternatives_count, barcode_dist, primer_dist, file_idx)
 
+    def log_dereplicate_partial_selected(self, sequence_id: str, direction: str,
+                                         barcode: str, alternatives_count: int,
+                                         scores: tuple):
+        """Log partial match dereplication selection.
+
+        Args:
+            direction: 'forward' or 'reverse' (which barcode matched)
+            barcode: The barcode sequence used for grouping
+            scores: Tuple of (barcode_dist, primer_dist, file_idx) for the winning match
+        """
+        barcode_dist, primer_dist, file_idx = scores
+        self._log_event(sequence_id, 'DEREPLICATE_PARTIAL_SELECTED', direction,
+                       barcode, alternatives_count, barcode_dist, primer_dist, file_idx)
+
     # Detailed events (verbosity level 2+)
     
     def log_primer_search(self, sequence_id: str, primer_name: str, primer_direction: str,
