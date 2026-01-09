@@ -339,7 +339,7 @@ def parse_args(argv):
     parser.add_argument("-O", "--output-dir", default=".")
     parser.add_argument("--color", action="store_true")
     parser.add_argument("--trim", type=str, default="barcodes")
-    parser.add_argument("--dereplicate", type=str, default="none")
+    parser.add_argument("--dereplicate", type=str, default="best")
     parser.add_argument("-d", "--diagnostics", nargs='?', const=1, type=int, choices=[1, 2, 3])
     parser.add_argument("-D", "--debug", action="store_true")
     parser.add_argument("--disable-prefilter", action="store_true")
@@ -387,7 +387,7 @@ def build_specimux_args(args) -> list:
         specimux_args.append('--color')
     if args.trim != "barcodes":
         specimux_args.extend(['--trim', args.trim])
-    if args.dereplicate != "none":
+    if args.dereplicate != "best":
         specimux_args.extend(['--dereplicate', args.dereplicate])
     if args.diagnostics:
         specimux_args.extend(['-d', str(args.diagnostics)])
