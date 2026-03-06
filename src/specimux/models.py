@@ -30,6 +30,9 @@ class PrimerInfo:
         self.pools = pools
         self.file_index = file_index  # Order in primers.fasta file (0-indexed)
 
+    def __repr__(self):
+        return self.name
+
 
 class AlignmentResult:
     """Wrapper around edlib match result."""

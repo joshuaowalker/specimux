@@ -111,17 +111,19 @@ def process_sequences(seq_records: List[SeqRecord],
                       args: argparse.Namespace,
                       prefilter: Optional[BarcodePrefilter],
                       trace_logger: Optional[TraceLogger] = None,
-                      record_offset: int = 0) -> Tuple[List[WriteOperation], int, int]:
+                      record_offset: int = 0) -> Tuple[List[WriteOperation], int, int, int]:
     """Process sequences and track pipeline events.
-    
+
     Returns:
         write_ops: List of write operations to perform
         total_count: Number of sequences processed
         matched_count: Number of sequences successfully matched
+        unregistered_combo_count: Number of full-match candidates with no matching specimen
     """
     write_ops = []
     total_count = 0
     matched_count = 0
+    unregistered_combo_count = 0
 
     for idx, seq in enumerate(seq_records):
         total_count += 1
@@ -172,6 +174,8 @@ def process_sequences(seq_records: List[SeqRecord],
                             # Partial/unknown - handle normally via resolve_specimen
                             final_sample_id, resolution_type = resolve_specimen(
                                 match, specimens, trace_logger, sequence_id)
+                            if resolution_type == ResolutionType.UNKNOWN and match.has_full_match():
+                                unregistered_combo_count += 1
                             op = create_write_operation(final_sample_id, args, match.sequence, match,
                                                         resolution_type, sequence_id, trace_logger)
                             if op is not None:
@@ -184,6 +188,8 @@ def process_sequences(seq_records: List[SeqRecord],
                         # Determine final sample ID for this match (includes specimen resolution and fallback logic)
                         final_sample_id, resolution_type = resolve_specimen(
                             match, specimens, trace_logger, sequence_id)
+                        if resolution_type == ResolutionType.UNKNOWN and match.has_full_match():
+                            unregistered_combo_count += 1
 
                         # Create and add write operation directly - use the sequence in the matched orientation
                         # This ensures proper orientation normalization
@@ -209,7 +215,7 @@ def process_sequences(seq_records: List[SeqRecord],
                 if op is not None:
                     write_ops.append(op)
 
-    return write_ops, total_count, matched_count
+    return write_ops, total_count, matched_count, unregistered_combo_count
 
 
 
@@ -569,7 +575,7 @@ def resolve_specimen(match: CandidateMatch, specimens: Specimens,
             pool = specimens.get_specimen_pool(ids[0])
             match.set_pool(pool)
         else:
-            logging.warning(
+            logging.debug(
                 f"No Specimens for combo: ({match.best_b1()}, {match.best_b2()}, "
                 f"{match.get_p1()}, {match.get_p2()})")
             resolution_type = ResolutionType.UNKNOWN

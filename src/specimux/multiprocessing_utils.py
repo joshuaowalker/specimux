@@ -86,7 +86,7 @@ def worker(work_item: SequenceBatch, specimens: Specimens, args: argparse.Namesp
     """Process a batch of sequences and write results directly"""
     global _output_manager, _barcode_prefilter, _trace_logger
     try:
-        write_ops, total_count, matched_count = process_sequences(
+        write_ops, total_count, matched_count, unregistered_combo_count = process_sequences(
             work_item.seq_records, work_item.parameters, specimens, args, _barcode_prefilter,
             _trace_logger, work_item.start_idx)
 
@@ -106,7 +106,7 @@ def worker(work_item: SequenceBatch, specimens: Specimens, args: argparse.Namesp
             _trace_logger._flush_buffer()
 
         # Return counts for progress tracking
-        return total_count, matched_count
+        return total_count, matched_count, unregistered_combo_count
 
     except Exception as e:
         logging.error(traceback.format_exc())

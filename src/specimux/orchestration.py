@@ -190,7 +190,8 @@ def specimux_mp(args):
             # Track totals for match rate
             total_processed = 0
             total_matched = 0
-            
+            total_unregistered = 0
+
             # Create work items with cumulative sequence indexing for trace IDs
             def create_work_items():
                 cumulative_idx = 0
@@ -202,9 +203,10 @@ def specimux_mp(args):
             
             for batch_counts in pool.imap_unordered(worker_func, create_work_items()):
                 if batch_counts:
-                    batch_total, batch_matched = batch_counts
+                    batch_total, batch_matched, batch_unregistered = batch_counts
                     total_processed += batch_total
                     total_matched += batch_matched
+                    total_unregistered += batch_unregistered
                     pbar.update(batch_total)
                     
                     # Update progress with match rate
@@ -218,6 +220,10 @@ def specimux_mp(args):
             if total_processed > 0:
                 final_match_rate = total_matched / total_processed
                 logging.info(f"Processed {total_processed:,} sequences, match rate: {final_match_rate:.1%}")
+            if total_unregistered > 0:
+                logging.warning(
+                    f"{total_unregistered:,} sequences had barcode combinations not found in specimen file "
+                    f"(check for missing specimen entries, or may indicate chimeric reads)")
 
         except WorkerException as e:
             logging.error(f"Unexpected error in worker (see details above): {e}")
@@ -491,7 +497,8 @@ def specimux(args):
         # Track totals for match rate
         total_processed = 0
         total_matched = 0
-        
+        total_unregistered = 0
+
         while all_seqs or num_seqs < last_seq_to_output:
             to_read = sequence_block_size if all_seqs else min(sequence_block_size, last_seq_to_output - num_seqs)
             seq_batch = list(itertools.islice(seq_records, to_read))
@@ -510,7 +517,7 @@ def specimux(args):
                 )
                 trace_logger.__enter__()
 
-            write_ops, batch_total, batch_matched = process_sequences(
+            write_ops, batch_total, batch_matched, batch_unregistered = process_sequences(
                 seq_batch, parameters, specimens, args, prefilter, trace_logger, num_seqs)
             
             for write_op in write_ops:
@@ -523,6 +530,7 @@ def specimux(args):
             num_seqs += batch_total
             total_processed += batch_total
             total_matched += batch_matched
+            total_unregistered += batch_unregistered
             pbar.update(batch_total)
             
             # Update progress with match rate
@@ -536,7 +544,11 @@ def specimux(args):
         if total_processed > 0:
             final_match_rate = total_matched / total_processed
             logging.info(f"Processed {total_processed:,} sequences, match rate: {final_match_rate:.1%}")
-    
+        if total_unregistered > 0:
+            logging.warning(
+                f"{total_unregistered:,} sequences had barcode combinations not found in specimen file "
+                f"(check for missing specimen entries, or may indicate chimeric reads)")
+
     elapsed = timeit.default_timer() - start_time
     logging.info(f"Elapsed time: {elapsed:.2f} seconds")
     
