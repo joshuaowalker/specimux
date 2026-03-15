@@ -3,7 +3,9 @@ import sys
 import argparse
 import logging
 import os
+from pathlib import Path
 from . import core, __version__
+from .progress import ProgressReporter
 from .core import TrimMode, MultipleMatchStrategy
 
 
@@ -41,9 +43,44 @@ def parse_args(argv):
     parser.add_argument("-t", "--threads", type=int, default=-1, help="Number of worker threads to use")
     parser.add_argument("--sample-topq", type=int, default=0, metavar="N",
                         help="Create subsample directories with top N sequences by average quality score (default: disabled)")
+    parser.add_argument("--progress-file", type=str, default=None,
+                        help="Write JSONL progress lines to this file (for orchestration tools)")
     parser.add_argument("-v", "--version", action="version", version=version())
 
-    args = parser.parse_args(argv[1:])
+    parser.add_argument('-p', '--profile', type=str, default=None,
+                        help='Load a profile preset')
+    parser.add_argument('--list-profiles', action='store_true',
+                        help='List available profiles and exit')
+
+    # argv[0] is the program name, argv[1:] are the actual arguments
+    cli_args = argv[1:]
+
+    # Early exit for --list-profiles (before requiring positional args)
+    if '--list-profiles' in cli_args:
+        from .profiles import print_profiles_list
+        print_profiles_list('specimux')
+        sys.exit(0)
+
+    # Track which long-form arguments were explicitly provided on command line.
+    # We need this to distinguish "user set --search-len 120" from
+    # "search_len has its default value of 80".
+    # Short options (-t, -F, etc.) are not tracked — profiles only use long names.
+    explicit_args = set()
+    for arg in cli_args:
+        if arg.startswith('--') and '=' in arg:
+            explicit_args.add(arg.split('=')[0][2:].replace('-', '_'))
+        elif arg.startswith('--'):
+            explicit_args.add(arg[2:].replace('-', '_'))
+
+    # Load and apply profile if specified
+    args, remaining = parser.parse_known_args(cli_args)
+    if args.profile:
+        from .profiles import Profile, apply_profile_to_args
+        profile = Profile.load(args.profile)
+        apply_profile_to_args(args, profile, 'specimux', explicit_args)
+        # Re-parse to let profile defaults fill in
+        parser.set_defaults(**{k: v for k, v in vars(args).items()})
+        args = parser.parse_args(cli_args)
 
     if args.num_seqs:
         process_num_seqs(args, parser)
@@ -102,12 +139,16 @@ def main():
     logging.info(f"Starting {version()}")
     logging.info(f"Command line: {' '.join(sys.argv)}")
 
-    if args.output_to_files:
-        core.specimux_mp(args)  # Use multiprocess for file output
-    else:
-        if args.threads > 1:
-            logging.warning(f"Multithreading only supported for file output. Ignoring --threads {args.threads}")
-        core.specimux(args)     # Use single process for console output
+    reporter = ProgressReporter(Path(args.progress_file) if args.progress_file else None)
+    try:
+        if args.output_to_files:
+            core.specimux_mp(args, progress_reporter=reporter)  # Use multiprocess for file output
+        else:
+            if args.threads > 1:
+                logging.warning(f"Multithreading only supported for file output. Ignoring --threads {args.threads}")
+            core.specimux(args, progress_reporter=reporter)     # Use single process for console output
+    finally:
+        reporter.close()
 
 
 def specimine_main():

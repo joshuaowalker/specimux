@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "specimux"
-version = "0.7.1"
+version = "0.7.2"
 description = "Dual barcode and primer demultiplexing system for MinION sequenced reads"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -32,6 +32,7 @@ dependencies = [
     "tqdm>=4.65.0",
     "plotly>=5.0.0",  # Included by default for visualization
     "watchdog>=3.0.0",  # File system monitoring for specimux-watch
+    "pyyaml>=5.0",  # Profile system
 ]
 
 [project.optional-dependencies]
@@ -66,4 +67,4 @@ where = ["src"]
 include = ["specimux*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.txt", "*.fasta", "*.fastq"]
+"*" = ["*.txt", "*.fasta", "*.fastq", "*.yaml"]

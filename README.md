@@ -76,6 +76,7 @@ Specimux automatically installs these dependencies:
 - tqdm>=4.65.0 (progress bars)
 - plotly>=5.0.0 (visualization support)
 - watchdog>=3.0.0 (file system monitoring for specimux-watch)
+- pyyaml>=5.0 (profile system)
 
 Specimux has been tested on MacOS and Linux machines.
 
@@ -84,7 +85,7 @@ Specimux has been tested on MacOS and Linux machines.
 After installation, specimux provides several command-line tools:
 
 - **`specimux`** - Main demultiplexer for dual barcode and primer matching
-- **`specimux-watch`** - Automatic file watcher for live MinKNOW sequencing workflows
+- **`specimux-watch`** - *(Deprecated)* File watcher for live sequencing — use `specimux-suite live` instead
 - **`specimine`** - Mine additional sequences from partial barcode matches
 - **`specimux-convert`** - Convert legacy specimen files to current format
 - **`specimux-stats`** - Analyze trace files to generate statistics
@@ -134,6 +135,67 @@ For a full list of options:
 ```bash
 specimux -h
 ```
+
+## Profiles
+
+Profiles allow you to save and reuse parameter presets for different workflows. A profile is a YAML file that sets default values for specimux options — any option explicitly provided on the command line overrides the profile value.
+
+### Using Profiles
+
+```bash
+# List available profiles
+specimux --list-profiles
+
+# Run with a profile
+specimux primers.fasta specimens.txt sequences.fastq -p default -F -d
+
+# CLI arguments override profile values
+specimux primers.fasta specimens.txt sequences.fastq -p default --search-len 120
+```
+
+### Profile Resolution
+
+Profiles are loaded in this order (first match wins):
+1. User profiles in `~/.config/specimux/profiles/`
+2. Bundled profiles shipped with the package
+
+### Creating Custom Profiles
+
+Copy the example profile that is created in `~/.config/specimux/profiles/` on first use:
+
+```bash
+cp ~/.config/specimux/profiles/example.yaml ~/.config/specimux/profiles/my-workflow.yaml
+```
+
+Edit the file to set your preferred defaults. Only include parameters you want to change:
+
+```yaml
+specimux-version: "0.7.*"
+description: "My custom workflow"
+
+specimux:
+  search-len: 120
+  trim: primers
+  threads: 8
+```
+
+### Available Profile Parameters
+
+Profiles support the following specimux parameters: `trim`, `dereplicate`, `search-len`, `index-edit-distance`, `primer-edit-distance`, `min-length`, `max-length`, `threads`, `disable-prefilter`, `disable-preorient`, `sample-topq`, `diagnostics`.
+
+### Version Compatibility
+
+Each profile declares a `specimux-version` pattern (e.g., `"0.7.*"`). Specimux validates this on load and raises an error if the profile is incompatible with the installed version, preventing silent parameter mismatches after upgrades.
+
+## Progress Reporting
+
+For integration with orchestration tools like specimux-suite, specimux can write JSONL progress updates to a file:
+
+```bash
+specimux primers.fasta specimens.txt sequences.fastq -F --progress-file progress.jsonl
+```
+
+Each line is a JSON object with `type` (`"progress"` or `"complete"`), `processed`, `matched`, and `rate` fields. Progress lines are throttled to at most one per second.
 
 ## Primer Pool Organization
 
@@ -388,7 +450,9 @@ output/
         └── specimen_001.fastq (500 sequences)
 ```
 
-### Live Sequencing with specimux-watch
+### Live Sequencing with specimux-watch (Deprecated)
+
+> **Note:** `specimux-watch` is deprecated. Use `specimux-suite live` for live sequencing monitoring with consensus and identification.
 
 For live MinKNOW sequencing workflows, `specimux-watch` automatically monitors a directory and processes new FASTQ files as they are written:
 
@@ -624,6 +688,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.7.2 (March 2026): Add profile system for reusable parameter presets (`-p/--profile`, `--list-profiles`). Profiles are YAML files stored in `~/.config/specimux/profiles/` or bundled with the package, with version compatibility checking and key validation. Add JSONL progress reporting (`--progress-file`) for integration with orchestration tools. Deprecate `specimux-watch` in favor of `specimux-suite live`
 - 0.7.1 (March 2026): Deduplicate "No Specimens for combo" warning that flooded output with thousands of per-sequence messages. Unregistered barcode combinations now produce a single end-of-run summary warning instead. Per-sequence detail remains available at DEBUG level (-d3). PrimerInfo objects now display their name in log messages instead of memory addresses. Fixes #9
 - 0.7.0 (January 2026): Add dereplication to prevent artificial read amplification. When complex primer pools cause the same read to match multiple primer permutations, specimux now selects the best match per specimen/barcode group by default. New `--dereplicate` option replaces `--resolve-multiple-matches` with values `best` (default) and `none`. The `downgrade-full` strategy has been removed. Also fixes a bug where ~180 reads per run were silently dropped when trimming would produce empty sequences (now routed to unknown output).
 - 0.6.9 (December 2025): Fix specimine path derivation for current output structure. The tool now correctly finds partial match files after the specimux output reorganization. Also fixes --partial-reverse flag (changed to --no-partial-reverse) which was broken due to argparse store_true with default=True
