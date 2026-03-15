@@ -150,7 +150,7 @@ def estimate_sequence_count(filename: str, args: argparse.Namespace) -> int:
     return estimated_sequences
 
 
-def specimux_mp(args):
+def specimux_mp(args, progress_reporter=None):
     primer_registry = read_primers_file(args.primer_file)
     specimens = read_specimen_file(args.specimen_file, primer_registry)
     specimens.validate()
@@ -208,14 +208,20 @@ def specimux_mp(args):
                     total_matched += batch_matched
                     total_unregistered += batch_unregistered
                     pbar.update(batch_total)
-                    
+
                     # Update progress with match rate
                     if total_processed > 0:
                         match_rate = total_matched / total_processed
                         pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
 
+                    if progress_reporter:
+                        progress_reporter.update(total_processed, total_matched, total_seqs)
+
             pbar.close()
-            
+
+            if progress_reporter:
+                progress_reporter.complete(total_processed, total_matched)
+
             # Log final statistics
             if total_processed > 0:
                 final_match_rate = total_matched / total_processed
@@ -461,7 +467,7 @@ def iter_batches(seq_records, batch_size: int, max_seqs: int, all_seqs: bool):
         yield batch
         num_seqs += len(batch)
 
-def specimux(args):
+def specimux(args, progress_reporter=None):
     primer_registry = read_primers_file(args.primer_file)
     specimens = read_specimen_file(args.specimen_file, primer_registry)
     specimens.validate()
@@ -532,14 +538,20 @@ def specimux(args):
             total_matched += batch_matched
             total_unregistered += batch_unregistered
             pbar.update(batch_total)
-            
+
             # Update progress with match rate
             if total_processed > 0:
                 match_rate = total_matched / total_processed
                 pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
 
+            if progress_reporter:
+                progress_reporter.update(total_processed, total_matched, total_seqs)
+
         pbar.close()
-        
+
+        if progress_reporter:
+            progress_reporter.complete(total_processed, total_matched)
+
         # Log final statistics
         if total_processed > 0:
             final_match_rate = total_matched / total_processed

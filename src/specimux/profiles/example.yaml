@@ -1,0 +1,56 @@
+# Example Specimux Profile
+#
+# Copy this file to create your own profiles:
+#   cp example.yaml my-workflow.yaml
+#
+# Then use it with:
+#   specimux primers.fasta specimens.txt reads.fastq -p my-workflow
+#
+# HOW TO USE THIS FILE:
+#   - Lines starting with # are comments (ignored)
+#   - To enable an option, remove the # at the start of the line
+#   - Only include parameters you want to change from defaults
+#   - CLI arguments always override profile values
+#
+# Example: To set search-len to 120, change:
+#   # search-len: 80
+# to:
+#   search-len: 120
+
+specimux-version: "0.7.*"
+description: "My custom workflow"
+
+# =============================================================================
+# Parameters for specimux (demultiplexing)
+# =============================================================================
+specimux:
+
+  # --- Trimming ---
+  # trim: barcodes               # Trimming to apply: none, tails, barcodes, or primers
+
+  # --- Dereplication ---
+  # dereplicate: best            # Dereplication strategy: best or none
+
+  # --- Search Region ---
+  # search-len: 80               # Length to search for index and primer at each end
+
+  # --- Edit Distances ---
+  # index-edit-distance: -1      # Barcode edit distance (-1 = auto from barcode set)
+  # primer-edit-distance: -1     # Primer edit distance (-1 = auto from primer set)
+
+  # --- Length Filtering ---
+  # min-length: -1               # Minimum sequence length (-1 = no filtering)
+  # max-length: -1               # Maximum sequence length (-1 = no filtering)
+
+  # --- Processing ---
+  # threads: -1                  # Number of worker threads (-1 = auto-detect)
+
+  # --- Optimizations ---
+  # disable-prefilter: false     # Set true to disable bloom filter barcode prefiltering
+  # disable-preorient: false     # Set true to disable heuristic pre-orientation
+
+  # --- Subsampling ---
+  # sample-topq: 0              # Create subsample with top N reads by quality (0 = disabled)
+
+  # --- Diagnostics ---
+  # diagnostics: 1               # Diagnostic trace level: 1=standard, 2=detailed, 3=verbose

@@ -1,0 +1,12 @@
+# Default settings for dual-barcode demultiplexing
+#
+# These settings match specimux's built-in defaults and serve as
+# a starting point for creating custom profiles.
+
+specimux-version: "0.7.*"
+description: "Default dual-barcode demultiplexing"
+
+specimux:
+  trim: barcodes
+  dereplicate: best
+  search-len: 80

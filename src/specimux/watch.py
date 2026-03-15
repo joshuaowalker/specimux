@@ -8,6 +8,7 @@ import sys
 import argparse
 import logging
 import os
+import warnings
 import time
 import json
 import subprocess
@@ -407,6 +408,15 @@ def build_specimux_args(args) -> list:
 
 def main():
     """Main entry point for specimux-watch command."""
+    warnings.warn(
+        "specimux-watch is deprecated and will be removed in a future release. "
+        "Use 'specimux-suite live' instead for live sequencing monitoring with "
+        "consensus and identification.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    logging.warning("specimux-watch is deprecated. Use 'specimux-suite live' instead.")
+
     args = parse_args(sys.argv)
 
     # Set up logging
