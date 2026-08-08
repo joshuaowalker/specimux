@@ -40,7 +40,7 @@ from .io_utils import (
 )
 from .trace import TraceLogger
 from .bloom_filter import BloomPrefilter, barcodes_for_bloom_prefilter
-from .multiprocessing_utils import init_worker, worker, WorkerException
+from .multiprocessing_utils import init_worker, worker, raise_fd_soft_limit, WorkerException
 from .demultiplex import process_sequences
 from .io_utils import get_gzip_info, output_write_operation
 import edlib
@@ -490,7 +490,14 @@ def specimux(args, progress_reporter=None):
             pass
 
 
-    with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq) as output_manager:
+    if raise_fd_soft_limit():
+        max_open_files = 200
+    else:
+        logging.warning("Falling back to smaller file handle cache")
+        max_open_files = 50
+
+    with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq,
+                       max_open_files=max_open_files) as output_manager:
         num_seqs = 0
         prefilter = PassthroughPrefilter()
         if not args.disable_prefilter:

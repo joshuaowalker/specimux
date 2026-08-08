@@ -12,6 +12,7 @@ import atexit
 import logging
 import multiprocessing
 import os
+import resource
 import sys
 import traceback
 from datetime import datetime
@@ -24,6 +25,25 @@ from .trace import TraceLogger
 from .bloom_filter import BloomPrefilter, barcodes_for_bloom_prefilter
 from .io_utils import OutputManager, output_write_operation
 from .demultiplex import process_sequences
+
+
+def raise_fd_soft_limit(target: int = 4096) -> bool:
+    """Raise the soft RLIMIT_NOFILE toward target (bounded by the hard limit).
+
+    Each cached output file can hold two fds (data file + lock file), and
+    macOS defaults to a 256-fd soft limit per process. Returns True if the
+    soft limit is at least target (or was successfully raised to the hard
+    limit), False if it could not be raised.
+    """
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        desired = target if hard == resource.RLIM_INFINITY else min(hard, target)
+        if soft < desired:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+        return True
+    except (ValueError, OSError) as e:
+        logging.warning(f"Could not raise open file limit to {target}: {e}")
+        return False
 
 
 def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespace, start_timestamp: str = None):
@@ -40,8 +60,14 @@ def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespac
 
         # Create output manager for this worker
         if args.output_to_files:
+            if raise_fd_soft_limit():
+                max_open_files = 200
+            else:
+                logging.warning("Falling back to smaller file handle cache")
+                max_open_files = 50
             _output_manager = OutputManager(args.output_dir, args.output_file_prefix,
-                                            args.isfastq, max_open_files=50, buffer_size=100)
+                                            args.isfastq, max_open_files=max_open_files,
+                                            buffer_size=500)
             _output_manager.__enter__()
 
         # Create trace logger for this worker if diagnostics enabled
