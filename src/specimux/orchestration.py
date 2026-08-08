@@ -21,7 +21,6 @@ import tempfile
 import timeit
 from collections import Counter, defaultdict
 from datetime import datetime
-from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -180,9 +179,7 @@ def specimux_mp(args, progress_reporter=None):
 
     with Pool(processes=num_processes,
               initializer=init_worker,
-              initargs=(specimens, parameters.max_dist_index, args, start_timestamp)) as pool:
-
-        worker_func = partial(worker, specimens=specimens, args=args)
+              initargs=(specimens, parameters, args, start_timestamp)) as pool:
 
         try:
             pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
@@ -197,11 +194,11 @@ def specimux_mp(args, progress_reporter=None):
                 cumulative_idx = 0
                 for i, batch in enumerate(iter_batches(seq_records, sequence_block_size,
                                                        last_seq_to_output, all_seqs)):
-                    work_item = SequenceBatch(i, batch, parameters, cumulative_idx)
+                    work_item = SequenceBatch(i, batch, cumulative_idx)
                     cumulative_idx += len(batch)
                     yield work_item
             
-            for batch_counts in pool.imap_unordered(worker_func, create_work_items()):
+            for batch_counts in pool.imap_unordered(worker, create_work_items()):
                 if batch_counts:
                     batch_total, batch_matched, batch_unregistered = batch_counts
                     total_processed += batch_total

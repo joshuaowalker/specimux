@@ -361,10 +361,13 @@ class WriteOperation(NamedTuple):
 
 
 class SequenceBatch(NamedTuple):
-    """A batch of sequences to process together."""
+    """A batch of sequences to process together.
+
+    MatchParameters is intentionally not part of the batch: it is delivered
+    once per worker via init_worker rather than pickled with every task.
+    """
     seq_number: int
     seq_records: List  # This now contains actual sequence records, not an iterator
-    parameters: MatchParameters
     start_idx: int     # Starting index for sequence ID generation
 
 

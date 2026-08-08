@@ -46,17 +46,25 @@ def raise_fd_soft_limit(target: int = 4096) -> bool:
         return False
 
 
-def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespace, start_timestamp: str = None):
+def init_worker(specimens: Specimens, parameters: MatchParameters, args: argparse.Namespace,
+                start_timestamp: str = None):
     """Initialize worker process with shared resources"""
-    global _output_manager, _barcode_prefilter, _trace_logger
+    global _specimens, _parameters, _args, _output_manager, _barcode_prefilter, _trace_logger
     try:
         from .cli import setup_logging
         setup_logging(args.debug, args.output_dir if args.output_to_files else None, is_worker=True)
 
+        # Stash shared, read-only state in module globals so it is delivered
+        # once per worker rather than re-pickled with every task
+        _specimens = specimens
+        _parameters = parameters
+        _args = args
+
         if not args.disable_prefilter:
             barcodes = barcodes_for_bloom_prefilter(specimens)
-            cache_path = BloomPrefilter.get_cache_path(barcodes, max_distance)
-            _barcode_prefilter = BloomPrefilter.load_readonly(cache_path, barcodes, max_distance)
+            cache_path = BloomPrefilter.get_cache_path(barcodes, parameters.max_dist_index)
+            _barcode_prefilter = BloomPrefilter.load_readonly(cache_path, barcodes,
+                                                              parameters.max_dist_index)
 
         # Create output manager for this worker
         if args.output_to_files:
@@ -108,12 +116,13 @@ def cleanup_worker():
         except Exception as e:
             logging.error(f"Error cleaning up worker trace logger: {e}")
 
-def worker(work_item: SequenceBatch, specimens: Specimens, args: argparse.Namespace):
+def worker(work_item: SequenceBatch):
     """Process a batch of sequences and write results directly"""
-    global _output_manager, _barcode_prefilter, _trace_logger
+    global _specimens, _parameters, _args, _output_manager, _barcode_prefilter, _trace_logger
+    args = _args
     try:
         write_ops, total_count, matched_count, unregistered_combo_count = process_sequences(
-            work_item.seq_records, work_item.parameters, specimens, args, _barcode_prefilter,
+            work_item.seq_records, _parameters, _specimens, args, _barcode_prefilter,
             _trace_logger, work_item.start_idx)
 
         # Write sequences directly from worker
@@ -141,6 +150,9 @@ def worker(work_item: SequenceBatch, specimens: Specimens, args: argparse.Namesp
         raise WorkerException(e)
 
 # Global variables for worker processes
+_specimens = None
+_parameters = None
+_args = None
 _barcode_prefilter = None
 _output_manager = None
 _trace_logger = None
