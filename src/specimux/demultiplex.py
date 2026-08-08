@@ -23,6 +23,7 @@ from .models import (
     AlignmentResult, CandidateMatch, MatchParameters, PrimerInfo, WriteOperation
 )
 from .alignment import align_seq, get_quality_seq
+from .prefix_index import PrefixBarcodePrefilter
 from .trace import TraceLogger
 
 
@@ -779,6 +780,38 @@ def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, 
             match_pos = primer_match.location()[0] if primer_match.location() else -1
             trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
                                           search_start, search_end, True, primer_match.distance(), match_pos)
+
+        if isinstance(prefilter, PrefixBarcodePrefilter):
+            # One index lookup per primer location returns the only barcodes
+            # that can possibly align within tolerance; align just those.
+            best_matches: Dict[str, AlignmentResult] = {}
+            for l in primer_match.locations():
+                barcode_search_start = l[1] + 1
+                for b, b_rc in prefilter.candidates(sequence, barcode_search_start):
+                    if b not in primer_info.barcodes:
+                        continue
+                    if trace_logger:
+                        trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(),
+                                                        primer_info.name, barcode_search_start,
+                                                        len(sequence), False, -1, -1)
+                    barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
+                                              barcode_search_start, len(sequence), AlignMode.PREFIX)
+                    if barcode_match.matched():
+                        if trace_logger:
+                            match_pos = barcode_match.location()[0] if barcode_match.location() else -1
+                            trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(),
+                                                            primer_info.name, barcode_search_start,
+                                                            len(sequence), True,
+                                                            barcode_match.distance(), match_pos)
+                        prev = best_matches.get(b)
+                        if prev is None or barcode_match.distance() < prev.distance():
+                            best_matches[b] = barcode_match
+            # Add in barcode-registration order to preserve tie-break behavior
+            for b, b_rc in primer_info.barcode_pairs:
+                bm = best_matches.get(b)
+                if bm is not None:
+                    match.add_barcode_match(bm, b, reversed_sequence, which_barcode)
+            return
 
         # Get relevant barcodes for this primer pair
         for b, b_rc in primer_info.barcode_pairs:

@@ -22,7 +22,7 @@ from .constants import TrimMode
 from .databases import Specimens, PassthroughPrefilter
 from .models import MatchParameters, SequenceBatch, WorkerException
 from .trace import TraceLogger
-from .bloom_filter import BloomPrefilter, barcodes_for_bloom_prefilter
+from .prefix_index import PrefixBarcodePrefilter, barcode_pairs_for_prefilter
 from .io_utils import OutputManager, output_write_operation
 from .demultiplex import process_sequences
 
@@ -61,10 +61,9 @@ def init_worker(specimens: Specimens, parameters: MatchParameters, args: argpars
         _args = args
 
         if not args.disable_prefilter:
-            barcodes = barcodes_for_bloom_prefilter(specimens)
-            cache_path = BloomPrefilter.get_cache_path(barcodes, parameters.max_dist_index)
-            _barcode_prefilter = BloomPrefilter.load_readonly(cache_path, barcodes,
-                                                              parameters.max_dist_index)
+            pairs = barcode_pairs_for_prefilter(specimens)
+            _barcode_prefilter = PrefixBarcodePrefilter.try_load_or_build(
+                pairs, parameters.max_dist_index)
 
         # Create output manager for this worker
         if args.output_to_files:

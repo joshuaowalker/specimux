@@ -38,7 +38,7 @@ from .io_utils import (
     detect_file_format, open_sequence_file, read_primers_file, read_specimen_file
 )
 from .trace import TraceLogger
-from .bloom_filter import BloomPrefilter, barcodes_for_bloom_prefilter
+from .prefix_index import PrefixBarcodePrefilter, barcode_pairs_for_prefilter
 from .multiprocessing_utils import init_worker, worker, raise_fd_soft_limit, WorkerException
 from .demultiplex import process_sequences
 from .io_utils import get_gzip_info, output_write_operation
@@ -498,9 +498,9 @@ def specimux(args, progress_reporter=None):
         num_seqs = 0
         prefilter = PassthroughPrefilter()
         if not args.disable_prefilter:
-            barcode_rcs = barcodes_for_bloom_prefilter(specimens)
-            cache_path = BloomPrefilter.get_cache_path(barcode_rcs, parameters.max_dist_index)
-            prefilter = BloomPrefilter.load_readonly(cache_path, barcode_rcs, parameters.max_dist_index)
+            pairs = barcode_pairs_for_prefilter(specimens)
+            prefilter = PrefixBarcodePrefilter.try_load_or_build(pairs, parameters.max_dist_index) \
+                or PassthroughPrefilter()
 
         pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
         
@@ -660,9 +660,9 @@ def setup_match_parameters(args, specimens):
             logging.warning("Barcode prefilter not tested for barcodes longer than 13 nt.  You may need to use --disable-prefilter")
         if max_dist_index > 3:
             logging.warning("Barcode prefilter not tested for edit distance greater than 3.  You may need to use --disable-prefilter")
-        barcode_rcs = barcodes_for_bloom_prefilter(specimens)
-        BloomPrefilter.create_filter(barcode_rcs, parameters.max_dist_index)
-        logging.info("Using Bloom Filter optimization for barcode matching")
+        pairs = barcode_pairs_for_prefilter(specimens)
+        if PrefixBarcodePrefilter.try_load_or_build(pairs, parameters.max_dist_index):
+            logging.info("Using prefix-index optimization for barcode matching")
     else:
         logging.info("Barcode prefiltering disabled, may run slower")
 
