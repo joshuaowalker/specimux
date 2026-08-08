@@ -10,6 +10,8 @@ as well as the barcode prefilter protocol and simple implementations.
 import logging
 from typing import Dict, List, Optional, Set, Protocol
 
+from Bio.Seq import reverse_complement
+
 from .constants import Primer
 from .models import PrimerInfo
 
@@ -157,7 +159,9 @@ class Specimens:
             if ps1 not in self._primers:
                 self._primers[ps1] = p1_info
             primer_info = self._primers[ps1]
-            primer_info.barcodes.add(b1)
+            if b1 not in primer_info.barcodes:
+                primer_info.barcodes.add(b1)
+                primer_info.barcode_pairs.append((b1, reverse_complement(b1)))
             primer_info.specimens.add(specimen_id)
 
         for p2_info in p2_list:
@@ -165,7 +169,9 @@ class Specimens:
             if ps2 not in self._primers:
                 self._primers[ps2] = p2_info
             primer_info = self._primers[ps2]
-            primer_info.barcodes.add(b2)
+            if b2 not in primer_info.barcodes:
+                primer_info.barcodes.add(b2)
+                primer_info.barcode_pairs.append((b2, reverse_complement(b2)))
             primer_info.specimens.add(specimen_id)
 
         self._specimens.append((specimen_id, pool, b1, p1_list, b2, p2_list))

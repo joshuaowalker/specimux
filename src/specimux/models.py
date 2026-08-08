@@ -26,6 +26,7 @@ class PrimerInfo:
         self.direction = direction
         self.primer_rc = reverse_complement(seq.upper())
         self.barcodes = set()
+        self.barcode_pairs = []  # (barcode, reverse_complement) in specimen-file insertion order
         self.specimens = set()
         self.pools = pools
         self.file_index = file_index  # Order in primers.fasta file (0-indexed)
