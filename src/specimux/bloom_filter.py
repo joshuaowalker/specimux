@@ -38,6 +38,7 @@ class BloomPrefilter:
             raise ValueError("Must provide at least one barcode")
 
         self.barcodes = list(set(barcodes))  # Deduplicate
+        self._barcode_set = frozenset(self.barcodes)
         self.barcode_length = len(self.barcodes[0])
         self.max_distance = max_distance
         self.error_rate = error_rate
@@ -157,6 +158,7 @@ class BloomPrefilter:
         """Load BloomPrefilter from file in read-only mode"""
         instance = cls.__new__(cls)
         instance.barcodes = list(set(barcodes))
+        instance._barcode_set = frozenset(instance.barcodes)
         instance.barcode_length = len(instance.barcodes[0])
         instance.max_distance = max_distance
         instance.min_length = instance.barcode_length - max_distance
@@ -178,7 +180,7 @@ class BloomPrefilter:
         # Truncate sequence to minimum length
         truncated = sequence[:self.min_length]
 
-        if barcode not in self.barcodes:
+        if barcode not in self._barcode_set:
             return True
 
         # Concatenate in same order as when building filter
