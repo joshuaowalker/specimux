@@ -13,7 +13,6 @@ from enum import Enum
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
-from Bio.Seq import reverse_complement
 from Bio.SeqRecord import SeqRecord
 
 from .constants import (
@@ -705,7 +704,7 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
     for fwd_primer in specimens.get_primers(Primer.FWD):
         for rev_primer in specimens.get_paired_primers(fwd_primer.primer):
             if orientation in [Orientation.FORWARD, Orientation.UNKNOWN]:
-                candidate_match_id = f"{sequence_id}_match_{match_counter}"
+                candidate_match_id = f"{sequence_id}_match_{match_counter}" if trace_logger else None
                 match = CandidateMatch(seq, specimens.b_length(), candidate_match_id)
                 match_one_end(prefilter, match, parameters, rs, True, fwd_primer,
                               Primer.FWD, Barcode.B1, trace_logger, sequence_id)
@@ -726,7 +725,7 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
                     match_counter += 1
 
             if orientation in [Orientation.REVERSE, Orientation.UNKNOWN]:
-                candidate_match_id = f"{sequence_id}_match_{match_counter}"
+                candidate_match_id = f"{sequence_id}_match_{match_counter}" if trace_logger else None
                 match = CandidateMatch(rseq, specimens.b_length(), candidate_match_id)
                 match_one_end(prefilter, match, parameters, s, True, fwd_primer,
                               Primer.FWD, Barcode.B1, trace_logger, sequence_id)
@@ -760,7 +759,7 @@ def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, 
 
     primer = primer_info.primer
     primer_rc = primer_info.primer_rc
-    search_start = len(sequence) - parameters.search_len
+    search_start = max(0, len(sequence) - parameters.search_len)
     search_end = len(sequence)
     
     # Log primer search attempt
@@ -782,10 +781,7 @@ def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, 
                                           search_start, search_end, True, primer_match.distance(), match_pos)
 
         # Get relevant barcodes for this primer pair
-        barcodes = primer_info.barcodes
-
-        for b in barcodes:
-            b_rc = reverse_complement(b)
+        for b, b_rc in primer_info.barcode_pairs:
             bd = None
             bm = None
             bc = None
