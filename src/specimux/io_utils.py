@@ -115,8 +115,9 @@ class CachedFileManager:
         fcntl.lockf(self.locks[filename], fcntl.LOCK_EX)
         try:
             f.write(buffer_data)
+            # flush() under the lock is sufficient for interleaving safety with
+            # append-mode writes; fsync is a durability barrier not needed mid-run
             f.flush()
-            os.fsync(f.fileno())  # Ensure data is written to disk
         finally:
             fcntl.lockf(self.locks[filename], fcntl.LOCK_UN)
 
