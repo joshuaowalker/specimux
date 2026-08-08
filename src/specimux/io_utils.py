@@ -186,6 +186,7 @@ class OutputManager:
         self.prefix = prefix
         self.is_fastq = is_fastq
         self.file_manager = CachedFileManager(max_open_files, buffer_size, output_dir)
+        self._created_dirs = set()  # Memoize makedirs to avoid a syscall per written read
 
     def __enter__(self):
         os.makedirs(self.output_dir, exist_ok=True)
@@ -194,6 +195,12 @@ class OutputManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         return self.file_manager.__exit__(exc_type, exc_val, exc_tb)
+
+    def _ensure_dir(self, dirname: str):
+        """Create a directory if this manager hasn't already seen it."""
+        if dirname not in self._created_dirs:
+            os.makedirs(dirname, exist_ok=True)
+            self._created_dirs.add(dirname)
 
     def _make_filename(self, sample_id: str, pool: str, p1: str, p2: str, resolution_type: ResolutionType) -> str:
         """Create a filename with match-type-first organization."""
@@ -234,7 +241,7 @@ class OutputManager:
                                            write_op.primer_pool, primer_pair, relative_path)
 
         # Ensure directory exists
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        self._ensure_dir(os.path.dirname(filename))
 
         # Format header to include primer information
         header = (f"{write_op.seq_id} {write_op.distance_code} "
@@ -263,7 +270,7 @@ class OutputManager:
                                           f"{self.prefix}{safe_id}{extension}")
             
             # Ensure the pool full directory exists
-            os.makedirs(os.path.dirname(pool_full_path), exist_ok=True)
+            self._ensure_dir(os.path.dirname(pool_full_path))
             
             # Write to pool-level aggregation directory
             self.file_manager.write(pool_full_path, output_content)
