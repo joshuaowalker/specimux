@@ -656,10 +656,10 @@ def setup_match_parameters(args, specimens):
     parameters = MatchParameters(primer_thresholds, max_dist_index, max_search_area, preorient)
 
     if not args.disable_prefilter:
-        if specimens.b_length() > 13:
-            logging.warning("Barcode prefilter not tested for barcodes longer than 13 nt.  You may need to use --disable-prefilter")
         if max_dist_index > 3:
-            logging.warning("Barcode prefilter not tested for edit distance greater than 3.  You may need to use --disable-prefilter")
+            logging.warning("Prefix index build time grows rapidly with barcode edit distance; "
+                            "the first run may be slow (the built index is cached for reuse). "
+                            "Use --disable-prefilter to skip prefiltering entirely.")
         pairs = barcode_pairs_for_prefilter(specimens)
         if PrefixBarcodePrefilter.try_load_or_build(pairs, parameters.max_dist_index):
             logging.info("Using prefix-index optimization for barcode matching")
