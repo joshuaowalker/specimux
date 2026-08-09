@@ -86,6 +86,29 @@ def test_deterministic_build():
     assert a._index == b._index
 
 
+def test_long_barcodes_use_capped_prefix_with_no_false_negatives():
+    """For barcodes longer than the cap allows, the shorter prefix must
+    remain a strict superset filter."""
+    rng = random.Random(555)
+    max_dist = 2
+    barcodes = _random_barcodes(16, 20, rng)
+    pairs = [(b, reverse_complement(b)) for b in barcodes]
+    prefilter = PrefixBarcodePrefilter.build(pairs, max_dist)
+    assert prefilter.prefix_len == 13  # capped below 20 - 2
+
+    checked = 0
+    for _ in range(1500):
+        b, b_rc = rng.choice(pairs)
+        window = _mutate(b_rc, rng.randint(0, max_dist), rng) + \
+            "".join(rng.choice(ALPHABET) for _ in range(30))
+        r = edlib.align(b_rc, window, "SHW", "distance", max_dist)
+        if r["editDistance"] == -1:
+            continue
+        checked += 1
+        assert (b, b_rc) in prefilter.candidates(window, 0)
+    assert checked > 500
+
+
 def test_mixed_length_barcodes_degrade_gracefully():
     pairs = [("ACGTACGTACGTA", reverse_complement("ACGTACGTACGTA")),
              ("ACGTACGT", reverse_complement("ACGTACGT"))]

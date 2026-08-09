@@ -25,7 +25,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 _ALPHABET = "ACGT"
-_CACHE_FORMAT_VERSION = 1
+_CACHE_FORMAT_VERSION = 2
+# Cap on index key length: bounds build time and index size for long
+# barcodes (a shorter prefix is still a strict superset filter, just less
+# selective; at 13 the candidate rate is already <0.1 per window).
+_MAX_PREFIX_LEN = 13
 
 
 def barcode_pairs_for_prefilter(specimens) -> List[Tuple[str, str]]:
@@ -84,8 +88,12 @@ class PrefixBarcodePrefilter:
                  index: Dict[str, tuple]):
         self.barcode_pairs = barcode_pairs
         self.max_distance = max_distance
-        self.prefix_len = len(barcode_pairs[0][0]) - max_distance
+        self.prefix_len = self._prefix_len_for(barcode_pairs, max_distance)
         self._index = index
+
+    @staticmethod
+    def _prefix_len_for(barcode_pairs: List[Tuple[str, str]], max_distance: int) -> int:
+        return min(len(barcode_pairs[0][0]) - max_distance, _MAX_PREFIX_LEN)
 
     def candidates(self, sequence: str, start: int) -> tuple:
         """Barcodes worth aligning at a window beginning at start."""
@@ -96,7 +104,7 @@ class PrefixBarcodePrefilter:
         lengths = {len(b) for b, _ in barcode_pairs}
         if len(lengths) != 1:
             raise ValueError(f"Prefix index requires uniform barcode length, got {sorted(lengths)}")
-        prefix_len = lengths.pop() - max_distance
+        prefix_len = min(lengths.pop() - max_distance, _MAX_PREFIX_LEN)
         if prefix_len < 1:
             raise ValueError("max_distance too large for barcode length")
 
@@ -113,7 +121,8 @@ class PrefixBarcodePrefilter:
     @staticmethod
     def get_cache_path(barcode_pairs: List[Tuple[str, str]], max_distance: int) -> Path:
         digest = hashlib.sha256()
-        digest.update(f"v{_CACHE_FORMAT_VERSION}:d{max_distance}:".encode())
+        prefix_len = PrefixBarcodePrefilter._prefix_len_for(barcode_pairs, max_distance)
+        digest.update(f"v{_CACHE_FORMAT_VERSION}:d{max_distance}:p{prefix_len}:".encode())
         for b, _ in barcode_pairs:
             digest.update(b.encode())
             digest.update(b",")
