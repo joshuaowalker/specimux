@@ -53,6 +53,11 @@ class AlignmentResult:
     def locations(self):
         return self._edlib_match['locations']
 
+    def copy(self) -> 'AlignmentResult':
+        """Independent copy; a shallow dict copy suffices because location
+        lists are rebound on adjustment, never mutated in place."""
+        return AlignmentResult(self._edlib_match.copy())
+
     def reversed(self, seq_length):
         """Return a new MatchResult with locations relative to the reversed sequence."""
         m = AlignmentResult(self._edlib_match.copy())

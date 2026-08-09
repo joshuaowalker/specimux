@@ -11,7 +11,7 @@ import argparse
 import logging
 from enum import Enum
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from Bio.SeqRecord import SeqRecord
 
@@ -702,15 +702,29 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
     matches = []
     match_counter = 0
 
+    # Each end result depends only on (primer, strand), not on the pairing,
+    # so compute it once per read and reuse it across primer pairs.
+    end_cache: Dict[Tuple[int, bool], EndMatch] = {}
+
+    def end_for(primer_info: PrimerInfo, use_rs: bool, which_primer: Primer,
+                which_barcode: Barcode) -> EndMatch:
+        key = (id(primer_info), use_rs)
+        end = end_cache.get(key)
+        if end is None:
+            end = compute_end_match(prefilter, parameters, rs if use_rs else s, primer_info,
+                                    which_primer, which_barcode, trace_logger, sequence_id)
+            end_cache[key] = end
+        return end
+
     for fwd_primer in specimens.get_primers(Primer.FWD):
         for rev_primer in specimens.get_paired_primers(fwd_primer.primer):
             if orientation in [Orientation.FORWARD, Orientation.UNKNOWN]:
                 candidate_match_id = f"{sequence_id}_match_{match_counter}" if trace_logger else None
                 match = CandidateMatch(seq, specimens.b_length(), candidate_match_id)
-                match_one_end(prefilter, match, parameters, rs, True, fwd_primer,
-                              Primer.FWD, Barcode.B1, trace_logger, sequence_id)
-                match_one_end(prefilter, match, parameters, s, False, rev_primer,
-                              Primer.REV, Barcode.B2, trace_logger, sequence_id)
+                apply_end_match(match, end_for(fwd_primer, True, Primer.FWD, Barcode.B1),
+                                fwd_primer, True, Primer.FWD, Barcode.B1)
+                apply_end_match(match, end_for(rev_primer, False, Primer.REV, Barcode.B2),
+                                rev_primer, False, Primer.REV, Barcode.B2)
                 # Only add matches where at least one primer was found
                 if match.p1_match or match.p2_match:
                     # Determine and set pool for this match
@@ -728,10 +742,10 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
             if orientation in [Orientation.REVERSE, Orientation.UNKNOWN]:
                 candidate_match_id = f"{sequence_id}_match_{match_counter}" if trace_logger else None
                 match = CandidateMatch(rseq, specimens.b_length(), candidate_match_id)
-                match_one_end(prefilter, match, parameters, s, True, fwd_primer,
-                              Primer.FWD, Barcode.B1, trace_logger, sequence_id)
-                match_one_end(prefilter, match, parameters, rs, False, rev_primer,
-                              Primer.REV, Barcode.B2, trace_logger, sequence_id)
+                apply_end_match(match, end_for(fwd_primer, False, Primer.FWD, Barcode.B1),
+                                fwd_primer, True, Primer.FWD, Barcode.B1)
+                apply_end_match(match, end_for(rev_primer, True, Primer.REV, Barcode.B2),
+                                rev_primer, False, Primer.REV, Barcode.B2)
                 # Only add matches where at least one primer was found
                 if match.p1_match or match.p2_match:
                     # Determine and set pool for this match
@@ -751,12 +765,46 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
     # for cases where multiple primer pairs cover nearly identical sequence regions.
     return matches
 
+class EndMatch(NamedTuple):
+    """Result of searching one end of an oriented sequence for a primer and
+    its adjacent barcodes. Pure data so it can be cached per (primer, strand)
+    and reused across primer pairs."""
+    primer_match: Optional[AlignmentResult]
+    barcode_matches: List[Tuple[str, AlignmentResult]]
+
+
+def apply_end_match(match: CandidateMatch, end: 'EndMatch', primer_info: PrimerInfo,
+                    reversed_sequence: bool, which_primer: Primer, which_barcode: Barcode) -> None:
+    """Copy a (possibly cached) EndMatch into a CandidateMatch.
+
+    AlignmentResults are copied because trim_locations() later mutates the
+    stored objects in place; sharing them across matches would corrupt
+    coordinates when a read yields multiple write operations.
+    """
+    if end.primer_match is None:
+        return
+    match.set_primer_match(end.primer_match.copy(), primer_info, reversed_sequence, which_primer)
+    for b, bm in end.barcode_matches:
+        match.add_barcode_match(bm.copy(), b, reversed_sequence, which_barcode)
+
+
 def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, parameters: MatchParameters, sequence: str,
                   reversed_sequence: bool, primer_info: PrimerInfo,
                   which_primer: Primer, which_barcode: Barcode,
                   trace_logger: Optional[TraceLogger] = None,
                   sequence_id: Optional[str] = None) -> None:
     """Match primers and barcodes at one end of the sequence."""
+    end = compute_end_match(prefilter, parameters, sequence, primer_info,
+                            which_primer, which_barcode, trace_logger, sequence_id)
+    apply_end_match(match, end, primer_info, reversed_sequence, which_primer, which_barcode)
+
+
+def compute_end_match(prefilter: Optional[BarcodePrefilter], parameters: MatchParameters,
+                      sequence: str, primer_info: PrimerInfo,
+                      which_primer: Primer, which_barcode: Barcode,
+                      trace_logger: Optional[TraceLogger] = None,
+                      sequence_id: Optional[str] = None) -> 'EndMatch':
+    """Search one end of an oriented sequence for a primer and its barcodes."""
 
     primer = primer_info.primer
     primer_rc = primer_info.primer_rc
@@ -773,8 +821,6 @@ def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, 
 
     # If we found matching primers, look for corresponding barcodes
     if primer_match.matched():
-        match.set_primer_match(primer_match, primer_info, reversed_sequence, which_primer)
-        
         # Log successful primer match
         if trace_logger:
             match_pos = primer_match.location()[0] if primer_match.location() else -1
@@ -806,14 +852,16 @@ def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, 
                         prev = best_matches.get(b)
                         if prev is None or barcode_match.distance() < prev.distance():
                             best_matches[b] = barcode_match
-            # Add in barcode-registration order to preserve tie-break behavior
+            # Collect in barcode-registration order to preserve tie-break behavior
+            barcode_matches = []
             for b, b_rc in primer_info.barcode_pairs:
                 bm = best_matches.get(b)
                 if bm is not None:
-                    match.add_barcode_match(bm, b, reversed_sequence, which_barcode)
-            return
+                    barcode_matches.append((b, bm))
+            return EndMatch(primer_match, barcode_matches)
 
         # Get relevant barcodes for this primer pair
+        barcode_matches = []
         for b, b_rc in primer_info.barcode_pairs:
             bd = None
             bm = None
@@ -847,10 +895,12 @@ def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, 
                         bc = b
                         
             if bm:
-                match.add_barcode_match(bm, bc, reversed_sequence, which_barcode)
+                barcode_matches.append((bc, bm))
+        return EndMatch(primer_match, barcode_matches)
     else:
-        # Log failed primer search  
+        # Log failed primer search
         if trace_logger:
             trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
                                           search_start, search_end, False, -1, -1)
+        return EndMatch(None, [])
 
