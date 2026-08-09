@@ -71,7 +71,6 @@ pip install -e ".[dev]"
 Specimux automatically installs these dependencies:
 - edlib>=1.1.2 (sequence alignment)
 - biopython>=1.81 (sequence handling)
-- pybloomfilter3>=0.7.3 (performance optimization)
 - cachetools>=5.3.0 (file handle caching)
 - tqdm>=4.65.0 (progress bars)
 - plotly>=5.0.0 (visualization support)
@@ -503,9 +502,10 @@ All standard `specimux` arguments (edit distances, trimming modes, diagnostics, 
 
 ### Performance Optimizations
 
-#### Bloom Filter Prefiltering (v0.4)
-- Uses hashing before sequence alignment to speed up barcode matching
-- Best for barcodes ≤13nt and edit distances ≤3
+#### Prefix-Index Prefiltering (v0.8)
+- An inverted index maps each barcode-window prefix directly to the only barcodes worth aligning, replacing per-barcode probing with a single lookup
+- Exact superset filter: cannot produce false negatives, works for any barcode length
+- Built once per barcode set (seconds for typical sets) and cached in ~/.specimux/cache/
 - Can disable with --disable-prefilter
 
 #### Sequence Pre-orientation
@@ -688,6 +688,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.8.0-dev (August 2026): Performance overhaul, roughly halving demultiplexing time and CPU use. A prefix inverted index replaces the Bloom filter for barcode prefiltering (exact superset filter with no false negatives, no barcode length limit, removes the pybloomfilter3 dependency); per-primer end matches are computed once per read and reused across primer pairs; specimen lookups are dict-indexed instead of linear scans; file output no longer fsyncs on every buffer flush. Output is now deterministic across runs (barcode tie-breaks use specimen-file order instead of set iteration order). Fixes silent coordinate corruption for reads shorter than the primer search window
 - 0.7.2 (March 2026): Add profile system for reusable parameter presets (`-p/--profile`, `--list-profiles`). Profiles are YAML files stored in `~/.config/specimux/profiles/` or bundled with the package, with version compatibility checking and key validation. Add JSONL progress reporting (`--progress-file`) for integration with orchestration tools. Deprecate `specimux-watch` in favor of `specimux-suite live`
 - 0.7.1 (March 2026): Deduplicate "No Specimens for combo" warning that flooded output with thousands of per-sequence messages. Unregistered barcode combinations now produce a single end-of-run summary warning instead. Per-sequence detail remains available at DEBUG level (-d3). PrimerInfo objects now display their name in log messages instead of memory addresses. Fixes #9
 - 0.7.0 (January 2026): Add dereplication to prevent artificial read amplification. When complex primer pools cause the same read to match multiple primer permutations, specimux now selects the best match per specimen/barcode group by default. New `--dereplicate` option replaces `--resolve-multiple-matches` with values `best` (default) and `none`. The `downgrade-full` strategy has been removed. Also fixes a bug where ~180 reads per run were silently dropped when trimming would produce empty sequences (now routed to unknown output).
@@ -713,7 +714,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 Specimux maintains several directory structures for efficient operation:
 
 ~/.specimux/cache/
-- Stores cached Bloom filters for barcode matching
+- Stores cached prefix indexes for barcode matching
 - Safe to delete if issues arise
 - Will be recreated as needed
 
