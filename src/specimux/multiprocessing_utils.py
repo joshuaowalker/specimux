@@ -12,9 +12,13 @@ import atexit
 import logging
 import multiprocessing
 import os
-import resource
 import sys
 import traceback
+
+try:
+    import resource  # Unix only; absent on Windows
+except ImportError:
+    resource = None
 from datetime import datetime
 from typing import List, Optional, Tuple
 
@@ -33,8 +37,12 @@ def raise_fd_soft_limit(target: int = 4096) -> bool:
     Each cached output file can hold two fds (data file + lock file), and
     macOS defaults to a 256-fd soft limit per process. Returns True if the
     soft limit is at least target (or was successfully raised to the hard
-    limit), False if it could not be raised.
+    limit), False if it could not be raised. On platforms without the
+    resource module (Windows) there is no fd soft limit to raise; returns
+    False so callers use the conservative file handle cache size.
     """
+    if resource is None:
+        return False
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         desired = target if hard == resource.RLIM_INFINITY else min(hard, target)
