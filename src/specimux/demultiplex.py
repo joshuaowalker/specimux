@@ -707,18 +707,66 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
     s = str(seq.seq)
     rs = str(rseq.seq)
 
+    # Primer and end results depend only on (primer, strand), not on the
+    # pairing, so compute each once per read and reuse across primer pairs.
+    # The primer cache is shared between orientation detection and end
+    # matching: a primer at the front of one strand is the same alignment
+    # problem as its reverse complement at the end of the other strand.
+    primer_cache: Dict[Tuple[int, bool], AlignmentResult] = {}
+    end_cache: Dict[Tuple[int, bool], EndMatch] = {}
+
+    def primer_for(primer_info: PrimerInfo, use_rs: bool, which_primer: Primer) -> AlignmentResult:
+        key = (id(primer_info), use_rs)
+        result = primer_cache.get(key)
+        if result is None:
+            result = compute_primer_match(parameters, rs if use_rs else s, primer_info,
+                                          which_primer, trace_logger, sequence_id)
+            primer_cache[key] = result
+        return result
+
+    def end_for(primer_info: PrimerInfo, use_rs: bool, which_primer: Primer,
+                which_barcode: Barcode) -> EndMatch:
+        key = (id(primer_info), use_rs)
+        end = end_cache.get(key)
+        if end is None:
+            end = compute_end_match(prefilter, parameters, rs if use_rs else s, primer_info,
+                                    which_primer, which_barcode, trace_logger, sequence_id,
+                                    primer_match=primer_for(primer_info, use_rs, which_primer))
+            end_cache[key] = end
+        return end
+
     if parameters.preorient:
-        orientation, fwd_score, rev_score = determine_orientation(
-            parameters, s, rs,
-            specimens.get_primers(Primer.FWD),
-            specimens.get_primers(Primer.REV))
-        
+        # A forward-oriented read carries each forward primer at the end of
+        # the rs view and each reverse primer at the end of the s view;
+        # a reverse-oriented read is the mirror image. These are exactly the
+        # primer searches the candidate branches below need, so orientation
+        # detection costs no extra alignments.
+        fwd_score = 0
+        rev_score = 0
+        for primer in specimens.get_primers(Primer.FWD):
+            if primer_for(primer, True, Primer.FWD).matched():
+                fwd_score += 1
+            if primer_for(primer, False, Primer.FWD).matched():
+                rev_score += 1
+        for primer in specimens.get_primers(Primer.REV):
+            if primer_for(primer, False, Primer.REV).matched():
+                fwd_score += 1
+            if primer_for(primer, True, Primer.REV).matched():
+                rev_score += 1
+
+        if fwd_score > 0 and rev_score == 0:
+            orientation = Orientation.FORWARD
+        elif rev_score > 0 and fwd_score == 0:
+            orientation = Orientation.REVERSE
+        else:
+            orientation = Orientation.UNKNOWN
+
         # Log orientation detection for trace
         if trace_logger:
             confidence = 0.0
             if fwd_score + rev_score > 0:
                 confidence = abs(fwd_score - rev_score) / (fwd_score + rev_score)
-            trace_logger.log_orientation_detected(sequence_id, orientation.to_string(), 
+            trace_logger.log_orientation_detected(sequence_id, orientation.to_string(),
                                                  fwd_score, rev_score, confidence)
     else:
         orientation = Orientation.UNKNOWN
@@ -728,20 +776,6 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
 
     matches = []
     match_counter = 0
-
-    # Each end result depends only on (primer, strand), not on the pairing,
-    # so compute it once per read and reuse it across primer pairs.
-    end_cache: Dict[Tuple[int, bool], EndMatch] = {}
-
-    def end_for(primer_info: PrimerInfo, use_rs: bool, which_primer: Primer,
-                which_barcode: Barcode) -> EndMatch:
-        key = (id(primer_info), use_rs)
-        end = end_cache.get(key)
-        if end is None:
-            end = compute_end_match(prefilter, parameters, rs if use_rs else s, primer_info,
-                                    which_primer, which_barcode, trace_logger, sequence_id)
-            end_cache[key] = end
-        return end
 
     for fwd_primer in specimens.get_primers(Primer.FWD):
         for rev_primer in specimens.get_paired_primers(fwd_primer.primer):
@@ -826,29 +860,48 @@ def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, 
     apply_end_match(match, end, primer_info, reversed_sequence, which_primer, which_barcode)
 
 
+def compute_primer_match(parameters: MatchParameters, sequence: str, primer_info: PrimerInfo,
+                         which_primer: Primer,
+                         trace_logger: Optional[TraceLogger] = None,
+                         sequence_id: Optional[str] = None) -> AlignmentResult:
+    """Search the end of an oriented sequence for a primer.
+
+    Pure in (primer, strand), so the result can be cached per read and shared
+    between orientation detection and end matching.
+    """
+    search_start = max(0, len(sequence) - parameters.search_len)
+    search_end = len(sequence)
+
+    primer_match = align_seq(primer_info.primer_rc, sequence,
+                             parameters.max_dist_primers[primer_info.primer],
+                             search_start, search_end)
+
+    if trace_logger:
+        matched = primer_match.matched()
+        match_pos = primer_match.location()[0] if matched and primer_match.location() else -1
+        trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
+                                       search_start, search_end, matched,
+                                       primer_match.distance() if matched else -1, match_pos)
+    return primer_match
+
+
 def compute_end_match(prefilter: Optional[BarcodePrefilter], parameters: MatchParameters,
                       sequence: str, primer_info: PrimerInfo,
                       which_primer: Primer, which_barcode: Barcode,
                       trace_logger: Optional[TraceLogger] = None,
-                      sequence_id: Optional[str] = None) -> 'EndMatch':
-    """Search one end of an oriented sequence for a primer and its barcodes."""
+                      sequence_id: Optional[str] = None,
+                      primer_match: Optional[AlignmentResult] = None) -> 'EndMatch':
+    """Search one end of an oriented sequence for a primer and its barcodes.
 
-    primer = primer_info.primer
-    primer_rc = primer_info.primer_rc
-    search_start = max(0, len(sequence) - parameters.search_len)
-    search_end = len(sequence)
-
-    primer_match = align_seq(primer_rc, sequence, parameters.max_dist_primers[primer],
-                             search_start, search_end)
+    A precomputed primer_match (from compute_primer_match on the same oriented
+    sequence) may be supplied to avoid re-aligning the primer.
+    """
+    if primer_match is None:
+        primer_match = compute_primer_match(parameters, sequence, primer_info,
+                                            which_primer, trace_logger, sequence_id)
 
     # If we found matching primers, look for corresponding barcodes
     if primer_match.matched():
-        # Log successful primer match
-        if trace_logger:
-            match_pos = primer_match.location()[0] if primer_match.location() else -1
-            trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
-                                          search_start, search_end, True, primer_match.distance(), match_pos)
-
         if isinstance(prefilter, PrefixBarcodePrefilter):
             # One index lookup per primer location returns the only barcodes
             # that can possibly align within tolerance; align just those.
@@ -914,9 +967,5 @@ def compute_end_match(prefilter: Optional[BarcodePrefilter], parameters: MatchPa
                 barcode_matches.append((bc, bm))
         return EndMatch(primer_match, barcode_matches)
     else:
-        # Log failed primer search
-        if trace_logger:
-            trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
-                                          search_start, search_end, False, -1, -1)
         return EndMatch(None, [])
 
