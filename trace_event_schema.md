@@ -113,7 +113,7 @@ timestamp | worker_id | event_seq | sequence_id | MATCH_SCORED | candidate_match
 ```
 timestamp | worker_id | event_seq | sequence_id | MATCH_SELECTED | selection_strategy | forward_primer | reverse_primer | forward_barcode | reverse_barcode | pool | is_unique
 ```
-- `selection_strategy`: Enum: `unique`, `first`, `strict`, `all`
+- `selection_strategy`: Enum: `best` (dereplication selected the best match per specimen/barcode group), `all` (`--dereplicate none`, all equivalent matches output)
 - `forward_primer`: String, selected forward primer
 - `reverse_primer`: String, selected reverse primer
 - `forward_barcode`: String, selected forward barcode (or "none")
@@ -274,7 +274,7 @@ timestamp | worker_id | event_seq | sequence_id | BARCODE_SEARCH | barcode_name 
 2025-01-10T10:15:23.458	worker_1	3	seq123#00042#worker_1	PRIMER_MATCHED	seq123#00042#worker_1_match_0	both	ITS1F	ITS4	2	1	ITS	as_is
 2025-01-10T10:15:23.459	worker_1	4	seq123#00042#worker_1	BARCODE_MATCHED	seq123#00042#worker_1_match_0	both	BC01	BC15	1	0	ITS1F	ITS4
 2025-01-10T10:15:23.460	worker_1	5	seq123#00042#worker_1	MATCH_SCORED	seq123#00042#worker_1_match_0	ITS1F	ITS4	BC01	BC15	4	both	0.25
-2025-01-10T10:15:23.461	worker_1	6	seq123#00042#worker_1	MATCH_SELECTED	unique	ITS1F	ITS4	BC01	BC15	ITS	true
+2025-01-10T10:15:23.461	worker_1	6	seq123#00042#worker_1	MATCH_SELECTED	best	ITS1F	ITS4	BC01	BC15	ITS	true
 2025-01-10T10:15:23.462	worker_1	7	seq123#00042#worker_1	SPECIMEN_RESOLVED	Sample_123	full_match	ITS	ITS1F	ITS4	BC01	BC15
 2025-01-10T10:15:23.463	worker_1	8	seq123#00042#worker_1	SEQUENCE_OUTPUT	Sample_123	ITS	ITS1F-ITS4	full/ITS/ITS1F-ITS4/Sample_123.fastq
 ```
@@ -286,7 +286,7 @@ timestamp | worker_id | event_seq | sequence_id | BARCODE_SEARCH | barcode_name 
 2025-01-10T10:15:24.102	worker_2	44	seq456#00100#worker_2	PRIMER_MATCHED	seq456#00100#worker_2_match_0	both	RPB2-5F	RPB2-7R	1	2	RPB2	as_is
 2025-01-10T10:15:24.103	worker_2	45	seq456#00100#worker_2	BARCODE_MATCHED	seq456#00100#worker_2_match_0	forward_only	BC05	none	0	-1	RPB2-5F	RPB2-7R
 2025-01-10T10:15:24.104	worker_2	46	seq456#00100#worker_2	MATCH_SCORED	seq456#00100#worker_2_match_0	RPB2-5F	RPB2-7R	BC05	none	3	forward_only	0.5
-2025-01-10T10:15:24.105	worker_2	47	seq456#00100#worker_2	MATCH_SELECTED	unique	RPB2-5F	RPB2-7R	BC05	none	RPB2	true
+2025-01-10T10:15:24.105	worker_2	47	seq456#00100#worker_2	MATCH_SELECTED	best	RPB2-5F	RPB2-7R	BC05	none	RPB2	true
 2025-01-10T10:15:24.106	worker_2	48	seq456#00100#worker_2	SPECIMEN_RESOLVED	FWD_ONLY_BC05	partial_forward	RPB2	RPB2-5F	RPB2-7R	BC05	none
 2025-01-10T10:15:24.107	worker_2	49	seq456#00100#worker_2	SEQUENCE_OUTPUT	FWD_ONLY_BC05	RPB2	RPB2-5F-RPB2-7R	partial/RPB2/RPB2-5F-RPB2-7R/FWD_ONLY_BC05.fastq
 ```

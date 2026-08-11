@@ -105,6 +105,22 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
 
 
 
+def _log_match_selected(trace_logger: Optional[TraceLogger], sequence_id: Optional[str],
+                        match: CandidateMatch, strategy: str, pool: Optional[str],
+                        is_unique: bool, b1: Optional[str] = None, b2: Optional[str] = None):
+    """Emit a MATCH_SELECTED trace event for a match chosen for output."""
+    if not trace_logger:
+        return
+    p1_name = match.get_p1().name if match.get_p1() else 'none'
+    p2_name = match.get_p2().name if match.get_p2() else 'none'
+    if b1 is None:
+        b1 = match.best_b1()[0] if match.has_b1_match() and match.best_b1() else 'none'
+    if b2 is None:
+        b2 = match.best_b2()[0] if match.has_b2_match() and match.best_b2() else 'none'
+    trace_logger.log_match_selected(sequence_id, strategy, p1_name, p2_name,
+                                    b1, b2, pool or 'none', is_unique)
+
+
 def process_sequences(seq_records: List[SeqRecord],
                       parameters: MatchParameters,
                       specimens: Specimens,
@@ -165,6 +181,13 @@ def process_sequences(seq_records: List[SeqRecord],
                             pool = specimens.get_specimen_pool(specimen_id)
                             match.set_pool(pool)
 
+                            if trace_logger:
+                                _log_match_selected(trace_logger, sequence_id, match, 'best',
+                                                    pool, len(derep_results) == 1, b1, b2)
+                                trace_logger.log_specimen_resolved(
+                                    sequence_id, match, specimen_id,
+                                    resolution_type.to_string(), pool)
+
                             op = create_write_operation(specimen_id, args, match.sequence, match,
                                                         resolution_type, sequence_id, trace_logger)
                             if op is not None:
@@ -172,6 +195,8 @@ def process_sequences(seq_records: List[SeqRecord],
                             has_full_match = True
                         else:
                             # Partial/unknown - handle normally via resolve_specimen
+                            _log_match_selected(trace_logger, sequence_id, match, 'best',
+                                                match.get_pool(), len(derep_results) == 1)
                             final_sample_id, resolution_type = resolve_specimen(
                                 match, specimens, trace_logger, sequence_id)
                             if resolution_type == ResolutionType.UNKNOWN and match.has_full_match():
@@ -185,6 +210,8 @@ def process_sequences(seq_records: List[SeqRecord],
                 else:
                     # No dereplication: process all equivalent matches
                     for match in best_matches:
+                        _log_match_selected(trace_logger, sequence_id, match, 'all',
+                                            match.get_pool(), len(best_matches) == 1)
                         # Determine final sample ID for this match (includes specimen resolution and fallback logic)
                         final_sample_id, resolution_type = resolve_specimen(
                             match, specimens, trace_logger, sequence_id)
@@ -810,11 +837,6 @@ def compute_end_match(prefilter: Optional[BarcodePrefilter], parameters: MatchPa
     primer_rc = primer_info.primer_rc
     search_start = max(0, len(sequence) - parameters.search_len)
     search_end = len(sequence)
-    
-    # Log primer search attempt
-    if trace_logger:
-        trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
-                                      search_start, search_end, False, -1, -1)
 
     primer_match = align_seq(primer_rc, sequence, parameters.max_dist_primers[primer],
                              search_start, search_end)
@@ -836,19 +858,17 @@ def compute_end_match(prefilter: Optional[BarcodePrefilter], parameters: MatchPa
                 for b, b_rc in prefilter.candidates(sequence, barcode_search_start):
                     if b not in primer_info.barcodes:
                         continue
-                    if trace_logger:
-                        trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(),
-                                                        primer_info.name, barcode_search_start,
-                                                        len(sequence), False, -1, -1)
                     barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
                                               barcode_search_start, len(sequence), AlignMode.PREFIX)
+                    if trace_logger:
+                        matched = barcode_match.matched()
+                        match_pos = barcode_match.location()[0] if matched and barcode_match.location() else -1
+                        trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(),
+                                                        primer_info.name, barcode_search_start,
+                                                        len(sequence), matched,
+                                                        barcode_match.distance() if matched else -1,
+                                                        match_pos)
                     if barcode_match.matched():
-                        if trace_logger:
-                            match_pos = barcode_match.location()[0] if barcode_match.location() else -1
-                            trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(),
-                                                            primer_info.name, barcode_search_start,
-                                                            len(sequence), True,
-                                                            barcode_match.distance(), match_pos)
                         prev = best_matches.get(b)
                         if prev is None or barcode_match.distance() < prev.distance():
                             best_matches[b] = barcode_match
@@ -870,25 +890,21 @@ def compute_end_match(prefilter: Optional[BarcodePrefilter], parameters: MatchPa
                 barcode_search_start = l[1] + 1
                 barcode_search_end = len(sequence)
                 target_seq = sequence[barcode_search_start:]
-                
-                # Log barcode search attempt 
-                if trace_logger:
-                    trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(), primer_info.name,
-                                                   barcode_search_start, barcode_search_end, False, -1, -1)
-                
+
                 if prefilter and not prefilter.match(b_rc, target_seq):
                     continue
 
                 barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
                                           barcode_search_start, barcode_search_end, AlignMode.PREFIX)
+                if trace_logger:
+                    matched = barcode_match.matched()
+                    match_pos = barcode_match.location()[0] if matched and barcode_match.location() else -1
+                    trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(), primer_info.name,
+                                                   barcode_search_start, barcode_search_end,
+                                                   matched,
+                                                   barcode_match.distance() if matched else -1,
+                                                   match_pos)
                 if barcode_match.matched():
-                    # Log successful barcode search
-                    if trace_logger:
-                        match_pos = barcode_match.location()[0] if barcode_match.location() else -1
-                        trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(), primer_info.name,
-                                                       barcode_search_start, barcode_search_end, True, 
-                                                       barcode_match.distance(), match_pos)
-                    
                     if bd is None or barcode_match.distance() < bd:
                         bm = barcode_match
                         bd = barcode_match.distance()

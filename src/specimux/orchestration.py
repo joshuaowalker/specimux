@@ -503,53 +503,54 @@ def specimux(args, progress_reporter=None):
                 or PassthroughPrefilter()
 
         pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
-        
+
         # Track totals for match rate
         total_processed = 0
         total_matched = 0
         total_unregistered = 0
 
-        while all_seqs or num_seqs < last_seq_to_output:
-            to_read = sequence_block_size if all_seqs else min(sequence_block_size, last_seq_to_output - num_seqs)
-            seq_batch = list(itertools.islice(seq_records, to_read))
-            if not seq_batch:
-                break
+        # One trace logger for the whole run; creating it per batch would reuse
+        # the same second-resolution filename and overwrite earlier batches.
+        trace_logger = None
+        if args.diagnostics:
+            trace_logger = TraceLogger(
+                enabled=True,
+                verbosity=args.diagnostics,
+                output_dir=args.output_dir,
+                worker_id="main",
+                start_timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
+            )
+            trace_logger.__enter__()
 
-            # Create trace logger for single-threaded mode if needed
-            trace_logger = None
-            if args.diagnostics:
-                trace_logger = TraceLogger(
-                    enabled=True,
-                    verbosity=args.diagnostics,
-                    output_dir=args.output_dir,
-                    worker_id="main",
-                    start_timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
-                )
-                trace_logger.__enter__()
+        try:
+            while all_seqs or num_seqs < last_seq_to_output:
+                to_read = sequence_block_size if all_seqs else min(sequence_block_size, last_seq_to_output - num_seqs)
+                seq_batch = list(itertools.islice(seq_records, to_read))
+                if not seq_batch:
+                    break
 
-            write_ops, batch_total, batch_matched, batch_unregistered = process_sequences(
-                seq_batch, parameters, specimens, args, prefilter, trace_logger, num_seqs)
-            
-            for write_op in write_ops:
-                output_write_operation(write_op, output_manager, args, trace_logger)
-            
-            # Close trace logger after processing and writing batch
+                write_ops, batch_total, batch_matched, batch_unregistered = process_sequences(
+                    seq_batch, parameters, specimens, args, prefilter, trace_logger, num_seqs)
+
+                for write_op in write_ops:
+                    output_write_operation(write_op, output_manager, args, trace_logger)
+
+                num_seqs += batch_total
+                total_processed += batch_total
+                total_matched += batch_matched
+                total_unregistered += batch_unregistered
+                pbar.update(batch_total)
+
+                # Update progress with match rate
+                if total_processed > 0:
+                    match_rate = total_matched / total_processed
+                    pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
+
+                if progress_reporter:
+                    progress_reporter.update(total_processed, total_matched, total_seqs)
+        finally:
             if trace_logger:
                 trace_logger.__exit__(None, None, None)
-
-            num_seqs += batch_total
-            total_processed += batch_total
-            total_matched += batch_matched
-            total_unregistered += batch_unregistered
-            pbar.update(batch_total)
-
-            # Update progress with match rate
-            if total_processed > 0:
-                match_rate = total_matched / total_processed
-                pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
-
-            if progress_reporter:
-                progress_reporter.update(total_processed, total_matched, total_seqs)
 
         pbar.close()
 
