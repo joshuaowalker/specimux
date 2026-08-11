@@ -98,10 +98,10 @@ def estimate_sequence_count(filename: str, args: argparse.Namespace) -> int:
 
         for record in itertools.islice(seq_records, sample_size):
             record_count += 1
-            records_total_bytes += len(str(record.seq))
+            records_total_bytes += len(record.seq)
             if args.isfastq:
                 records_total_bytes += len(record.id) + len(record.description) + 2  # +2 for @ and newlines
-                records_total_bytes += len(record.letter_annotations["phred_quality"]) + 3  # +3 for + and newlines
+                records_total_bytes += len(record.qual) + 3  # +3 for + and newlines
             else:
                 records_total_bytes += len(record.id) + len(record.description) + 2  # +2 for > and newline
 

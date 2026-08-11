@@ -17,6 +17,36 @@ from operator import itemgetter
 from .constants import Primer, Barcode, ResolutionType
 
 
+_COMPLEMENT_TABLE = str.maketrans(
+    "ACGTURYSWKMBDHVNacgturyswkmbdhvn",
+    "TGCAAYRSWMKVHDBNtgcaayrswmkvhdbn")
+
+
+class Read:
+    """Lightweight sequence record for the demultiplexing hot path.
+
+    Parsing, pickling to worker processes, and reverse complement are all
+    much cheaper than with Bio.SeqRecord. Quality is kept as the raw
+    phred+33 string (None for FASTA input) so output never round-trips
+    through integer score lists.
+    """
+    __slots__ = ("id", "description", "seq", "qual")
+
+    def __init__(self, id: str, description: str, seq: str, qual: Optional[str] = None):
+        self.id = id
+        self.description = description
+        self.seq = seq
+        self.qual = qual
+
+    def __len__(self) -> int:
+        return len(self.seq)
+
+    def reverse_complement(self) -> "Read":
+        return Read(self.id, self.description,
+                    self.seq.translate(_COMPLEMENT_TABLE)[::-1],
+                    self.qual[::-1] if self.qual is not None else None)
+
+
 class PrimerInfo:
     """Information about a primer sequence and its associations."""
 
@@ -354,7 +384,6 @@ class WriteOperation(NamedTuple):
     distance_code: str
     sequence: str
     quality_sequence: str
-    quality_scores: List[int]
     p1_location: Tuple[int, int]
     p2_location: Tuple[int, int]
     b1_location: Tuple[int, int]

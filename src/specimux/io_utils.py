@@ -30,12 +30,14 @@ if TYPE_CHECKING:
 
 from Bio import SeqIO
 from Bio.Seq import Seq
+from Bio.SeqIO.FastaIO import SimpleFastaParser
+from Bio.SeqIO.QualityIO import FastqGeneralIterator
 from Bio.SeqRecord import SeqRecord
 from cachetools import LRUCache
 from tqdm import tqdm
 
 from .constants import Primer, SampleId, TrimMode, ResolutionType
-from .models import PrimerInfo, WriteOperation
+from .models import PrimerInfo, Read, WriteOperation
 from .databases import PrimerDatabase, Specimens
 
 
@@ -443,7 +445,7 @@ def open_sequence_file(filename, args):
         args: Command line arguments, will update args.isfastq based on format
 
     Returns:
-        SeqIO iterator for the file
+        Iterator of Read objects
     """
     is_gzipped = filename.endswith((".gz", ".gzip"))
 
@@ -451,11 +453,14 @@ def open_sequence_file(filename, args):
     file_format = detect_file_format(filename)
     args.isfastq = file_format == 'fastq'
 
-    if is_gzipped:
-        handle = gzip.open(filename, "rt")  # Open in text mode
-        return SeqIO.parse(handle, file_format)
+    handle = gzip.open(filename, "rt") if is_gzipped else open(filename)
+
+    if file_format == 'fastq':
+        return (Read(title.split(None, 1)[0], title, seq, qual)
+                for title, seq, qual in FastqGeneralIterator(handle))
     else:
-        return SeqIO.parse(filename, file_format)
+        return (Read(title.split(None, 1)[0], title, seq, None)
+                for title, seq in SimpleFastaParser(handle))
 
 def output_write_operation(write_op: WriteOperation,
                            output_manager: OutputManager,
@@ -466,7 +471,8 @@ def output_write_operation(write_op: WriteOperation,
         formatted_seq = write_op.sequence
         if args.color:
             from .alignment import color_sequence
-            formatted_seq = color_sequence(formatted_seq, write_op.quality_scores, write_op.p1_location, write_op.p2_location,
+            quality_scores = [ord(c) - 33 for c in write_op.quality_sequence]
+            formatted_seq = color_sequence(formatted_seq, quality_scores, write_op.p1_location, write_op.p2_location,
                                            write_op.b1_location, write_op.b2_location)
 
         header_symbol = '@' if args.isfastq else '>'

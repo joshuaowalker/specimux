@@ -13,16 +13,15 @@ from enum import Enum
 from collections import defaultdict
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from Bio.SeqRecord import SeqRecord
 
 from .constants import (
     AlignMode, Barcode, Primer, ResolutionType, SampleId, Orientation, TrimMode, MultipleMatchStrategy
 )
 from .databases import BarcodePrefilter, Specimens
 from .models import (
-    AlignmentResult, CandidateMatch, MatchParameters, PrimerInfo, WriteOperation
+    AlignmentResult, CandidateMatch, MatchParameters, PrimerInfo, Read, WriteOperation
 )
-from .alignment import align_seq, get_quality_seq
+from .alignment import align_seq
 from .prefix_index import PrefixBarcodePrefilter
 from .trace import TraceLogger
 
@@ -30,7 +29,7 @@ from .trace import TraceLogger
 def create_write_operation(sample_id, args, seq, match, resolution_type, trace_sequence_id=None,
                            trace_logger: Optional[TraceLogger] = None):
     formatted_seq = seq.seq
-    quality_scores = get_quality_seq(seq)
+    quality = seq.qual if seq.qual is not None else "I" * len(formatted_seq)
 
     s = 0
     e = len(formatted_seq)
@@ -53,14 +52,12 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
                 trace_logger.log_sequence_trim_empty(
                     trace_sequence_id, args.trim, s, e, len(formatted_seq), p1_name, p2_name)
             # Return fallback WriteOperation with untrimmed sequence to unknown/unknown/unknown-unknown/
-            quality_seq = "".join(chr(q + 33) for q in quality_scores)
             return WriteOperation(
                 sample_id=SampleId.UNKNOWN,
                 seq_id=seq.id,
                 distance_code=match.distance_code(),
                 sequence=str(formatted_seq),
-                quality_sequence=quality_seq,
-                quality_scores=quality_scores,
+                quality_sequence=quality,
                 p1_location=match.get_p1_location(),
                 p2_location=match.get_p2_location(),
                 b1_location=match.get_barcode1_location(),
@@ -72,10 +69,8 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
                 trace_sequence_id=trace_sequence_id
             )
         formatted_seq = seq.seq[s:e]
-        quality_scores = quality_scores[s:e]
+        quality = quality[s:e]
         match.trim_locations(s)
-
-    quality_seq = "".join(chr(q + 33) for q in quality_scores)
 
     # Get primer names, using "unknown" if not matched
     p1_name = match.get_p1().name if match.get_p1() else "unknown"
@@ -89,8 +84,7 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
         seq_id=seq.id,
         distance_code=match.distance_code(),
         sequence=str(formatted_seq),
-        quality_sequence=quality_seq,
-        quality_scores=quality_scores,
+        quality_sequence=quality,
         p1_location=match.get_p1_location(),
         p2_location=match.get_p2_location(),
         b1_location=match.get_barcode1_location(),
@@ -121,7 +115,7 @@ def _log_match_selected(trace_logger: Optional[TraceLogger], sequence_id: Option
                                     b1, b2, pool or 'none', is_unique)
 
 
-def process_sequences(seq_records: List[SeqRecord],
+def process_sequences(seq_records: List[Read],
                       parameters: MatchParameters,
                       specimens: Specimens,
                       args: argparse.Namespace,
@@ -698,8 +692,8 @@ def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) ->
     return None
 
 
-def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: MatchParameters, seq: SeqRecord,
-                           rseq: SeqRecord, specimens: Specimens,
+def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: MatchParameters, seq: Read,
+                           rseq: Read, specimens: Specimens,
                            trace_logger: Optional[TraceLogger] = None,
                            sequence_id: Optional[str] = None) -> List[CandidateMatch]:
     """Match sequence against primers and barcodes"""
