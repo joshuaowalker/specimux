@@ -71,7 +71,7 @@ def init_worker(specimens: Specimens, parameters: MatchParameters, args: argpars
         if not args.disable_prefilter:
             pairs = barcode_pairs_for_prefilter(specimens)
             _barcode_prefilter = PrefixBarcodePrefilter.try_load_or_build(
-                pairs, parameters.max_dist_index)
+                pairs, parameters.max_dist_index, quiet=True)
 
         # Create output manager for this worker
         if args.output_to_files:

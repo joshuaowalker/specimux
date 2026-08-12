@@ -131,10 +131,16 @@ class PrefixBarcodePrefilter:
 
     @classmethod
     def try_load_or_build(cls, barcode_pairs: List[Tuple[str, str]],
-                          max_distance: int) -> 'Optional[PrefixBarcodePrefilter]':
-        """load_or_build, degrading to None (no prefilter) on ineligible input."""
+                          max_distance: int,
+                          quiet: bool = False) -> 'Optional[PrefixBarcodePrefilter]':
+        """load_or_build, degrading to None (no prefilter) on ineligible input.
+
+        quiet demotes routine load/cache messages to DEBUG; used by worker
+        processes, which each reload the index the main process already
+        loaded or built.
+        """
         try:
-            return cls.load_or_build(barcode_pairs, max_distance)
+            return cls.load_or_build(barcode_pairs, max_distance, quiet=quiet)
         except ValueError as e:
             logging.warning(f"Prefix index prefilter unavailable ({e}); "
                             f"barcode matching will run without prefiltering")
@@ -142,14 +148,16 @@ class PrefixBarcodePrefilter:
 
     @classmethod
     def load_or_build(cls, barcode_pairs: List[Tuple[str, str]],
-                      max_distance: int) -> 'PrefixBarcodePrefilter':
+                      max_distance: int,
+                      quiet: bool = False) -> 'PrefixBarcodePrefilter':
         """Load the index from cache, building and caching it on a miss."""
+        log = logging.debug if quiet else logging.info
         cache_path = cls.get_cache_path(barcode_pairs, max_distance)
         if cache_path.exists():
             try:
                 with open(cache_path, "rb") as fh:
                     index = pickle.load(fh)
-                logging.info(f"Loaded prefix index cache: {cache_path}")
+                log(f"Loaded prefix index cache: {cache_path}")
                 return cls(barcode_pairs, max_distance, index)
             except (OSError, pickle.UnpicklingError) as e:
                 logging.warning(f"Could not load prefix index cache ({e}); rebuilding")
@@ -161,7 +169,7 @@ class PrefixBarcodePrefilter:
             with os.fdopen(fd, "wb") as fh:
                 pickle.dump(prefilter._index, fh, protocol=pickle.HIGHEST_PROTOCOL)
             os.replace(tmp, cache_path)
-            logging.info(f"Cached prefix index: {cache_path}")
+            log(f"Cached prefix index: {cache_path}")
         except OSError as e:
             logging.warning(f"Could not cache prefix index: {e}")
         return prefilter
