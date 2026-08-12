@@ -169,7 +169,7 @@ cp ~/.config/specimux/profiles/example.yaml ~/.config/specimux/profiles/my-workf
 Edit the file to set your preferred defaults. Only include parameters you want to change:
 
 ```yaml
-specimux-version: "0.7.*"
+specimux-version: "0.8.*"
 description: "My custom workflow"
 
 specimux:
@@ -184,7 +184,7 @@ Profiles support the following specimux parameters: `trim`, `dereplicate`, `sear
 
 ### Version Compatibility
 
-Each profile declares a `specimux-version` pattern (e.g., `"0.7.*"`). Specimux validates this on load and raises an error if the profile is incompatible with the installed version, preventing silent parameter mismatches after upgrades.
+Each profile declares a `specimux-version` pattern (e.g., `"0.8.*"`). Specimux validates this on load and raises an error if the profile is incompatible with the installed version, preventing silent parameter mismatches after upgrades.
 
 ## Progress Reporting
 

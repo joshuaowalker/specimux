@@ -37,7 +37,7 @@ This test suite covers comprehensive scenarios for specimux demultiplexer valida
 ## Test Structure
 
 ```
-test_data/integration_test_suite/
+tests/data/integration_test_suite/
 ├── sequences.fastq          # 40 test sequences
 ├── primers.fasta           # ITS and ITS2 primer pools  
 ├── specimens.txt           # 3 known specimens for full matches
@@ -55,13 +55,12 @@ test_data/integration_test_suite/
 
 ### Basic Test Run
 ```bash
-python specimux.py test_data/integration_test_suite/primers.fasta test_data/integration_test_suite/specimens.txt test_data/integration_test_suite/sequences.fastq -F -O test_output -d
+specimux tests/data/integration_test_suite/primers.fasta tests/data/integration_test_suite/specimens.txt tests/data/integration_test_suite/sequences.fastq -F -O test_output -d
 ```
 
 ### Validation Script
 ```bash
-# TODO: Create validation script to compare test_output vs expected_output
-python validate_test_results.py test_output expected_output
+python tests/data/integration_test_suite/validate_test_results.py test_output tests/data/integration_test_suite/expected_output
 ```
 
 ## Expected Results Summary
