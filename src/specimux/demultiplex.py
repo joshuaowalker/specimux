@@ -11,26 +11,25 @@ import argparse
 import logging
 from enum import Enum
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from Bio.Seq import reverse_complement
-from Bio.SeqRecord import SeqRecord
 
 from .constants import (
     AlignMode, Barcode, Primer, ResolutionType, SampleId, Orientation, TrimMode, MultipleMatchStrategy
 )
 from .databases import BarcodePrefilter, Specimens
 from .models import (
-    AlignmentResult, CandidateMatch, MatchParameters, PrimerInfo, WriteOperation
+    AlignmentResult, CandidateMatch, MatchParameters, PrimerInfo, Read, WriteOperation
 )
-from .alignment import align_seq, get_quality_seq
+from .alignment import align_seq
+from .prefix_index import PrefixBarcodePrefilter
 from .trace import TraceLogger
 
 
 def create_write_operation(sample_id, args, seq, match, resolution_type, trace_sequence_id=None,
                            trace_logger: Optional[TraceLogger] = None):
     formatted_seq = seq.seq
-    quality_scores = get_quality_seq(seq)
+    quality = seq.qual if seq.qual is not None else "I" * len(formatted_seq)
 
     s = 0
     e = len(formatted_seq)
@@ -53,14 +52,12 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
                 trace_logger.log_sequence_trim_empty(
                     trace_sequence_id, args.trim, s, e, len(formatted_seq), p1_name, p2_name)
             # Return fallback WriteOperation with untrimmed sequence to unknown/unknown/unknown-unknown/
-            quality_seq = "".join(chr(q + 33) for q in quality_scores)
             return WriteOperation(
                 sample_id=SampleId.UNKNOWN,
                 seq_id=seq.id,
                 distance_code=match.distance_code(),
                 sequence=str(formatted_seq),
-                quality_sequence=quality_seq,
-                quality_scores=quality_scores,
+                quality_sequence=quality,
                 p1_location=match.get_p1_location(),
                 p2_location=match.get_p2_location(),
                 b1_location=match.get_barcode1_location(),
@@ -72,10 +69,8 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
                 trace_sequence_id=trace_sequence_id
             )
         formatted_seq = seq.seq[s:e]
-        quality_scores = quality_scores[s:e]
+        quality = quality[s:e]
         match.trim_locations(s)
-
-    quality_seq = "".join(chr(q + 33) for q in quality_scores)
 
     # Get primer names, using "unknown" if not matched
     p1_name = match.get_p1().name if match.get_p1() else "unknown"
@@ -89,8 +84,7 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
         seq_id=seq.id,
         distance_code=match.distance_code(),
         sequence=str(formatted_seq),
-        quality_sequence=quality_seq,
-        quality_scores=quality_scores,
+        quality_sequence=quality,
         p1_location=match.get_p1_location(),
         p2_location=match.get_p2_location(),
         b1_location=match.get_barcode1_location(),
@@ -105,7 +99,23 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
 
 
 
-def process_sequences(seq_records: List[SeqRecord],
+def _log_match_selected(trace_logger: Optional[TraceLogger], sequence_id: Optional[str],
+                        match: CandidateMatch, strategy: str, pool: Optional[str],
+                        is_unique: bool, b1: Optional[str] = None, b2: Optional[str] = None):
+    """Emit a MATCH_SELECTED trace event for a match chosen for output."""
+    if not trace_logger:
+        return
+    p1_name = match.get_p1().name if match.get_p1() else 'none'
+    p2_name = match.get_p2().name if match.get_p2() else 'none'
+    if b1 is None:
+        b1 = match.best_b1()[0] if match.has_b1_match() and match.best_b1() else 'none'
+    if b2 is None:
+        b2 = match.best_b2()[0] if match.has_b2_match() and match.best_b2() else 'none'
+    trace_logger.log_match_selected(sequence_id, strategy, p1_name, p2_name,
+                                    b1, b2, pool or 'none', is_unique)
+
+
+def process_sequences(seq_records: List[Read],
                       parameters: MatchParameters,
                       specimens: Specimens,
                       args: argparse.Namespace,
@@ -165,6 +175,13 @@ def process_sequences(seq_records: List[SeqRecord],
                             pool = specimens.get_specimen_pool(specimen_id)
                             match.set_pool(pool)
 
+                            if trace_logger:
+                                _log_match_selected(trace_logger, sequence_id, match, 'best',
+                                                    pool, len(derep_results) == 1, b1, b2)
+                                trace_logger.log_specimen_resolved(
+                                    sequence_id, match, specimen_id,
+                                    resolution_type.to_string(), pool)
+
                             op = create_write_operation(specimen_id, args, match.sequence, match,
                                                         resolution_type, sequence_id, trace_logger)
                             if op is not None:
@@ -172,6 +189,8 @@ def process_sequences(seq_records: List[SeqRecord],
                             has_full_match = True
                         else:
                             # Partial/unknown - handle normally via resolve_specimen
+                            _log_match_selected(trace_logger, sequence_id, match, 'best',
+                                                match.get_pool(), len(derep_results) == 1)
                             final_sample_id, resolution_type = resolve_specimen(
                                 match, specimens, trace_logger, sequence_id)
                             if resolution_type == ResolutionType.UNKNOWN and match.has_full_match():
@@ -185,6 +204,8 @@ def process_sequences(seq_records: List[SeqRecord],
                 else:
                     # No dereplication: process all equivalent matches
                     for match in best_matches:
+                        _log_match_selected(trace_logger, sequence_id, match, 'all',
+                                            match.get_pool(), len(best_matches) == 1)
                         # Determine final sample ID for this match (includes specimen resolution and fallback logic)
                         final_sample_id, resolution_type = resolve_specimen(
                             match, specimens, trace_logger, sequence_id)
@@ -671,8 +692,8 @@ def get_pool_from_primers(p1: Optional[PrimerInfo], p2: Optional[PrimerInfo]) ->
     return None
 
 
-def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: MatchParameters, seq: SeqRecord,
-                           rseq: SeqRecord, specimens: Specimens,
+def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: MatchParameters, seq: Read,
+                           rseq: Read, specimens: Specimens,
                            trace_logger: Optional[TraceLogger] = None,
                            sequence_id: Optional[str] = None) -> List[CandidateMatch]:
     """Match sequence against primers and barcodes"""
@@ -680,18 +701,66 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
     s = str(seq.seq)
     rs = str(rseq.seq)
 
+    # Primer and end results depend only on (primer, strand), not on the
+    # pairing, so compute each once per read and reuse across primer pairs.
+    # The primer cache is shared between orientation detection and end
+    # matching: a primer at the front of one strand is the same alignment
+    # problem as its reverse complement at the end of the other strand.
+    primer_cache: Dict[Tuple[int, bool], AlignmentResult] = {}
+    end_cache: Dict[Tuple[int, bool], EndMatch] = {}
+
+    def primer_for(primer_info: PrimerInfo, use_rs: bool, which_primer: Primer) -> AlignmentResult:
+        key = (id(primer_info), use_rs)
+        result = primer_cache.get(key)
+        if result is None:
+            result = compute_primer_match(parameters, rs if use_rs else s, primer_info,
+                                          which_primer, trace_logger, sequence_id)
+            primer_cache[key] = result
+        return result
+
+    def end_for(primer_info: PrimerInfo, use_rs: bool, which_primer: Primer,
+                which_barcode: Barcode) -> EndMatch:
+        key = (id(primer_info), use_rs)
+        end = end_cache.get(key)
+        if end is None:
+            end = compute_end_match(prefilter, parameters, rs if use_rs else s, primer_info,
+                                    which_primer, which_barcode, trace_logger, sequence_id,
+                                    primer_match=primer_for(primer_info, use_rs, which_primer))
+            end_cache[key] = end
+        return end
+
     if parameters.preorient:
-        orientation, fwd_score, rev_score = determine_orientation(
-            parameters, s, rs,
-            specimens.get_primers(Primer.FWD),
-            specimens.get_primers(Primer.REV))
-        
+        # A forward-oriented read carries each forward primer at the end of
+        # the rs view and each reverse primer at the end of the s view;
+        # a reverse-oriented read is the mirror image. These are exactly the
+        # primer searches the candidate branches below need, so orientation
+        # detection costs no extra alignments.
+        fwd_score = 0
+        rev_score = 0
+        for primer in specimens.get_primers(Primer.FWD):
+            if primer_for(primer, True, Primer.FWD).matched():
+                fwd_score += 1
+            if primer_for(primer, False, Primer.FWD).matched():
+                rev_score += 1
+        for primer in specimens.get_primers(Primer.REV):
+            if primer_for(primer, False, Primer.REV).matched():
+                fwd_score += 1
+            if primer_for(primer, True, Primer.REV).matched():
+                rev_score += 1
+
+        if fwd_score > 0 and rev_score == 0:
+            orientation = Orientation.FORWARD
+        elif rev_score > 0 and fwd_score == 0:
+            orientation = Orientation.REVERSE
+        else:
+            orientation = Orientation.UNKNOWN
+
         # Log orientation detection for trace
         if trace_logger:
             confidence = 0.0
             if fwd_score + rev_score > 0:
                 confidence = abs(fwd_score - rev_score) / (fwd_score + rev_score)
-            trace_logger.log_orientation_detected(sequence_id, orientation.to_string(), 
+            trace_logger.log_orientation_detected(sequence_id, orientation.to_string(),
                                                  fwd_score, rev_score, confidence)
     else:
         orientation = Orientation.UNKNOWN
@@ -705,12 +774,12 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
     for fwd_primer in specimens.get_primers(Primer.FWD):
         for rev_primer in specimens.get_paired_primers(fwd_primer.primer):
             if orientation in [Orientation.FORWARD, Orientation.UNKNOWN]:
-                candidate_match_id = f"{sequence_id}_match_{match_counter}"
+                candidate_match_id = f"{sequence_id}_match_{match_counter}" if trace_logger else None
                 match = CandidateMatch(seq, specimens.b_length(), candidate_match_id)
-                match_one_end(prefilter, match, parameters, rs, True, fwd_primer,
-                              Primer.FWD, Barcode.B1, trace_logger, sequence_id)
-                match_one_end(prefilter, match, parameters, s, False, rev_primer,
-                              Primer.REV, Barcode.B2, trace_logger, sequence_id)
+                apply_end_match(match, end_for(fwd_primer, True, Primer.FWD, Barcode.B1),
+                                fwd_primer, True, Primer.FWD, Barcode.B1)
+                apply_end_match(match, end_for(rev_primer, False, Primer.REV, Barcode.B2),
+                                rev_primer, False, Primer.REV, Barcode.B2)
                 # Only add matches where at least one primer was found
                 if match.p1_match or match.p2_match:
                     # Determine and set pool for this match
@@ -726,12 +795,12 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
                     match_counter += 1
 
             if orientation in [Orientation.REVERSE, Orientation.UNKNOWN]:
-                candidate_match_id = f"{sequence_id}_match_{match_counter}"
+                candidate_match_id = f"{sequence_id}_match_{match_counter}" if trace_logger else None
                 match = CandidateMatch(rseq, specimens.b_length(), candidate_match_id)
-                match_one_end(prefilter, match, parameters, s, True, fwd_primer,
-                              Primer.FWD, Barcode.B1, trace_logger, sequence_id)
-                match_one_end(prefilter, match, parameters, rs, False, rev_primer,
-                              Primer.REV, Barcode.B2, trace_logger, sequence_id)
+                apply_end_match(match, end_for(fwd_primer, False, Primer.FWD, Barcode.B1),
+                                fwd_primer, True, Primer.FWD, Barcode.B1)
+                apply_end_match(match, end_for(rev_primer, True, Primer.REV, Barcode.B2),
+                                rev_primer, False, Primer.REV, Barcode.B2)
                 # Only add matches where at least one primer was found
                 if match.p1_match or match.p2_match:
                     # Determine and set pool for this match
@@ -751,41 +820,116 @@ def find_candidate_matches(prefilter: Optional[BarcodePrefilter], parameters: Ma
     # for cases where multiple primer pairs cover nearly identical sequence regions.
     return matches
 
+class EndMatch(NamedTuple):
+    """Result of searching one end of an oriented sequence for a primer and
+    its adjacent barcodes. Pure data so it can be cached per (primer, strand)
+    and reused across primer pairs."""
+    primer_match: Optional[AlignmentResult]
+    barcode_matches: List[Tuple[str, AlignmentResult]]
+
+
+def apply_end_match(match: CandidateMatch, end: 'EndMatch', primer_info: PrimerInfo,
+                    reversed_sequence: bool, which_primer: Primer, which_barcode: Barcode) -> None:
+    """Copy a (possibly cached) EndMatch into a CandidateMatch.
+
+    AlignmentResults are copied because trim_locations() later mutates the
+    stored objects in place; sharing them across matches would corrupt
+    coordinates when a read yields multiple write operations.
+    """
+    if end.primer_match is None:
+        return
+    match.set_primer_match(end.primer_match.copy(), primer_info, reversed_sequence, which_primer)
+    for b, bm in end.barcode_matches:
+        match.add_barcode_match(bm.copy(), b, reversed_sequence, which_barcode)
+
+
 def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, parameters: MatchParameters, sequence: str,
                   reversed_sequence: bool, primer_info: PrimerInfo,
                   which_primer: Primer, which_barcode: Barcode,
                   trace_logger: Optional[TraceLogger] = None,
                   sequence_id: Optional[str] = None) -> None:
     """Match primers and barcodes at one end of the sequence."""
+    end = compute_end_match(prefilter, parameters, sequence, primer_info,
+                            which_primer, which_barcode, trace_logger, sequence_id)
+    apply_end_match(match, end, primer_info, reversed_sequence, which_primer, which_barcode)
 
-    primer = primer_info.primer
-    primer_rc = primer_info.primer_rc
-    search_start = len(sequence) - parameters.search_len
+
+def compute_primer_match(parameters: MatchParameters, sequence: str, primer_info: PrimerInfo,
+                         which_primer: Primer,
+                         trace_logger: Optional[TraceLogger] = None,
+                         sequence_id: Optional[str] = None) -> AlignmentResult:
+    """Search the end of an oriented sequence for a primer.
+
+    Pure in (primer, strand), so the result can be cached per read and shared
+    between orientation detection and end matching.
+    """
+    search_start = max(0, len(sequence) - parameters.search_len)
     search_end = len(sequence)
-    
-    # Log primer search attempt
-    if trace_logger:
-        trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
-                                      search_start, search_end, False, -1, -1)
 
-    primer_match = align_seq(primer_rc, sequence, parameters.max_dist_primers[primer],
+    primer_match = align_seq(primer_info.primer_rc, sequence,
+                             parameters.max_dist_primers[primer_info.primer],
                              search_start, search_end)
+
+    if trace_logger:
+        matched = primer_match.matched()
+        match_pos = primer_match.location()[0] if matched and primer_match.location() else -1
+        trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
+                                       search_start, search_end, matched,
+                                       primer_match.distance() if matched else -1, match_pos)
+    return primer_match
+
+
+def compute_end_match(prefilter: Optional[BarcodePrefilter], parameters: MatchParameters,
+                      sequence: str, primer_info: PrimerInfo,
+                      which_primer: Primer, which_barcode: Barcode,
+                      trace_logger: Optional[TraceLogger] = None,
+                      sequence_id: Optional[str] = None,
+                      primer_match: Optional[AlignmentResult] = None) -> 'EndMatch':
+    """Search one end of an oriented sequence for a primer and its barcodes.
+
+    A precomputed primer_match (from compute_primer_match on the same oriented
+    sequence) may be supplied to avoid re-aligning the primer.
+    """
+    if primer_match is None:
+        primer_match = compute_primer_match(parameters, sequence, primer_info,
+                                            which_primer, trace_logger, sequence_id)
 
     # If we found matching primers, look for corresponding barcodes
     if primer_match.matched():
-        match.set_primer_match(primer_match, primer_info, reversed_sequence, which_primer)
-        
-        # Log successful primer match
-        if trace_logger:
-            match_pos = primer_match.location()[0] if primer_match.location() else -1
-            trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
-                                          search_start, search_end, True, primer_match.distance(), match_pos)
+        if isinstance(prefilter, PrefixBarcodePrefilter):
+            # One index lookup per primer location returns the only barcodes
+            # that can possibly align within tolerance; align just those.
+            best_matches: Dict[str, AlignmentResult] = {}
+            for l in primer_match.locations():
+                barcode_search_start = l[1] + 1
+                for b, b_rc in prefilter.candidates(sequence, barcode_search_start):
+                    if b not in primer_info.barcodes:
+                        continue
+                    barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
+                                              barcode_search_start, len(sequence), AlignMode.PREFIX)
+                    if trace_logger:
+                        matched = barcode_match.matched()
+                        match_pos = barcode_match.location()[0] if matched and barcode_match.location() else -1
+                        trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(),
+                                                        primer_info.name, barcode_search_start,
+                                                        len(sequence), matched,
+                                                        barcode_match.distance() if matched else -1,
+                                                        match_pos)
+                    if barcode_match.matched():
+                        prev = best_matches.get(b)
+                        if prev is None or barcode_match.distance() < prev.distance():
+                            best_matches[b] = barcode_match
+            # Collect in barcode-registration order to preserve tie-break behavior
+            barcode_matches = []
+            for b, b_rc in primer_info.barcode_pairs:
+                bm = best_matches.get(b)
+                if bm is not None:
+                    barcode_matches.append((b, bm))
+            return EndMatch(primer_match, barcode_matches)
 
         # Get relevant barcodes for this primer pair
-        barcodes = primer_info.barcodes
-
-        for b in barcodes:
-            b_rc = reverse_complement(b)
+        barcode_matches = []
+        for b, b_rc in primer_info.barcode_pairs:
             bd = None
             bm = None
             bc = None
@@ -793,35 +937,29 @@ def match_one_end(prefilter: Optional[BarcodePrefilter], match: CandidateMatch, 
                 barcode_search_start = l[1] + 1
                 barcode_search_end = len(sequence)
                 target_seq = sequence[barcode_search_start:]
-                
-                # Log barcode search attempt 
-                if trace_logger:
-                    trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(), primer_info.name,
-                                                   barcode_search_start, barcode_search_end, False, -1, -1)
-                
+
                 if prefilter and not prefilter.match(b_rc, target_seq):
                     continue
 
                 barcode_match = align_seq(b_rc, sequence, parameters.max_dist_index,
                                           barcode_search_start, barcode_search_end, AlignMode.PREFIX)
+                if trace_logger:
+                    matched = barcode_match.matched()
+                    match_pos = barcode_match.location()[0] if matched and barcode_match.location() else -1
+                    trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(), primer_info.name,
+                                                   barcode_search_start, barcode_search_end,
+                                                   matched,
+                                                   barcode_match.distance() if matched else -1,
+                                                   match_pos)
                 if barcode_match.matched():
-                    # Log successful barcode search
-                    if trace_logger:
-                        match_pos = barcode_match.location()[0] if barcode_match.location() else -1
-                        trace_logger.log_barcode_search(sequence_id, b, which_barcode.to_string(), primer_info.name,
-                                                       barcode_search_start, barcode_search_end, True, 
-                                                       barcode_match.distance(), match_pos)
-                    
                     if bd is None or barcode_match.distance() < bd:
                         bm = barcode_match
                         bd = barcode_match.distance()
                         bc = b
                         
             if bm:
-                match.add_barcode_match(bm, bc, reversed_sequence, which_barcode)
+                barcode_matches.append((bc, bm))
+        return EndMatch(primer_match, barcode_matches)
     else:
-        # Log failed primer search  
-        if trace_logger:
-            trace_logger.log_primer_search(sequence_id, primer_info.name, which_primer.to_string(),
-                                          search_start, search_end, False, -1, -1)
+        return EndMatch(None, [])
 

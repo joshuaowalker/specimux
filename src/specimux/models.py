@@ -17,6 +17,36 @@ from operator import itemgetter
 from .constants import Primer, Barcode, ResolutionType
 
 
+_COMPLEMENT_TABLE = str.maketrans(
+    "ACGTURYSWKMBDHVNacgturyswkmbdhvn",
+    "TGCAAYRSWMKVHDBNtgcaayrswmkvhdbn")
+
+
+class Read:
+    """Lightweight sequence record for the demultiplexing hot path.
+
+    Parsing, pickling to worker processes, and reverse complement are all
+    much cheaper than with Bio.SeqRecord. Quality is kept as the raw
+    phred+33 string (None for FASTA input) so output never round-trips
+    through integer score lists.
+    """
+    __slots__ = ("id", "description", "seq", "qual")
+
+    def __init__(self, id: str, description: str, seq: str, qual: Optional[str] = None):
+        self.id = id
+        self.description = description
+        self.seq = seq
+        self.qual = qual
+
+    def __len__(self) -> int:
+        return len(self.seq)
+
+    def reverse_complement(self) -> "Read":
+        return Read(self.id, self.description,
+                    self.seq.translate(_COMPLEMENT_TABLE)[::-1],
+                    self.qual[::-1] if self.qual is not None else None)
+
+
 class PrimerInfo:
     """Information about a primer sequence and its associations."""
 
@@ -26,6 +56,7 @@ class PrimerInfo:
         self.direction = direction
         self.primer_rc = reverse_complement(seq.upper())
         self.barcodes = set()
+        self.barcode_pairs = []  # (barcode, reverse_complement) in specimen-file insertion order
         self.specimens = set()
         self.pools = pools
         self.file_index = file_index  # Order in primers.fasta file (0-indexed)
@@ -51,6 +82,11 @@ class AlignmentResult:
 
     def locations(self):
         return self._edlib_match['locations']
+
+    def copy(self) -> 'AlignmentResult':
+        """Independent copy; a shallow dict copy suffices because location
+        lists are rebound on adjustment, never mutated in place."""
+        return AlignmentResult(self._edlib_match.copy())
 
     def reversed(self, seq_length):
         """Return a new MatchResult with locations relative to the reversed sequence."""
@@ -348,7 +384,6 @@ class WriteOperation(NamedTuple):
     distance_code: str
     sequence: str
     quality_sequence: str
-    quality_scores: List[int]
     p1_location: Tuple[int, int]
     p2_location: Tuple[int, int]
     b1_location: Tuple[int, int]
@@ -361,10 +396,13 @@ class WriteOperation(NamedTuple):
 
 
 class SequenceBatch(NamedTuple):
-    """A batch of sequences to process together."""
+    """A batch of sequences to process together.
+
+    MatchParameters is intentionally not part of the batch: it is delivered
+    once per worker via init_worker rather than pickled with every task.
+    """
     seq_number: int
     seq_records: List  # This now contains actual sequence records, not an iterator
-    parameters: MatchParameters
     start_idx: int     # Starting index for sequence ID generation
 
 

@@ -38,7 +38,7 @@ def parse_args(argv):
                         help="Enable diagnostic trace logging: 1=standard (default), 2=detailed, 3=verbose")
     parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging")
 
-    parser.add_argument("--disable-prefilter", action="store_true", help="Disable barcode prefiltering (bloom filter optimization)")
+    parser.add_argument("--disable-prefilter", action="store_true", help="Disable barcode prefiltering (prefix index optimization)")
     parser.add_argument("--disable-preorient", action="store_true", help="Disable heuristic pre-orientation")
     parser.add_argument("-t", "--threads", type=int, default=-1, help="Number of worker threads to use")
     parser.add_argument("--sample-topq", type=int, default=0, metavar="N",

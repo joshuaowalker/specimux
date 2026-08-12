@@ -49,8 +49,8 @@ from .io_utils import (
 # Trace logging
 from .trace import TraceLogger
 
-# Bloom filter prefiltering
-from .bloom_filter import BloomPrefilter, barcodes_for_bloom_prefilter
+# Prefix index prefiltering
+from .prefix_index import PrefixBarcodePrefilter, barcode_pairs_for_prefilter
 
 # Sequence alignment
 from .alignment import (

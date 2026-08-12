@@ -17,7 +17,7 @@
 # to:
 #   search-len: 120
 
-specimux-version: "0.7.*"
+specimux-version: "0.8.*"
 description: "My custom workflow"
 
 # =============================================================================

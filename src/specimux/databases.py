@@ -10,6 +10,8 @@ as well as the barcode prefilter protocol and simple implementations.
 import logging
 from typing import Dict, List, Optional, Set, Protocol
 
+from Bio.Seq import reverse_complement
+
 from .constants import Primer
 from .models import PrimerInfo
 
@@ -131,6 +133,10 @@ class Specimens:
         self._primer_pairings = {}
         self._primer_registry = primer_registry
         self._active_pools = set()  # Track pools actually used by specimens
+        # Lookup indexes maintained by add_specimen; entries keep insertion
+        # order so queries return specimens in specimen-file order
+        self._specimens_by_barcodes = {}  # (b1.upper(), b2.upper()) -> [(index, id, p1s, p2s)]
+        self._pool_by_specimen_id = {}  # specimen_id -> pool
 
     def add_specimen(self, specimen_id: str, pool: str, b1: str, p1: str, b2: str, p2: str):
         """Add a specimen with its barcodes and primers."""
@@ -153,7 +159,9 @@ class Specimens:
             if ps1 not in self._primers:
                 self._primers[ps1] = p1_info
             primer_info = self._primers[ps1]
-            primer_info.barcodes.add(b1)
+            if b1 not in primer_info.barcodes:
+                primer_info.barcodes.add(b1)
+                primer_info.barcode_pairs.append((b1, reverse_complement(b1)))
             primer_info.specimens.add(specimen_id)
 
         for p2_info in p2_list:
@@ -161,10 +169,19 @@ class Specimens:
             if ps2 not in self._primers:
                 self._primers[ps2] = p2_info
             primer_info = self._primers[ps2]
-            primer_info.barcodes.add(b2)
+            if b2 not in primer_info.barcodes:
+                primer_info.barcodes.add(b2)
+                primer_info.barcode_pairs.append((b2, reverse_complement(b2)))
             primer_info.specimens.add(specimen_id)
 
         self._specimens.append((specimen_id, pool, b1, p1_list, b2, p2_list))
+
+        # Maintain lookup indexes; p1_list/p2_list are stored by reference so
+        # primer membership checks see the same objects as the tuple above
+        index = len(self._specimens) - 1
+        key = (b1.upper(), b2.upper())
+        self._specimens_by_barcodes.setdefault(key, []).append((index, specimen_id, p1_list, p2_list))
+        self._pool_by_specimen_id[specimen_id] = pool
 
     def prune_unused_pools(self):
         """Remove pools that aren't used by any specimens."""
@@ -219,15 +236,15 @@ class Specimens:
     def specimens_for_barcodes_and_primers(self, b1_list: List[str], b2_list: List[str],
                                            p1_matched: PrimerInfo, p2_matched: PrimerInfo) -> List[str]:
         """Find specimens matching given barcodes and primers."""
-        matching_specimens = []
-        for spec_id, pool, b1, p1s, b2, p2s in self._specimens:
-            if (p1_matched in p1s and
-                    p2_matched in p2s and
-                    b1.upper() in b1_list and
-                    b2.upper() in b2_list):
-                matching_specimens.append(spec_id)
+        # Keyed by insertion index to deduplicate and restore specimen-file order
+        matches = {}
+        for b1 in b1_list:
+            for b2 in b2_list:
+                for index, spec_id, p1s, p2s in self._specimens_by_barcodes.get((b1, b2), ()):
+                    if p1_matched in p1s and p2_matched in p2s:
+                        matches[index] = spec_id
 
-        return matching_specimens
+        return [matches[index] for index in sorted(matches)]
 
     def specimen_for_exact_match(self, b1: str, b2: str,
                                  p1: PrimerInfo, p2: PrimerInfo) -> Optional[str]:
@@ -237,10 +254,8 @@ class Specimens:
         this returns the specimen for a single specific barcode+primer combination.
         Used by dereplication to map specific barcode choices to specimens.
         """
-        for spec_id, pool, spec_b1, p1s, spec_b2, p2s in self._specimens:
-            if (p1 in p1s and p2 in p2s and
-                    spec_b1.upper() == b1.upper() and
-                    spec_b2.upper() == b2.upper()):
+        for index, spec_id, p1s, p2s in self._specimens_by_barcodes.get((b1.upper(), b2.upper()), ()):
+            if p1 in p1s and p2 in p2s:
                 return spec_id
         return None
 
@@ -265,10 +280,7 @@ class Specimens:
 
     def get_specimen_pool(self, specimen_id: str) -> Optional[str]:
         """Get the primer pool for a specimen."""
-        for spec_id, pool, _, _, _, _ in self._specimens:
-            if spec_id == specimen_id:
-                return pool
-        return None
+        return self._pool_by_specimen_id.get(specimen_id)
 
     def b_length(self):
         """Get the maximum barcode length."""

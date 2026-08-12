@@ -30,12 +30,14 @@ if TYPE_CHECKING:
 
 from Bio import SeqIO
 from Bio.Seq import Seq
+from Bio.SeqIO.FastaIO import SimpleFastaParser
+from Bio.SeqIO.QualityIO import FastqGeneralIterator
 from Bio.SeqRecord import SeqRecord
 from cachetools import LRUCache
 from tqdm import tqdm
 
 from .constants import Primer, SampleId, TrimMode, ResolutionType
-from .models import PrimerInfo, WriteOperation
+from .models import PrimerInfo, Read, WriteOperation
 from .databases import PrimerDatabase, Specimens
 
 
@@ -115,8 +117,9 @@ class CachedFileManager:
         fcntl.lockf(self.locks[filename], fcntl.LOCK_EX)
         try:
             f.write(buffer_data)
+            # flush() under the lock is sufficient for interleaving safety with
+            # append-mode writes; fsync is a durability barrier not needed mid-run
             f.flush()
-            os.fsync(f.fileno())  # Ensure data is written to disk
         finally:
             fcntl.lockf(self.locks[filename], fcntl.LOCK_UN)
 
@@ -185,6 +188,7 @@ class OutputManager:
         self.prefix = prefix
         self.is_fastq = is_fastq
         self.file_manager = CachedFileManager(max_open_files, buffer_size, output_dir)
+        self._created_dirs = set()  # Memoize makedirs to avoid a syscall per written read
 
     def __enter__(self):
         os.makedirs(self.output_dir, exist_ok=True)
@@ -193,6 +197,12 @@ class OutputManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         return self.file_manager.__exit__(exc_type, exc_val, exc_tb)
+
+    def _ensure_dir(self, dirname: str):
+        """Create a directory if this manager hasn't already seen it."""
+        if dirname not in self._created_dirs:
+            os.makedirs(dirname, exist_ok=True)
+            self._created_dirs.add(dirname)
 
     def _make_filename(self, sample_id: str, pool: str, p1: str, p2: str, resolution_type: ResolutionType) -> str:
         """Create a filename with match-type-first organization."""
@@ -233,7 +243,7 @@ class OutputManager:
                                            write_op.primer_pool, primer_pair, relative_path)
 
         # Ensure directory exists
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        self._ensure_dir(os.path.dirname(filename))
 
         # Format header to include primer information
         header = (f"{write_op.seq_id} {write_op.distance_code} "
@@ -262,7 +272,7 @@ class OutputManager:
                                           f"{self.prefix}{safe_id}{extension}")
             
             # Ensure the pool full directory exists
-            os.makedirs(os.path.dirname(pool_full_path), exist_ok=True)
+            self._ensure_dir(os.path.dirname(pool_full_path))
             
             # Write to pool-level aggregation directory
             self.file_manager.write(pool_full_path, output_content)
@@ -435,7 +445,7 @@ def open_sequence_file(filename, args):
         args: Command line arguments, will update args.isfastq based on format
 
     Returns:
-        SeqIO iterator for the file
+        Iterator of Read objects
     """
     is_gzipped = filename.endswith((".gz", ".gzip"))
 
@@ -443,11 +453,14 @@ def open_sequence_file(filename, args):
     file_format = detect_file_format(filename)
     args.isfastq = file_format == 'fastq'
 
-    if is_gzipped:
-        handle = gzip.open(filename, "rt")  # Open in text mode
-        return SeqIO.parse(handle, file_format)
+    handle = gzip.open(filename, "rt") if is_gzipped else open(filename)
+
+    if file_format == 'fastq':
+        return (Read(title.split(None, 1)[0], title, seq, qual)
+                for title, seq, qual in FastqGeneralIterator(handle))
     else:
-        return SeqIO.parse(filename, file_format)
+        return (Read(title.split(None, 1)[0], title, seq, None)
+                for title, seq in SimpleFastaParser(handle))
 
 def output_write_operation(write_op: WriteOperation,
                            output_manager: OutputManager,
@@ -458,7 +471,8 @@ def output_write_operation(write_op: WriteOperation,
         formatted_seq = write_op.sequence
         if args.color:
             from .alignment import color_sequence
-            formatted_seq = color_sequence(formatted_seq, write_op.quality_scores, write_op.p1_location, write_op.p2_location,
+            quality_scores = [ord(c) - 33 for c in write_op.quality_sequence]
+            formatted_seq = color_sequence(formatted_seq, quality_scores, write_op.p1_location, write_op.p2_location,
                                            write_op.b1_location, write_op.b2_location)
 
         header_symbol = '@' if args.isfastq else '>'

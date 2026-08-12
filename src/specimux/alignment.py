@@ -50,10 +50,12 @@ def align_seq(query: Union[str, Seq, SeqRecord],
     return m
 
 def get_quality_seq(seq):
-    if "phred_quality" in seq.letter_annotations:
+    qual = getattr(seq, "qual", None)
+    if qual is not None:  # lightweight Read: phred+33 string
+        return [ord(c) - 33 for c in qual]
+    if hasattr(seq, "letter_annotations") and "phred_quality" in seq.letter_annotations:
         return seq.letter_annotations["phred_quality"]
-    else:
-        return [40]*len(seq)
+    return [40]*len(seq)
 
 
 def color_sequence(seq: str, quality_scores: List[int], p1_location: Tuple[int, int],

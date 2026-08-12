@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "specimux"
-version = "0.7.2"
+version = "0.8.0"
 description = "Dual barcode and primer demultiplexing system for MinION sequenced reads"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -27,7 +27,6 @@ keywords = ["bioinformatics", "demultiplexing", "minion", "nanopore", "sequencin
 dependencies = [
     "edlib>=1.1.2",
     "biopython>=1.81",
-    "pybloomfilter3>=0.7.3",
     "cachetools>=5.3.0",
     "tqdm>=4.65.0",
     "plotly>=5.0.0",  # Included by default for visualization

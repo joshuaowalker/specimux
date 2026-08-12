@@ -14,6 +14,11 @@ import multiprocessing
 import os
 import sys
 import traceback
+
+try:
+    import resource  # Unix only; absent on Windows
+except ImportError:
+    resource = None
 from datetime import datetime
 from typing import List, Optional, Tuple
 
@@ -21,27 +26,63 @@ from .constants import TrimMode
 from .databases import Specimens, PassthroughPrefilter
 from .models import MatchParameters, SequenceBatch, WorkerException
 from .trace import TraceLogger
-from .bloom_filter import BloomPrefilter, barcodes_for_bloom_prefilter
+from .prefix_index import PrefixBarcodePrefilter, barcode_pairs_for_prefilter
 from .io_utils import OutputManager, output_write_operation
 from .demultiplex import process_sequences
 
 
-def init_worker(specimens: Specimens, max_distance: int, args: argparse.Namespace, start_timestamp: str = None):
+def raise_fd_soft_limit(target: int = 4096) -> bool:
+    """Raise the soft RLIMIT_NOFILE toward target (bounded by the hard limit).
+
+    Each cached output file can hold two fds (data file + lock file), and
+    macOS defaults to a 256-fd soft limit per process. Returns True if the
+    soft limit is at least target (or was successfully raised to the hard
+    limit), False if it could not be raised. On platforms without the
+    resource module (Windows) there is no fd soft limit to raise; returns
+    False so callers use the conservative file handle cache size.
+    """
+    if resource is None:
+        return False
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        desired = target if hard == resource.RLIM_INFINITY else min(hard, target)
+        if soft < desired:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+        return True
+    except (ValueError, OSError) as e:
+        logging.warning(f"Could not raise open file limit to {target}: {e}")
+        return False
+
+
+def init_worker(specimens: Specimens, parameters: MatchParameters, args: argparse.Namespace,
+                start_timestamp: str = None):
     """Initialize worker process with shared resources"""
-    global _output_manager, _barcode_prefilter, _trace_logger
+    global _specimens, _parameters, _args, _output_manager, _barcode_prefilter, _trace_logger
     try:
         from .cli import setup_logging
         setup_logging(args.debug, args.output_dir if args.output_to_files else None, is_worker=True)
 
+        # Stash shared, read-only state in module globals so it is delivered
+        # once per worker rather than re-pickled with every task
+        _specimens = specimens
+        _parameters = parameters
+        _args = args
+
         if not args.disable_prefilter:
-            barcodes = barcodes_for_bloom_prefilter(specimens)
-            cache_path = BloomPrefilter.get_cache_path(barcodes, max_distance)
-            _barcode_prefilter = BloomPrefilter.load_readonly(cache_path, barcodes, max_distance)
+            pairs = barcode_pairs_for_prefilter(specimens)
+            _barcode_prefilter = PrefixBarcodePrefilter.try_load_or_build(
+                pairs, parameters.max_dist_index, quiet=True)
 
         # Create output manager for this worker
         if args.output_to_files:
+            if raise_fd_soft_limit():
+                max_open_files = 200
+            else:
+                logging.warning("Falling back to smaller file handle cache")
+                max_open_files = 50
             _output_manager = OutputManager(args.output_dir, args.output_file_prefix,
-                                            args.isfastq, max_open_files=50, buffer_size=100)
+                                            args.isfastq, max_open_files=max_open_files,
+                                            buffer_size=500)
             _output_manager.__enter__()
 
         # Create trace logger for this worker if diagnostics enabled
@@ -82,12 +123,13 @@ def cleanup_worker():
         except Exception as e:
             logging.error(f"Error cleaning up worker trace logger: {e}")
 
-def worker(work_item: SequenceBatch, specimens: Specimens, args: argparse.Namespace):
+def worker(work_item: SequenceBatch):
     """Process a batch of sequences and write results directly"""
-    global _output_manager, _barcode_prefilter, _trace_logger
+    global _specimens, _parameters, _args, _output_manager, _barcode_prefilter, _trace_logger
+    args = _args
     try:
         write_ops, total_count, matched_count, unregistered_combo_count = process_sequences(
-            work_item.seq_records, work_item.parameters, specimens, args, _barcode_prefilter,
+            work_item.seq_records, _parameters, _specimens, args, _barcode_prefilter,
             _trace_logger, work_item.start_idx)
 
         # Write sequences directly from worker
@@ -115,6 +157,9 @@ def worker(work_item: SequenceBatch, specimens: Specimens, args: argparse.Namesp
         raise WorkerException(e)
 
 # Global variables for worker processes
+_specimens = None
+_parameters = None
+_args = None
 _barcode_prefilter = None
 _output_manager = None
 _trace_logger = None

@@ -21,7 +21,6 @@ import tempfile
 import timeit
 from collections import Counter, defaultdict
 from datetime import datetime
-from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -39,8 +38,8 @@ from .io_utils import (
     detect_file_format, open_sequence_file, read_primers_file, read_specimen_file
 )
 from .trace import TraceLogger
-from .bloom_filter import BloomPrefilter, barcodes_for_bloom_prefilter
-from .multiprocessing_utils import init_worker, worker, WorkerException
+from .prefix_index import PrefixBarcodePrefilter, barcode_pairs_for_prefilter
+from .multiprocessing_utils import init_worker, worker, raise_fd_soft_limit, WorkerException
 from .demultiplex import process_sequences
 from .io_utils import get_gzip_info, output_write_operation
 import edlib
@@ -99,10 +98,10 @@ def estimate_sequence_count(filename: str, args: argparse.Namespace) -> int:
 
         for record in itertools.islice(seq_records, sample_size):
             record_count += 1
-            records_total_bytes += len(str(record.seq))
+            records_total_bytes += len(record.seq)
             if args.isfastq:
                 records_total_bytes += len(record.id) + len(record.description) + 2  # +2 for @ and newlines
-                records_total_bytes += len(record.letter_annotations["phred_quality"]) + 3  # +3 for + and newlines
+                records_total_bytes += len(record.qual) + 3  # +3 for + and newlines
             else:
                 records_total_bytes += len(record.id) + len(record.description) + 2  # +2 for > and newline
 
@@ -180,9 +179,7 @@ def specimux_mp(args, progress_reporter=None):
 
     with Pool(processes=num_processes,
               initializer=init_worker,
-              initargs=(specimens, parameters.max_dist_index, args, start_timestamp)) as pool:
-
-        worker_func = partial(worker, specimens=specimens, args=args)
+              initargs=(specimens, parameters, args, start_timestamp)) as pool:
 
         try:
             pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
@@ -197,11 +194,11 @@ def specimux_mp(args, progress_reporter=None):
                 cumulative_idx = 0
                 for i, batch in enumerate(iter_batches(seq_records, sequence_block_size,
                                                        last_seq_to_output, all_seqs)):
-                    work_item = SequenceBatch(i, batch, parameters, cumulative_idx)
+                    work_item = SequenceBatch(i, batch, cumulative_idx)
                     cumulative_idx += len(batch)
                     yield work_item
             
-            for batch_counts in pool.imap_unordered(worker_func, create_work_items()):
+            for batch_counts in pool.imap_unordered(worker, create_work_items()):
                 if batch_counts:
                     batch_total, batch_matched, batch_unregistered = batch_counts
                     total_processed += batch_total
@@ -490,62 +487,70 @@ def specimux(args, progress_reporter=None):
             pass
 
 
-    with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq) as output_manager:
+    if raise_fd_soft_limit():
+        max_open_files = 200
+    else:
+        logging.warning("Falling back to smaller file handle cache")
+        max_open_files = 50
+
+    with OutputManager(args.output_dir, args.output_file_prefix, args.isfastq,
+                       max_open_files=max_open_files) as output_manager:
         num_seqs = 0
         prefilter = PassthroughPrefilter()
         if not args.disable_prefilter:
-            barcode_rcs = barcodes_for_bloom_prefilter(specimens)
-            cache_path = BloomPrefilter.get_cache_path(barcode_rcs, parameters.max_dist_index)
-            prefilter = BloomPrefilter.load_readonly(cache_path, barcode_rcs, parameters.max_dist_index)
+            pairs = barcode_pairs_for_prefilter(specimens)
+            prefilter = PrefixBarcodePrefilter.try_load_or_build(pairs, parameters.max_dist_index) \
+                or PassthroughPrefilter()
 
         pbar = tqdm(total=total_seqs, desc="Processing sequences", unit="seq")
-        
+
         # Track totals for match rate
         total_processed = 0
         total_matched = 0
         total_unregistered = 0
 
-        while all_seqs or num_seqs < last_seq_to_output:
-            to_read = sequence_block_size if all_seqs else min(sequence_block_size, last_seq_to_output - num_seqs)
-            seq_batch = list(itertools.islice(seq_records, to_read))
-            if not seq_batch:
-                break
+        # One trace logger for the whole run; creating it per batch would reuse
+        # the same second-resolution filename and overwrite earlier batches.
+        trace_logger = None
+        if args.diagnostics:
+            trace_logger = TraceLogger(
+                enabled=True,
+                verbosity=args.diagnostics,
+                output_dir=args.output_dir,
+                worker_id="main",
+                start_timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
+            )
+            trace_logger.__enter__()
 
-            # Create trace logger for single-threaded mode if needed
-            trace_logger = None
-            if args.diagnostics:
-                trace_logger = TraceLogger(
-                    enabled=True,
-                    verbosity=args.diagnostics,
-                    output_dir=args.output_dir,
-                    worker_id="main",
-                    start_timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
-                )
-                trace_logger.__enter__()
+        try:
+            while all_seqs or num_seqs < last_seq_to_output:
+                to_read = sequence_block_size if all_seqs else min(sequence_block_size, last_seq_to_output - num_seqs)
+                seq_batch = list(itertools.islice(seq_records, to_read))
+                if not seq_batch:
+                    break
 
-            write_ops, batch_total, batch_matched, batch_unregistered = process_sequences(
-                seq_batch, parameters, specimens, args, prefilter, trace_logger, num_seqs)
-            
-            for write_op in write_ops:
-                output_write_operation(write_op, output_manager, args, trace_logger)
-            
-            # Close trace logger after processing and writing batch
+                write_ops, batch_total, batch_matched, batch_unregistered = process_sequences(
+                    seq_batch, parameters, specimens, args, prefilter, trace_logger, num_seqs)
+
+                for write_op in write_ops:
+                    output_write_operation(write_op, output_manager, args, trace_logger)
+
+                num_seqs += batch_total
+                total_processed += batch_total
+                total_matched += batch_matched
+                total_unregistered += batch_unregistered
+                pbar.update(batch_total)
+
+                # Update progress with match rate
+                if total_processed > 0:
+                    match_rate = total_matched / total_processed
+                    pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
+
+                if progress_reporter:
+                    progress_reporter.update(total_processed, total_matched, total_seqs)
+        finally:
             if trace_logger:
                 trace_logger.__exit__(None, None, None)
-
-            num_seqs += batch_total
-            total_processed += batch_total
-            total_matched += batch_matched
-            total_unregistered += batch_unregistered
-            pbar.update(batch_total)
-
-            # Update progress with match rate
-            if total_processed > 0:
-                match_rate = total_matched / total_processed
-                pbar.set_description(f"Processing sequences [Match rate: {match_rate:.1%}]")
-
-            if progress_reporter:
-                progress_reporter.update(total_processed, total_matched, total_seqs)
 
         pbar.close()
 
@@ -652,13 +657,13 @@ def setup_match_parameters(args, specimens):
     parameters = MatchParameters(primer_thresholds, max_dist_index, max_search_area, preorient)
 
     if not args.disable_prefilter:
-        if specimens.b_length() > 13:
-            logging.warning("Barcode prefilter not tested for barcodes longer than 13 nt.  You may need to use --disable-prefilter")
         if max_dist_index > 3:
-            logging.warning("Barcode prefilter not tested for edit distance greater than 3.  You may need to use --disable-prefilter")
-        barcode_rcs = barcodes_for_bloom_prefilter(specimens)
-        BloomPrefilter.create_filter(barcode_rcs, parameters.max_dist_index)
-        logging.info("Using Bloom Filter optimization for barcode matching")
+            logging.warning("Prefix index build time grows rapidly with barcode edit distance; "
+                            "the first run may be slow (the built index is cached for reuse). "
+                            "Use --disable-prefilter to skip prefiltering entirely.")
+        pairs = barcode_pairs_for_prefilter(specimens)
+        if PrefixBarcodePrefilter.try_load_or_build(pairs, parameters.max_dist_index):
+            logging.info("Using prefix-index optimization for barcode matching")
     else:
         logging.info("Barcode prefiltering disabled, may run slower")
 

@@ -354,7 +354,7 @@ class TraceEventParser:
                 
                 # Map resolution type to outcome
                 resolution = event.get('resolution_type', 'unknown')
-                if resolution == 'full_match':
+                if resolution in ['full_match', 'dereplicated_full']:
                     match.outcome = "matched"
                 elif resolution in ['partial_forward', 'partial_reverse']:
                     match.outcome = "partial"
@@ -405,15 +405,10 @@ class StatsAggregator:
         
         # Get the data to aggregate
         if count_by == "sequences":
-            # Group by sequence_id and take first match per sequence
-            sequence_matches = {}
-            for match in self.matches:
-                if match.sequence_id not in sequence_matches:
-                    sequence_matches[match.sequence_id] = match
-            data = list(sequence_matches.values())
+            data = self._dedupe_by_sequence()
         else:  # candidate_matches
             data = self.matches
-        
+
         # Build hierarchical tree
         result = self._build_tree(data, dimensions, 0)
         
@@ -429,13 +424,9 @@ class StatsAggregator:
         self._validate_dimensions(dimensions)
         self._validate_count_by(count_by)
         
-        # Get the data to aggregate  
+        # Get the data to aggregate
         if count_by == "sequences":
-            sequence_matches = {}
-            for match in self.matches:
-                if match.sequence_id not in sequence_matches:
-                    sequence_matches[match.sequence_id] = match
-            data = list(sequence_matches.values())
+            data = self._dedupe_by_sequence()
         else:
             data = self.matches
         
@@ -451,6 +442,22 @@ class StatsAggregator:
             "links": links
         }
     
+    def _dedupe_by_sequence(self) -> List[CandidateMatch]:
+        """Reduce to one representative CandidateMatch per sequence.
+
+        Prefer the match that carried the sequence's final resolution over
+        discarded candidates; taking the first match in file order would
+        misattribute a sequence's outcome to a losing candidate.
+        """
+        sequence_matches: Dict[str, CandidateMatch] = {}
+        for match in self.matches:
+            existing = sequence_matches.get(match.sequence_id)
+            if existing is None:
+                sequence_matches[match.sequence_id] = match
+            elif existing.outcome == "discarded" and match.outcome != "discarded":
+                sequence_matches[match.sequence_id] = match
+        return list(sequence_matches.values())
+
     def _validate_dimensions(self, dimensions: List[str]):
         """Validate that all dimensions exist."""
         invalid = [d for d in dimensions if d not in self.available_dimensions]
