@@ -3,7 +3,7 @@
 # These settings match specimux's built-in defaults and serve as
 # a starting point for creating custom profiles.
 
-specimux-version: "0.7.*"
+specimux-version: "0.8.*"
 description: "Default dual-barcode demultiplexing"
 
 specimux:
