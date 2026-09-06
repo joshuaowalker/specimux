@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 _ALPHABET = "ACGT"
+_ALPHABET_SET = frozenset(_ALPHABET)
 _CACHE_FORMAT_VERSION = 2
 # Cap on index key length: bounds build time and index size for long
 # barcodes (a shorter prefix is still a strict superset filter, just less
@@ -46,6 +47,19 @@ def barcode_pairs_for_prefilter(specimens) -> List[Tuple[str, str]]:
                     pairs.append((b, b_rc))
     pairs.sort(key=lambda p: p[0])
     return pairs
+
+
+def _check_barcodes_literal(barcode_pairs: List[Tuple[str, str]]) -> None:
+    """Reject barcodes the index cannot represent.
+
+    Alignment treats IUPAC ambiguity codes as wildcards (constants.IUPAC_EQUIV),
+    but prefix enumeration compares characters literally, so an ambiguous
+    barcode would be under-enumerated and could be filtered out of windows it
+    actually aligns to. Callers degrade to no prefilter on ValueError.
+    """
+    for b, _ in barcode_pairs:
+        if not _ALPHABET_SET.issuperset(b):
+            raise ValueError(f"barcode {b} contains non-ACGT characters")
 
 
 def _enumerate_prefixes(target: str, prefix_len: int, max_dist: int) -> List[str]:
@@ -90,17 +104,31 @@ class PrefixBarcodePrefilter:
         self.max_distance = max_distance
         self.prefix_len = self._prefix_len_for(barcode_pairs, max_distance)
         self._index = index
+        self._all_pairs = tuple(barcode_pairs)
 
     @staticmethod
     def _prefix_len_for(barcode_pairs: List[Tuple[str, str]], max_distance: int) -> int:
         return min(len(barcode_pairs[0][0]) - max_distance, _MAX_PREFIX_LEN)
 
     def candidates(self, sequence: str, start: int) -> tuple:
-        """Barcodes worth aligning at a window beginning at start."""
-        return self._index.get(sequence[start:start + self.prefix_len], ())
+        """Barcodes worth aligning at a window beginning at start.
+
+        Index keys are literal ACGT strings, while alignment lets IUPAC
+        codes in the read (e.g. N) match any base. A window prefix with
+        such characters is not filterable, so every barcode is returned
+        and alignment decides.
+        """
+        key = sequence[start:start + self.prefix_len]
+        found = self._index.get(key)
+        if found is not None:
+            return found
+        if len(key) == self.prefix_len and not _ALPHABET_SET.issuperset(key):
+            return self._all_pairs
+        return ()
 
     @staticmethod
     def build(barcode_pairs: List[Tuple[str, str]], max_distance: int) -> 'PrefixBarcodePrefilter':
+        _check_barcodes_literal(barcode_pairs)
         lengths = {len(b) for b, _ in barcode_pairs}
         if len(lengths) != 1:
             raise ValueError(f"Prefix index requires uniform barcode length, got {sorted(lengths)}")
@@ -152,6 +180,7 @@ class PrefixBarcodePrefilter:
                       quiet: bool = False) -> 'PrefixBarcodePrefilter':
         """Load the index from cache, building and caching it on a miss."""
         log = logging.debug if quiet else logging.info
+        _check_barcodes_literal(barcode_pairs)
         cache_path = cls.get_cache_path(barcode_pairs, max_distance)
         if cache_path.exists():
             try:

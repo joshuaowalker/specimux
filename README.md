@@ -74,7 +74,6 @@ Specimux automatically installs these dependencies:
 - cachetools>=5.3.0 (file handle caching)
 - tqdm>=4.65.0 (progress bars)
 - plotly>=5.0.0 (visualization support)
-- watchdog>=3.0.0 (file system monitoring for specimux-watch)
 - pyyaml>=5.0 (profile system)
 
 Specimux has been tested on MacOS and Linux machines.
@@ -84,7 +83,6 @@ Specimux has been tested on MacOS and Linux machines.
 After installation, specimux provides several command-line tools:
 
 - **`specimux`** - Main demultiplexer for dual barcode and primer matching
-- **`specimux-watch`** - *(Deprecated)* File watcher for live sequencing — use `specimux-suite live` instead
 - **`specimine`** - Mine additional sequences from partial barcode matches
 - **`specimux-convert`** - Convert legacy specimen files to current format
 - **`specimux-stats`** - Analyze trace files to generate statistics
@@ -449,57 +447,6 @@ output/
         └── specimen_001.fastq (500 sequences)
 ```
 
-### Live Sequencing with specimux-watch (Deprecated)
-
-> **Note:** `specimux-watch` is deprecated. Use `specimux-suite live` for live sequencing monitoring with consensus and identification.
-
-For live MinKNOW sequencing workflows, `specimux-watch` automatically monitors a directory and processes new FASTQ files as they are written:
-
-```bash
-specimux-watch primers.fasta specimens.txt /path/to/minknow/output -F -O demux_output/ -d
-```
-
-**Key features:**
-
-- **Automatic detection**: Monitors directory for new `.fastq` files as MinKNOW writes them
-- **File stability checking**: Waits for files to finish writing before processing (default: 30s settle time)
-- **Sequential processing**: Ensures only one file is processed at a time to avoid resource conflicts
-- **Real-time output**: Progress bars and logs display in real-time during processing
-- **State persistence**: Tracks processed files to avoid reprocessing if restarted
-- **Safe restarts**: Ignores pre-existing files on startup, only processes new arrivals
-
-**Common options:**
-
-```bash
-# Basic live sequencing
-specimux-watch primers.fasta specimens.txt watch_dir/ -F -O output/
-
-# Custom settle time for large files
-specimux-watch primers.fasta specimens.txt watch_dir/ -F -O output/ --settle-time 60
-
-# With diagnostics and specific file pattern
-specimux-watch primers.fasta specimens.txt watch_dir/ -F -O output/ -d --pattern "*.fastq"
-
-# Run as background daemon (logs to file)
-specimux-watch primers.fasta specimens.txt watch_dir/ -F -O output/ --daemon
-```
-
-**Behavior:**
-
-- On startup, all existing `.fastq` files in the watch directory are marked as "ignored" and not processed
-- Only files that arrive **after** `specimux-watch` starts are automatically processed
-- Each successfully processed file is recorded in a state file (`.specimux-watch-state.json`)
-- If you need to (re)process an existing file, run `specimux` on it directly
-
-**Use cases:**
-
-- Live demultiplexing during long sequencing runs
-- Processing files as they complete writing
-- Automated pipeline integration
-- Continuous monitoring of sequencing output
-
-All standard `specimux` arguments (edit distances, trimming modes, diagnostics, etc.) are supported and passed through to the demultiplexer.
-
 ### Performance Optimizations
 
 #### Prefix-Index Prefiltering (v0.8)
@@ -692,6 +639,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.8.1 (September 2026): Fix output corruption when a read is written to more than one specimen under dereplication (trimming mutated the shared match, so every output after the first was cut at the wrong offsets). Restore the prefix index's no-false-negative guarantee against IUPAC input: read windows containing ambiguity codes (e.g. N) now fall back to aligning every barcode, and barcodes containing ambiguity codes disable the prefilter instead of silently under-matching. Fix specimens registered under a primer name whose sequence duplicates another primer's being unresolvable (their reads went to unknown as unregistered combinations); duplicate-sequence primers are now treated as aliases with a warning. Remove the deprecated `specimux-watch` command and the watchdog dependency; use `specimux-suite live` instead
 - 0.8.0 (August 2026): Performance overhaul, roughly 3x faster demultiplexing with 3x less CPU (1M-read benchmark: 153s to 49s wall on 8 cores). A prefix inverted index replaces the Bloom filter for barcode prefiltering (exact superset filter with no false negatives, no barcode length limit, removes the pybloomfilter3 dependency); per-primer end matches are computed once per read and reused across primer pairs; orientation detection shares those primer searches instead of running its own; input parsing uses lightweight read records instead of Bio.SeqRecord, with quality kept as the raw phred string end to end; specimen lookups are dict-indexed instead of linear scans; file output no longer fsyncs on every buffer flush. Output is now deterministic across runs (barcode tie-breaks use specimen-file order instead of set iteration order). Fixes silent coordinate corruption for reads shorter than the primer search window, a trace-file overwrite bug in single-threaded runs, missing MATCH_SELECTED/SPECIMEN_RESOLVED trace events on the default dereplication path, duplicate -d3 search events, and specimux-stats misclassifying dereplicated full matches as unknown
 - 0.7.2 (March 2026): Add profile system for reusable parameter presets (`-p/--profile`, `--list-profiles`). Profiles are YAML files stored in `~/.config/specimux/profiles/` or bundled with the package, with version compatibility checking and key validation. Add JSONL progress reporting (`--progress-file`) for integration with orchestration tools. Deprecate `specimux-watch` in favor of `specimux-suite live`
 - 0.7.1 (March 2026): Deduplicate "No Specimens for combo" warning that flooded output with thousands of per-sequence messages. Unregistered barcode combinations now produce a single end-of-run summary warning instead. Per-sequence detail remains available at DEBUG level (-d3). PrimerInfo objects now display their name in log messages instead of memory addresses. Fixes #9

@@ -357,14 +357,13 @@ class CandidateMatch:
         if e == -1: e = min(self.sequence_length, pe + self._barcode_length)
         return (s, e)
     
-    def trim_locations(self, start):
-        """Adjust all location coordinates by start offset."""
-        for b in self._b1_matches: b[1].adjust_start(-1 * start)
-        for b in self._b2_matches: b[1].adjust_start(-1 * start)
-        if self.p1_match:
-            self.p1_match.adjust_start(-1 * start)
-        if self.p2_match:
-            self.p2_match.adjust_start(-1 * start)
+    def get_barcode_location(self, which: Barcode, barcode: str):
+        """Location of a specific matched barcode, or None if it did not match."""
+        matches = self._b1_matches if which is Barcode.B1 else self._b2_matches
+        for b, m, _ in matches:
+            if b == barcode:
+                return m.location()
+        return None
 
 
 class MatchParameters:

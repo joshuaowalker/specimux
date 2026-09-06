@@ -26,8 +26,25 @@ from .prefix_index import PrefixBarcodePrefilter
 from .trace import TraceLogger
 
 
+def _shift_location(location: Optional[Tuple[int, int]], offset: int) -> Optional[Tuple[int, int]]:
+    """Location re-based onto a sequence that starts at offset (None passes through)."""
+    if location is None:
+        return None
+    return (location[0] - offset, location[1] - offset)
+
+
 def create_write_operation(sample_id, args, seq, match, resolution_type, trace_sequence_id=None,
-                           trace_logger: Optional[TraceLogger] = None):
+                           trace_logger: Optional[TraceLogger] = None,
+                           b1: Optional[str] = None, b2: Optional[str] = None):
+    """Build the WriteOperation for one output of a match.
+
+    Pure with respect to match: a single CandidateMatch can back several
+    outputs (e.g. one per specimen after dereplication), so trimming must
+    not alter its coordinates. Trimmed locations are re-based here instead.
+    b1/b2 name the barcodes this output was resolved with, so the reported
+    barcode coordinates belong to that choice rather than to whichever
+    barcode happens to sort first.
+    """
     formatted_seq = seq.seq
     quality = seq.qual if seq.qual is not None else "I" * len(formatted_seq)
 
@@ -70,7 +87,6 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
             )
         formatted_seq = seq.seq[s:e]
         quality = quality[s:e]
-        match.trim_locations(s)
 
     # Get primer names, using "unknown" if not matched
     p1_name = match.get_p1().name if match.get_p1() else "unknown"
@@ -79,16 +95,19 @@ def create_write_operation(sample_id, args, seq, match, resolution_type, trace_s
     # Get pool name - could come from specimen or default to "unknown"
     primer_pool = match.get_pool() if match.get_pool() else "unknown"
 
+    b1_location = match.get_barcode_location(Barcode.B1, b1) if b1 else match.get_barcode1_location()
+    b2_location = match.get_barcode_location(Barcode.B2, b2) if b2 else match.get_barcode2_location()
+
     return WriteOperation(
         sample_id=sample_id,
         seq_id=seq.id,
         distance_code=match.distance_code(),
         sequence=str(formatted_seq),
         quality_sequence=quality,
-        p1_location=match.get_p1_location(),
-        p2_location=match.get_p2_location(),
-        b1_location=match.get_barcode1_location(),
-        b2_location=match.get_barcode2_location(),
+        p1_location=_shift_location(match.get_p1_location(), s),
+        p2_location=_shift_location(match.get_p2_location(), s),
+        b1_location=_shift_location(b1_location, s),
+        b2_location=_shift_location(b2_location, s),
         primer_pool=primer_pool,
         p1_name=p1_name,
         p2_name=p2_name,
@@ -183,7 +202,8 @@ def process_sequences(seq_records: List[Read],
                                     resolution_type.to_string(), pool)
 
                             op = create_write_operation(specimen_id, args, match.sequence, match,
-                                                        resolution_type, sequence_id, trace_logger)
+                                                        resolution_type, sequence_id, trace_logger,
+                                                        b1=b1, b2=b2)
                             if op is not None:
                                 write_ops.append(op)
                             has_full_match = True
@@ -832,9 +852,9 @@ def apply_end_match(match: CandidateMatch, end: 'EndMatch', primer_info: PrimerI
                     reversed_sequence: bool, which_primer: Primer, which_barcode: Barcode) -> None:
     """Copy a (possibly cached) EndMatch into a CandidateMatch.
 
-    AlignmentResults are copied because trim_locations() later mutates the
-    stored objects in place; sharing them across matches would corrupt
-    coordinates when a read yields multiple write operations.
+    AlignmentResults are copied so each CandidateMatch owns its coordinates;
+    the cached EndMatch is shared across every primer pair for the read and
+    must never be reachable through a mutable path.
     """
     if end.primer_match is None:
         return

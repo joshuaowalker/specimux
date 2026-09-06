@@ -7,10 +7,13 @@ negative here silently drops reads, so this is the load-bearing property.
 """
 
 import random
+from pathlib import Path
 
 import edlib
+import pytest
 from Bio.Seq import reverse_complement
 
+from specimux.constants import IUPAC_EQUIV
 from specimux.prefix_index import PrefixBarcodePrefilter
 
 ALPHABET = "ACGT"
@@ -113,3 +116,36 @@ def test_mixed_length_barcodes_degrade_gracefully():
     pairs = [("ACGTACGTACGTA", reverse_complement("ACGTACGTACGTA")),
              ("ACGTACGT", reverse_complement("ACGTACGT"))]
     assert PrefixBarcodePrefilter.try_load_or_build(pairs, 3) is None
+
+
+def test_ambiguous_read_window_falls_back_to_all_barcodes():
+    """A window prefix with an IUPAC code can align to any barcode at zero
+    cost, so the index must hand every barcode to alignment rather than
+    returning none."""
+    rng = random.Random(7)
+    max_dist = 2
+    barcodes = _random_barcodes(8, 13, rng)
+    pairs = [(b, reverse_complement(b)) for b in barcodes]
+    prefilter = PrefixBarcodePrefilter.build(pairs, max_dist)
+
+    b, b_rc = pairs[0]
+    window = "N" + b_rc[1:] + "ACGTACGT"
+    assert edlib.align(b_rc, window, "SHW", "distance", max_dist,
+                       additionalEqualities=IUPAC_EQUIV)["editDistance"] == 0
+    assert set(prefilter.candidates(window, 0)) == set(pairs)
+
+    # A plain ACGT miss still returns nothing
+    assert prefilter.candidates("A" * 40, 0) == ()
+    # A window too short to hold the prefix cannot align either way
+    assert prefilter.candidates(b_rc[:3], 0) == ()
+
+
+def test_iupac_barcode_is_rejected_and_degrades_to_no_prefilter(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    pairs = [("NCGTACGTACGTA", reverse_complement("NCGTACGTACGTA")),
+             ("ACGTACGTACGTT", reverse_complement("ACGTACGTACGTT"))]
+    with pytest.raises(ValueError):
+        PrefixBarcodePrefilter.build(pairs, 1)
+    with pytest.raises(ValueError):
+        PrefixBarcodePrefilter.load_or_build(pairs, 1)
+    assert PrefixBarcodePrefilter.try_load_or_build(pairs, 1) is None

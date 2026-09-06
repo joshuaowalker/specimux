@@ -1,8 +1,8 @@
 """Tests for per-(primer, strand) end-match caching.
 
 The cache shares EndMatch results across CandidateMatches, so assembly
-must hand each match independent AlignmentResult copies: trim_locations()
-mutates stored locations in place, and a shared object would corrupt the
+must hand each match independent AlignmentResult copies: AlignmentResult
+locations are adjustable in place, and a shared object would corrupt the
 coordinates of every other match built from the same cached end.
 """
 
@@ -50,7 +50,9 @@ def test_shared_end_match_is_isolated_between_candidate_matches():
 
     # Mutating one match's coordinates must not leak into the other,
     # nor into the cached EndMatch itself.
-    m1.trim_locations(10)
+    m1.p1_match.adjust_start(-10)
+    for _, bm, _ in m1._b1_matches:
+        bm.adjust_start(-10)
 
     assert m2.get_p1_location() == p1_before
     assert m2.get_barcode1_location() == b1_before
