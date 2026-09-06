@@ -74,7 +74,6 @@ Specimux automatically installs these dependencies:
 - cachetools>=5.3.0 (file handle caching)
 - tqdm>=4.65.0 (progress bars)
 - plotly>=5.0.0 (visualization support)
-- watchdog>=3.0.0 (file system monitoring for specimux-watch)
 - pyyaml>=5.0 (profile system)
 
 Specimux has been tested on MacOS and Linux machines.
@@ -84,7 +83,6 @@ Specimux has been tested on MacOS and Linux machines.
 After installation, specimux provides several command-line tools:
 
 - **`specimux`** - Main demultiplexer for dual barcode and primer matching
-- **`specimux-watch`** - *(Deprecated)* File watcher for live sequencing — use `specimux-suite live` instead
 - **`specimine`** - Mine additional sequences from partial barcode matches
 - **`specimux-convert`** - Convert legacy specimen files to current format
 - **`specimux-stats`** - Analyze trace files to generate statistics
@@ -448,57 +446,6 @@ output/
     └── ITS/
         └── specimen_001.fastq (500 sequences)
 ```
-
-### Live Sequencing with specimux-watch (Deprecated)
-
-> **Note:** `specimux-watch` is deprecated. Use `specimux-suite live` for live sequencing monitoring with consensus and identification.
-
-For live MinKNOW sequencing workflows, `specimux-watch` automatically monitors a directory and processes new FASTQ files as they are written:
-
-```bash
-specimux-watch primers.fasta specimens.txt /path/to/minknow/output -F -O demux_output/ -d
-```
-
-**Key features:**
-
-- **Automatic detection**: Monitors directory for new `.fastq` files as MinKNOW writes them
-- **File stability checking**: Waits for files to finish writing before processing (default: 30s settle time)
-- **Sequential processing**: Ensures only one file is processed at a time to avoid resource conflicts
-- **Real-time output**: Progress bars and logs display in real-time during processing
-- **State persistence**: Tracks processed files to avoid reprocessing if restarted
-- **Safe restarts**: Ignores pre-existing files on startup, only processes new arrivals
-
-**Common options:**
-
-```bash
-# Basic live sequencing
-specimux-watch primers.fasta specimens.txt watch_dir/ -F -O output/
-
-# Custom settle time for large files
-specimux-watch primers.fasta specimens.txt watch_dir/ -F -O output/ --settle-time 60
-
-# With diagnostics and specific file pattern
-specimux-watch primers.fasta specimens.txt watch_dir/ -F -O output/ -d --pattern "*.fastq"
-
-# Run as background daemon (logs to file)
-specimux-watch primers.fasta specimens.txt watch_dir/ -F -O output/ --daemon
-```
-
-**Behavior:**
-
-- On startup, all existing `.fastq` files in the watch directory are marked as "ignored" and not processed
-- Only files that arrive **after** `specimux-watch` starts are automatically processed
-- Each successfully processed file is recorded in a state file (`.specimux-watch-state.json`)
-- If you need to (re)process an existing file, run `specimux` on it directly
-
-**Use cases:**
-
-- Live demultiplexing during long sequencing runs
-- Processing files as they complete writing
-- Automated pipeline integration
-- Continuous monitoring of sequencing output
-
-All standard `specimux` arguments (edit distances, trimming modes, diagnostics, etc.) are supported and passed through to the demultiplexer.
 
 ### Performance Optimizations
 

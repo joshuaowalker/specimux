@@ -175,11 +175,5 @@ def visualize_main():
     visualize.main()
 
 
-def watch_main():
-    """Entry point for specimux-watch command."""
-    from . import watch
-    watch.main()
-
-
 if __name__ == "__main__":
     main()
