@@ -137,6 +137,7 @@ class Specimens:
         # order so queries return specimens in specimen-file order
         self._specimens_by_barcodes = {}  # (b1.upper(), b2.upper()) -> [(index, id, p1s, p2s)]
         self._pool_by_specimen_id = {}  # specimen_id -> pool
+        self._aliased_primer_names = set()  # primer names collapsed onto another sequence's entry
 
     def add_specimen(self, specimen_id: str, pool: str, b1: str, p1: str, b2: str, p2: str):
         """Add a specimen with its barcodes and primers."""
@@ -149,26 +150,23 @@ class Specimens:
 
         self._barcode_length = max(self._barcode_length, len(b1), len(b2))
 
-        # Handle wildcards and get list of possible primers
-        p1_list = self._resolve_primer_name(p1, pool, Primer.FWD)
-        p2_list = self._resolve_primer_name(p2, pool, Primer.REV)
+        # Handle wildcards and get list of possible primers, then collapse
+        # them onto the canonical PrimerInfo per sequence: matching searches
+        # one object per distinct sequence, and specimen lookup compares by
+        # object identity, so every specimen must reference that same object.
+        p1_list = [self._canonical_primer(p) for p in self._resolve_primer_name(p1, pool, Primer.FWD)]
+        p2_list = [self._canonical_primer(p) for p in self._resolve_primer_name(p2, pool, Primer.REV)]
+        p1_list = list(dict.fromkeys(p1_list))
+        p2_list = list(dict.fromkeys(p2_list))
 
-        # Register primers and barcodes
-        for p1_info in p1_list:
-            ps1 = p1_info.primer
-            if ps1 not in self._primers:
-                self._primers[ps1] = p1_info
-            primer_info = self._primers[ps1]
+        # Register barcodes
+        for primer_info in p1_list:
             if b1 not in primer_info.barcodes:
                 primer_info.barcodes.add(b1)
                 primer_info.barcode_pairs.append((b1, reverse_complement(b1)))
             primer_info.specimens.add(specimen_id)
 
-        for p2_info in p2_list:
-            ps2 = p2_info.primer
-            if ps2 not in self._primers:
-                self._primers[ps2] = p2_info
-            primer_info = self._primers[ps2]
+        for primer_info in p2_list:
             if b2 not in primer_info.barcodes:
                 primer_info.barcodes.add(b2)
                 primer_info.barcode_pairs.append((b2, reverse_complement(b2)))
@@ -182,6 +180,28 @@ class Specimens:
         key = (b1.upper(), b2.upper())
         self._specimens_by_barcodes.setdefault(key, []).append((index, specimen_id, p1_list, p2_list))
         self._pool_by_specimen_id[specimen_id] = pool
+
+    def _canonical_primer(self, primer: PrimerInfo) -> PrimerInfo:
+        """The PrimerInfo that represents primer's sequence in this database.
+
+        The first primer registered for a sequence becomes canonical; a later
+        primer with the same sequence under a different name is an alias whose
+        pools are merged into the canonical entry so pool resolution still
+        sees them.
+        """
+        canonical = self._primers.get(primer.primer)
+        if canonical is None:
+            self._primers[primer.primer] = primer
+            return primer
+        if canonical is not primer:
+            if primer.name not in self._aliased_primer_names:
+                self._aliased_primer_names.add(primer.name)
+                logging.warning(f"Primer {primer.name} has the same sequence as {canonical.name}; "
+                                f"treating it as an alias (output will report {canonical.name})")
+            for pool in primer.pools:
+                if pool not in canonical.pools:
+                    canonical.pools.append(pool)
+        return canonical
 
     def prune_unused_pools(self):
         """Remove pools that aren't used by any specimens."""
