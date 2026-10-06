@@ -107,7 +107,12 @@ specimen1   ITS           ACGTACGT   ITS1F       TGCATGCA   ITS4
 specimen2   ITS           GTACGTAC   ITS1F       CATGCATG   ITS4
 ```
 
-3. Run specimux:
+3. Optionally check the primer and specimen files before running (see [Checking Input Files](#checking-input-files)):
+```bash
+specimux --check primers.fasta specimens.txt
+```
+
+4. Run specimux:
 ```bash
 specimux primers.fasta specimens.txt sequences.fastq -F -d
 ```
@@ -193,6 +198,19 @@ specimux primers.fasta specimens.txt sequences.fastq -F --progress-file progress
 ```
 
 Each line is a JSON object with `type` (`"progress"` or `"complete"`), `processed`, `matched`, and `rate` fields. Progress lines are throttled to at most one per second.
+
+## Checking Input Files
+
+`--check` validates the primer and specimen files without a sequence file, so mistakes surface before sequencing data is uploaded or basecalled. It applies the same checks a real run makes when loading these files, reports every problem rather than only the first, and exits 0 if the files are valid or 1 if not:
+
+```bash
+$ specimux --check primers.fasta Index.txt
+primers.fasta:3: Pool ITS has no forward primers (pool ITS contains: ITS4ngsUni)
+Index.txt:2: FwPrimer 'ITS1F' is not in the primers file (similar names: ITS1Fngs) (and 1919 more rows)
+FAILED: 2 problems found
+```
+
+Rows sharing a problem are reported once, at the first such row. Add `--json` for a machine-readable result: an object with `valid`, `primers`, `pools`, `specimens`, and a `problems` list of `{file, line, message, count}` (`line` is null when a problem is not tied to one line).
 
 ## Primer Pool Organization
 
@@ -639,6 +657,7 @@ specimux-convert Index.txt --output-specimen=IndexPP.txt --output-primers=primer
 - `--pool-name`: Name to use for the primer pool (default: pool1)
 
 ## Version History
+- 0.8.2 (October 2026): Add `--check` to validate the primer and specimen files without a sequence file, reporting every problem at once (one `file:line: message` per problem, or `--json`) and exiting nonzero if any are found, so bad inputs can be rejected before data is uploaded or basecalled. Loading errors in real runs now also list every problem in the file rather than only the first, with clearer messages that name the specimen-file column, quote the offending value, and suggest similar primer names
 - 0.8.1 (September 2026): Fix output corruption when a read is written to more than one specimen under dereplication (trimming mutated the shared match, so every output after the first was cut at the wrong offsets). Restore the prefix index's no-false-negative guarantee against IUPAC input: read windows containing ambiguity codes (e.g. N) now fall back to aligning every barcode, and barcodes containing ambiguity codes disable the prefilter instead of silently under-matching. Fix specimens registered under a primer name whose sequence duplicates another primer's being unresolvable (their reads went to unknown as unregistered combinations); duplicate-sequence primers are now treated as aliases with a warning. Remove the deprecated `specimux-watch` command and the watchdog dependency; use `specimux-suite live` instead
 - 0.8.0 (August 2026): Performance overhaul, roughly 3x faster demultiplexing with 3x less CPU (1M-read benchmark: 153s to 49s wall on 8 cores). A prefix inverted index replaces the Bloom filter for barcode prefiltering (exact superset filter with no false negatives, no barcode length limit, removes the pybloomfilter3 dependency); per-primer end matches are computed once per read and reused across primer pairs; orientation detection shares those primer searches instead of running its own; input parsing uses lightweight read records instead of Bio.SeqRecord, with quality kept as the raw phred string end to end; specimen lookups are dict-indexed instead of linear scans; file output no longer fsyncs on every buffer flush. Output is now deterministic across runs (barcode tie-breaks use specimen-file order instead of set iteration order). Fixes silent coordinate corruption for reads shorter than the primer search window, a trace-file overwrite bug in single-threaded runs, missing MATCH_SELECTED/SPECIMEN_RESOLVED trace events on the default dereplication path, duplicate -d3 search events, and specimux-stats misclassifying dereplicated full matches as unknown
 - 0.7.2 (March 2026): Add profile system for reusable parameter presets (`-p/--profile`, `--list-profiles`). Profiles are YAML files stored in `~/.config/specimux/profiles/` or bundled with the package, with version compatibility checking and key validation. Add JSONL progress reporting (`--progress-file`) for integration with orchestration tools. Deprecate `specimux-watch` in favor of `specimux-suite live`

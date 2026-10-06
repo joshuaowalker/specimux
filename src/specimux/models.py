@@ -47,6 +47,24 @@ class Read:
                     self.qual[::-1] if self.qual is not None else None)
 
 
+@dataclass
+class InputProblem:
+    """A problem found while loading a primers or specimen file.
+
+    line is the 1-based line in file, or None when the problem is not tied to
+    one line (e.g. a pool with no forward primers).
+    """
+    file: str
+    line: Optional[int]
+    message: str
+    count: int = 1  # rows sharing this message; line is the first of them
+
+    def __str__(self) -> str:
+        location = f"{self.file}:{self.line}" if self.line is not None else self.file
+        more = f" (and {self.count - 1} more rows)" if self.count > 1 else ""
+        return f"{location}: {self.message}{more}"
+
+
 class PrimerInfo:
     """Information about a primer sequence and its associations."""
 

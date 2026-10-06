@@ -7,8 +7,9 @@ This module contains database classes for managing primers and specimens,
 as well as the barcode prefilter protocol and simple implementations.
 """
 
+import difflib
 import logging
-from typing import Dict, List, Optional, Set, Protocol
+from typing import Dict, Iterable, List, Optional, Set, Protocol
 
 from Bio.Seq import reverse_complement
 
@@ -56,6 +57,10 @@ class PrimerDatabase:
         """Get a primer by name."""
         return self._primers.get(name)
 
+    def get_primer_names(self) -> List[str]:
+        """Get the names of all primers."""
+        return list(self._primers.keys())
+
     def get_primers_in_pool(self, pool: str) -> List[PrimerInfo]:
         """Get all primers in a pool."""
         if pool not in self._pools:
@@ -90,6 +95,17 @@ class PrimerDatabase:
         """Check if a primer is in a pool."""
         return pool in self._pools and primer_name in self._pools[pool]
 
+    def pool_problems(self, pools: Optional[Iterable[str]] = None) -> List[str]:
+        """Describe every pool (or every one of pools) that lacks a forward or a reverse primer."""
+        problems = []
+        for pool in (self._pools if pools is None else pools):
+            # Each pool must have at least one forward and one reverse primer
+            for direction, label in ((Primer.FWD, "forward"), (Primer.REV, "reverse")):
+                if not self._pool_primers[pool][direction]:
+                    members = ", ".join(p.name for p in self.get_primers_in_pool(pool))
+                    problems.append(f"Pool {pool} has no {label} primers (pool {pool} contains: {members})")
+        return problems
+
     def validate_pools(self) -> None:
         """
         Validate pool configurations.
@@ -97,12 +113,9 @@ class PrimerDatabase:
         Raises:
             ValueError: If validation fails
         """
-        for pool in self._pools:
-            # Each pool must have at least one forward and one reverse primer
-            if not self._pool_primers[pool][Primer.FWD]:
-                raise ValueError(f"Pool {pool} has no forward primers")
-            if not self._pool_primers[pool][Primer.REV]:
-                raise ValueError(f"Pool {pool} has no reverse primers")
+        problems = self.pool_problems()
+        if problems:
+            raise ValueError("\n".join(problems))
 
     def get_pool_stats(self) -> Dict:
         """Get statistics about pools and primers."""
@@ -120,6 +133,14 @@ class PrimerDatabase:
             }
 
         return stats
+
+
+class SpecimenError(ValueError):
+    """A specimen could not be added; messages lists every reason."""
+
+    def __init__(self, messages: List[str]):
+        super().__init__("; ".join(messages))
+        self.messages = messages
 
 
 class Specimens:
@@ -140,22 +161,38 @@ class Specimens:
         self._aliased_primer_names = set()  # primer names collapsed onto another sequence's entry
 
     def add_specimen(self, specimen_id: str, pool: str, b1: str, p1: str, b2: str, p2: str):
-        """Add a specimen with its barcodes and primers."""
+        """Add a specimen with its barcodes and primers.
+
+        Raises:
+            SpecimenError: listing every problem with this specimen; the
+                specimen is not added, but its SampleID stays reserved
+        """
+        errors = []
         if specimen_id in self._specimen_ids:
-            raise ValueError(format(f"Duplicate specimen id in index file: {specimen_id}"))
+            errors.append(f"Duplicate SampleID '{specimen_id}'")
+        # Registered even when the row has other problems, so a later
+        # duplicate of it is still reported when collecting all problems
         self._specimen_ids.add(specimen_id)
+        if pool not in self._primer_registry.get_pools():
+            errors.append(f"PrimerPool '{pool}' is not defined in the primers file")
+            p1_found = p2_found = []
+        else:
+            p1_found = self._resolve_or_record(p1, pool, Primer.FWD, errors)
+            p2_found = self._resolve_or_record(p2, pool, Primer.REV, errors)
+        if errors:
+            raise SpecimenError(errors)
 
         # Track active pools
         self._active_pools.add(pool)
 
         self._barcode_length = max(self._barcode_length, len(b1), len(b2))
 
-        # Handle wildcards and get list of possible primers, then collapse
-        # them onto the canonical PrimerInfo per sequence: matching searches
+        # Collapse the resolved primers (wildcards may expand to several) onto
+        # the canonical PrimerInfo per sequence: matching searches
         # one object per distinct sequence, and specimen lookup compares by
         # object identity, so every specimen must reference that same object.
-        p1_list = [self._canonical_primer(p) for p in self._resolve_primer_name(p1, pool, Primer.FWD)]
-        p2_list = [self._canonical_primer(p) for p in self._resolve_primer_name(p2, pool, Primer.REV)]
+        p1_list = [self._canonical_primer(p) for p in p1_found]
+        p2_list = [self._canonical_primer(p) for p in p2_found]
         p1_list = list(dict.fromkeys(p1_list))
         p2_list = list(dict.fromkeys(p2_list))
 
@@ -231,8 +268,19 @@ class Specimens:
                 logging.info(f"Pool {pool}: {pool_stats['forward_primers']} forward, "
                              f"{pool_stats['reverse_primers']} reverse primers")
 
+    def _resolve_or_record(self, primer_name: str, pool: str, direction: Primer,
+                           errors: List[str]) -> List[PrimerInfo]:
+        """Resolve a primer name, appending to errors instead of raising."""
+        try:
+            return self._resolve_primer_name(primer_name, pool, direction)
+        except ValueError as e:
+            errors.append(str(e))
+            return []
+
     def _resolve_primer_name(self, primer_name: str, pool: str, direction: Primer) -> List[PrimerInfo]:
         """Resolve a primer name (including wildcards) to a list of PrimerInfo objects."""
+        column = "FwPrimer" if direction == Primer.FWD else "RvPrimer"
+        label = "forward" if direction == Primer.FWD else "reverse"
         if primer_name == '-' or primer_name == '*':  # Handle wildcards
             # Get all primers in the specified pool and direction
             primers = []
@@ -240,17 +288,20 @@ class Specimens:
                 if p.direction == direction:
                     primers.append(p)
             if not primers:
-                raise ValueError(f"No {direction.name} primers found in pool {pool}")
+                raise ValueError(f"{column} '{primer_name}': pool '{pool}' has no {label} primers")
             return primers
         else:
             # Get specific primer
             primer = self._primer_registry.get_primer(primer_name)
             if not primer:
-                raise ValueError(f"Primer not found: {primer_name}")
+                close = difflib.get_close_matches(primer_name, self._primer_registry.get_primer_names(), n=3)
+                hint = f" (similar names: {', '.join(close)})" if close else ""
+                raise ValueError(f"{column} '{primer_name}' is not in the primers file{hint}")
             if primer.direction != direction:
-                raise ValueError(f"Primer {primer_name} is not a {direction.name} primer")
+                raise ValueError(f"{column} '{primer_name}' is not a {label} primer in the primers file")
             if not self._primer_registry.primer_in_pool(primer_name, pool):
-                raise ValueError(f"Primer {primer_name} is not in pool {pool}")
+                raise ValueError(f"{column} '{primer_name}' is not in pool '{pool}' "
+                                 f"(primers file puts it in: {', '.join(primer.pools)})")
             return [primer]
 
     def specimens_for_barcodes_and_primers(self, b1_list: List[str], b2_list: List[str],

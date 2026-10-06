@@ -20,7 +20,7 @@ def parse_args(argv):
 
     parser.add_argument("primer_file", help="Fasta file containing primer information")
     parser.add_argument("specimen_file", help="TSV file containing specimen mapping with barcodes and primers")
-    parser.add_argument("sequence_file", help="Sequence file in Fasta or Fastq format, gzipped or plain text")
+    parser.add_argument("sequence_file", nargs="?", help="Sequence file in Fasta or Fastq format, gzipped or plain text (not needed with --check)")
 
     parser.add_argument("--min-length", type=int, default=-1, help="Minimum sequence length.  Shorter sequences will be skipped (default: no filtering)")
     parser.add_argument("--max-length", type=int, default=-1, help="Maximum sequence length.  Longer sequences will be skipped (default: no filtering)")
@@ -45,6 +45,11 @@ def parse_args(argv):
                         help="Create subsample directories with top N sequences by average quality score (default: disabled)")
     parser.add_argument("--progress-file", type=str, default=None,
                         help="Write JSONL progress lines to this file (for orchestration tools)")
+    parser.add_argument("--check", action="store_true",
+                        help="Only validate the primer and specimen files, reporting every problem; "
+                             "exits 0 if they are valid, 1 if not. No sequence file is needed")
+    parser.add_argument("--json", action="store_true",
+                        help="With --check, print the result as JSON")
     parser.add_argument("-v", "--version", action="version", version=version())
 
     parser.add_argument('-p', '--profile', type=str, default=None,
@@ -81,6 +86,11 @@ def parse_args(argv):
         # Re-parse to let profile defaults fill in
         parser.set_defaults(**{k: v for k, v in vars(args).items()})
         args = parser.parse_args(cli_args)
+
+    if args.json and not args.check:
+        parser.error("--json requires --check")
+    if args.sequence_file is None and not args.check:
+        parser.error("the following arguments are required: sequence_file")
 
     if args.num_seqs:
         process_num_seqs(args, parser)
@@ -133,6 +143,8 @@ def setup_logging(debug: bool, output_dir: str = None, is_worker: bool = False):
 def main():
     """Main entry point for specimux command."""
     args = parse_args(sys.argv)
+    if args.check:
+        sys.exit(check_main(args))
     setup_logging(args.debug, args.output_dir if args.output_to_files else None)
     
     # Log version and command line used
@@ -149,6 +161,20 @@ def main():
             core.specimux(args, progress_reporter=reporter)     # Use single process for console output
     finally:
         reporter.close()
+
+
+def check_main(args) -> int:
+    """Validate the primer and specimen files; return the exit code."""
+    from .check import check_inputs, format_json, format_text
+
+    # Keep stdout to the check result; only warnings reach stderr
+    setup_logging(args.debug)
+    if not args.debug:
+        logging.getLogger().setLevel(logging.WARNING)
+
+    result = check_inputs(args.primer_file, args.specimen_file)
+    print(format_json(result) if args.json else format_text(result))
+    return 0 if result.valid else 1
 
 
 def specimine_main():
