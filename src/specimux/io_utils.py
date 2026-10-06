@@ -37,8 +37,8 @@ from cachetools import LRUCache
 from tqdm import tqdm
 
 from .constants import Primer, SampleId, TrimMode, ResolutionType
-from .models import PrimerInfo, Read, WriteOperation
-from .databases import PrimerDatabase, Specimens
+from .models import InputProblem, PrimerInfo, Read, WriteOperation
+from .databases import PrimerDatabase, SpecimenError, Specimens
 
 
 class FileHandleCache(LRUCache):
@@ -277,16 +277,62 @@ class OutputManager:
             # Write to pool-level aggregation directory
             self.file_manager.write(pool_full_path, output_content)
 
+def _raise_problems(problems: List[InputProblem]) -> None:
+    """Raise one ValueError listing every problem, if there are any."""
+    if problems:
+        raise ValueError("\n".join(str(p) for p in problems))
+
+
 def read_primers_file(filename: str) -> PrimerDatabase:
     """
     Read primers file and build primer registry
 
     Returns:
         PrimerRegistry object managing all primers and their relationships
+
+    Raises:
+        ValueError: listing every problem found in the file
+    """
+    problems = []
+    registry = load_primers(filename, problems)
+    _raise_problems(problems)
+
+    # Log pool statistics
+    stats = registry.get_pool_stats()
+    logging.info(f"Loaded {stats['total_primers']} primers in {stats['total_pools']} pools")
+    for pool, pool_stats in stats['pools'].items():
+        logging.info(f"Pool {pool}: {pool_stats['forward_primers']} forward, "
+                    f"{pool_stats['reverse_primers']} reverse primers")
+
+    return registry
+
+
+def load_primers(filename: str, problems: List[InputProblem]) -> PrimerDatabase:
+    """
+    Build a primer registry from a primers FASTA file, appending every
+    problem found to problems instead of stopping at the first.
+
+    Primers with problems are left out of the returned registry.
     """
     registry = PrimerDatabase()
 
-    for file_index, record in enumerate(SeqIO.parse(filename, "fasta")):
+    try:
+        # SeqIO does not report line numbers, so map record i to the i-th header
+        with open(filename, 'r') as f:
+            header_lines = [n for n, line in enumerate(f, start=1) if line.startswith('>')]
+        records = list(SeqIO.parse(filename, "fasta"))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        problems.append(InputProblem(filename, None, f"Cannot read primers file: {e}"))
+        return registry
+
+    if not records:
+        problems.append(InputProblem(filename, None, "No primers found; expected FASTA records "
+                                                     "such as '>ITS1F pool=ITS position=forward'"))
+        return registry
+
+    pool_first_line = {}
+    for file_index, record in enumerate(records):
+        line = header_lines[file_index] if file_index < len(header_lines) else None
         name = record.id
         sequence = str(record.seq)
 
@@ -299,90 +345,131 @@ def read_primers_file(filename: str) -> PrimerDatabase:
             if field.startswith("pool="):
                 # Split pool names on either comma or semicolon
                 pool_str = field[5:]
-                pool_names = [p.strip() for p in pool_str.replace(';', ',').split(',')]
+                pool_names = [p.strip() for p in pool_str.replace(';', ',').split(',') if p.strip()]
             elif field.startswith("position="):
                 position = field[9:]
 
+        errors = []
         if not pool_names:
-            raise ValueError(f"Missing pool specification for primer {name}")
+            errors.append(f"Missing pool specification for primer {name}")
         if not position:
-            raise ValueError(f"Missing position specification for primer {name}")
+            errors.append(f"Missing position specification for primer {name}")
+        elif position not in ("forward", "reverse"):
+            errors.append(f"Invalid primer position '{position}' for {name} (expected forward or reverse)")
+        if not sequence:
+            errors.append(f"Primer {name} has no sequence")
+        if errors:
+            problems.extend(InputProblem(filename, line, e) for e in errors)
+            continue
 
-        if position == "forward":
-            direction = Primer.FWD
-        elif position == "reverse":
-            direction = Primer.REV
-        else:
-            raise ValueError(f"Invalid primer position '{position}' for {name}")
+        direction = Primer.FWD if position == "forward" else Primer.REV
 
         # Create PrimerInfo and add to registry
         primer = PrimerInfo(name, sequence, direction, pool_names, file_index=file_index)
-        registry.add_primer(primer, pool_names)
+        try:
+            registry.add_primer(primer, pool_names)
+        except ValueError as e:
+            problems.append(InputProblem(filename, line, str(e)))
+            continue
+        for pool in pool_names:
+            pool_first_line.setdefault(pool, line)
 
     # Validate pool configurations
-    registry.validate_pools()
-
-    # Log pool statistics
-    stats = registry.get_pool_stats()
-    logging.info(f"Loaded {stats['total_primers']} primers in {stats['total_pools']} pools")
-    for pool, pool_stats in stats['pools'].items():
-        logging.info(f"Pool {pool}: {pool_stats['forward_primers']} forward, "
-                    f"{pool_stats['reverse_primers']} reverse primers")
+    for pool in registry.get_pools():
+        for message in registry.pool_problems([pool]):
+            problems.append(InputProblem(filename, pool_first_line.get(pool), message))
 
     return registry
+
 
 def read_specimen_file(filename: str, primer_registry: PrimerDatabase) -> Specimens:
     """
     Read a tab-separated specimen file and return a Specimens object.
     Expected columns: SampleID, PrimerPool, FwIndex, FwPrimer, RvIndex, RvPrimer
+
+    Raises:
+        ValueError: listing every problem found in the file
+    """
+    problems = []
+    specimens = load_specimens(filename, primer_registry, problems)
+    _raise_problems(problems)
+    return specimens
+
+
+SPECIMEN_COLUMNS = ['SampleID', 'PrimerPool', 'FwIndex', 'FwPrimer', 'RvIndex', 'RvPrimer']
+
+
+def load_specimens(filename: str, primer_registry: PrimerDatabase,
+                   problems: List[InputProblem]) -> Specimens:
+    """
+    Read a tab-separated specimen file, appending every problem found to
+    problems instead of stopping at the first.
+
+    Rows sharing the same problem (e.g. 1,920 rows naming one missing primer)
+    are reported once, at the first such row, with a count.
     """
     specimens = Specimens(primer_registry)
+    row_problems: Dict[str, List[int]] = {}  # message -> line numbers, in file order
 
-    expected_columns = {'SampleID', 'PrimerPool', 'FwIndex', 'FwPrimer', 'RvIndex', 'RvPrimer'}
+    def record(line: int, message: str):
+        row_problems.setdefault(message, []).append(line)
 
-    with open(filename, 'r', newline='') as f:
-        reader = csv.DictReader(f, delimiter='\t')
+    rows_read = 0
+    try:
+        with open(filename, 'r', newline='') as f:
+            reader = csv.DictReader(f, delimiter='\t')
 
-        # Validate columns
-        missing_cols = expected_columns - set(reader.fieldnames)
-        if missing_cols:
-            raise ValueError(f"Missing required columns in specimen file: {missing_cols}")
+            if reader.fieldnames is None:
+                problems.append(InputProblem(filename, None, "Specimen file is empty"))
+                return specimens
 
-        empty_barcode_errors = []
-        for row_num, row in enumerate(reader, start=1):
-            try:
+            # Validate columns
+            missing_cols = [c for c in SPECIMEN_COLUMNS if c not in reader.fieldnames]
+            if missing_cols:
+                problems.append(InputProblem(
+                    filename, 1,
+                    f"Missing required columns: {', '.join(missing_cols)} "
+                    f"(header has: {', '.join(reader.fieldnames)}; the file must be tab-separated)"))
+                return specimens
+
+            for row in reader:
+                rows_read += 1
+                line = reader.line_num
+                if any(row[c] is None for c in SPECIMEN_COLUMNS):
+                    present = sum(1 for v in row.values() if v is not None)
+                    record(line, f"Row has {present} fields but the header has {len(reader.fieldnames)}")
+                    continue
+
                 b1 = row['FwIndex'].upper()
                 b2 = row['RvIndex'].upper()
 
-                # Check for empty barcodes (single-indexed demultiplexing not supported)
-                if not b1.strip() or not b2.strip():
-                    empty_barcode_errors.append(
-                        f"Row {row_num} ({row['SampleID']}): "
-                        f"{'FwIndex is empty' if not b1.strip() else 'RvIndex is empty'}"
+                # Single-indexed demultiplexing is not supported
+                for column, barcode in (('FwIndex', b1), ('RvIndex', b2)):
+                    if not barcode.strip():
+                        record(line, f"{column} is empty (single-indexed demultiplexing is not supported)")
+
+                try:
+                    specimens.add_specimen(
+                        specimen_id=row['SampleID'],
+                        pool=row['PrimerPool'],
+                        b1=b1,
+                        p1=row['FwPrimer'],
+                        b2=b2,
+                        p2=row['RvPrimer']
                     )
-                    continue
+                except SpecimenError as e:
+                    for message in e.messages:
+                        record(line, message)
+    except (OSError, UnicodeDecodeError, csv.Error) as e:
+        problems.append(InputProblem(filename, None, f"Cannot read specimen file: {e}"))
+        return specimens
 
-                specimens.add_specimen(
-                    specimen_id=row['SampleID'],
-                    pool=row['PrimerPool'],
-                    b1=b1,
-                    p1=row['FwPrimer'],
-                    b2=b2,
-                    p2=row['RvPrimer']
-                )
-            except (KeyError, ValueError) as e:
-                raise ValueError(f"Error processing row {row_num}: {e}")
+    # Messages were inserted in order of first occurrence, so this is file order
+    for message, lines in row_problems.items():
+        problems.append(InputProblem(filename, lines[0], message, count=len(lines)))
 
-        if empty_barcode_errors:
-            raise ValueError(
-                f"Empty barcodes found in {len(empty_barcode_errors)} specimen(s). "
-                f"Single-indexed demultiplexing is not supported.\n"
-                + "\n".join(empty_barcode_errors[:10])
-                + (f"\n... and {len(empty_barcode_errors) - 10} more" if len(empty_barcode_errors) > 10 else "")
-            )
-
-    if len(specimens._specimens) == 0:
-        raise ValueError("No valid data found in the specimen file")
+    if rows_read == 0:
+        problems.append(InputProblem(filename, None, "No specimens found in the specimen file"))
 
     return specimens
 

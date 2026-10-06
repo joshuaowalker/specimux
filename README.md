@@ -107,7 +107,12 @@ specimen1   ITS           ACGTACGT   ITS1F       TGCATGCA   ITS4
 specimen2   ITS           GTACGTAC   ITS1F       CATGCATG   ITS4
 ```
 
-3. Run specimux:
+3. Optionally check the primer and specimen files before running (see [Checking Input Files](#checking-input-files)):
+```bash
+specimux --check primers.fasta specimens.txt
+```
+
+4. Run specimux:
 ```bash
 specimux primers.fasta specimens.txt sequences.fastq -F -d
 ```
@@ -193,6 +198,19 @@ specimux primers.fasta specimens.txt sequences.fastq -F --progress-file progress
 ```
 
 Each line is a JSON object with `type` (`"progress"` or `"complete"`), `processed`, `matched`, and `rate` fields. Progress lines are throttled to at most one per second.
+
+## Checking Input Files
+
+`--check` validates the primer and specimen files without a sequence file, so mistakes surface before sequencing data is uploaded or basecalled. It applies the same checks a real run makes when loading these files, reports every problem rather than only the first, and exits 0 if the files are valid or 1 if not:
+
+```bash
+$ specimux --check primers.fasta Index.txt
+primers.fasta:3: Pool ITS has no forward primers (pool ITS contains: ITS4ngsUni)
+Index.txt:2: FwPrimer 'ITS1F' is not in the primers file (similar names: ITS1Fngs) (and 1919 more rows)
+FAILED: 2 problems found
+```
+
+Rows sharing a problem are reported once, at the first such row. Add `--json` for a machine-readable result: an object with `valid`, `primers`, `pools`, `specimens`, and a `problems` list of `{file, line, message, count}` (`line` is null when a problem is not tied to one line).
 
 ## Primer Pool Organization
 
